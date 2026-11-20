@@ -40,7 +40,7 @@ const (
 )
 
 var (
-	hostIDFormat = regexp.MustCompile(`^[0-9]{1,12}$`)
+	hostIDFormat = regexp.MustCompile(`^\d{1,12}$`)
 	statuses     = map[string]string{"new": "New", "active": "Active", "re-opened": "Re-Opened", "fixed": "Fixed"}
 )
 

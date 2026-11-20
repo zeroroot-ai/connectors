@@ -34,7 +34,8 @@ func TestSecretNeverPrints(t *testing.T) {
 }
 
 func TestEnv(t *testing.T) {
-	e := NewEnvFrom(map[string]string{"URL": "https://u:p@h/x", "N": "99", "D": "5s"})
+	// The URL holds a password on purpose: the test checks that no error shows it.
+	e := NewEnvFrom(map[string]string{"URL": "https://u:p@h/x", "N": "99", "D": "5s"}) //nolint:gosec // test input
 	e.Require("MISSING")
 	e.URL("URL")
 	e.Int("N", 1, 1, 10)
@@ -185,7 +186,7 @@ func TestClientNoRedirectAndEscapedPath(t *testing.T) {
 func TestClientLimitsBodyAndErrorSnippet(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/base/err" {
-			w.WriteHeader(400)
+			w.WriteHeader(http.StatusBadRequest)
 		}
 		_, _ = w.Write([]byte(strings.Repeat("z", 2000)))
 	}), ClientOptions{MaxBody: 1000})
@@ -237,7 +238,7 @@ func TestClientCredentials(t *testing.T) {
 func TestHandlerHealth(t *testing.T) {
 	h := NewHandler("t", "1", func(*mcp.Server) {}, slog.New(slog.DiscardHandler))
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, HealthPath, nil))
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, HealthPath, http.NoBody))
 	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "ok") {
 		t.Errorf("health = %d %s", rr.Code, rr.Body)
 	}

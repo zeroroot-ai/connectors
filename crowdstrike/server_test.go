@@ -69,7 +69,7 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"meta":{"query_time":0.01,"trace_id":"t"},"errors":[],"resources":[{"id":"` + aid + `","path":"/devices/entities/devices/v2?ids=` + aid + `"}]}`))
 }
 
-func setup(t *testing.T) (*mock, func(string, map[string]any) (bool, string), map[string]*mcp.Tool) {
+func setup(t *testing.T) (srv *mock, call func(string, map[string]any) (bool, string), tools map[string]*mcp.Tool) {
 	t.Helper()
 	m := &mock{}
 	ts := httptest.NewServer(m)

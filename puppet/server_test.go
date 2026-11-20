@@ -81,7 +81,7 @@ func baseEnv(url string) map[string]string {
 	}
 }
 
-func setup(t *testing.T) (*mock, func(string, map[string]any) (bool, string), map[string]*mcp.Tool) {
+func setup(t *testing.T) (srv *mock, call func(string, map[string]any) (bool, string), tools map[string]*mcp.Tool) {
 	t.Helper()
 	m := &mock{}
 	ts := httptest.NewTLSServer(m)

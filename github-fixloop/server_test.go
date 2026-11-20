@@ -84,7 +84,7 @@ const (
 	ref       = "acme/shop#7"
 )
 
-func pullJSON(state string, merged bool, mergeable string, ms string, head string) string {
+func pullJSON(state string, merged bool, mergeable, ms, head string) string {
 	return `{"number":7,"title":"Fix SQL injection","state":"` + state + `","merged":` + boolStr(merged) + `,` +
 		`"html_url":"https://github.com/acme/shop/pull/7","merged_at":` + nullable(merged, "2026-11-20T09:00:00Z") + `,` +
 		`"closed_at":` + nullable(state == "closed", "2026-11-20T07:00:00Z") + `,"updated_at":"2026-11-20T08:00:00Z",` +
@@ -110,7 +110,7 @@ func openPR(ms string) string { return pullJSON("open", false, "true", ms, headS
 
 var mergedPR = pullJSON("closed", true, "null", "unknown", headSHA)
 
-func checks(runs string, statusState string, statusTotal int) map[string]handler {
+func checks(runs, statusState string, statusTotal int) map[string]handler {
 	total := strings.Count(runs, `"status"`)
 	return map[string]handler{
 		"GET " + repo + "/commits/" + headSHA + "/check-runs": reply(200, `{"total_count":`+itoa(total)+`,"check_runs":[`+runs+`]}`),
@@ -127,14 +127,14 @@ const (
 	queuedRun  = `{"name":"lint","status":"in_progress","conclusion":null}`
 )
 
-func merge(route map[string]handler, more map[string]handler) map[string]handler {
+func merge(route, more map[string]handler) map[string]handler {
 	for k, v := range more {
 		route[k] = v
 	}
 	return route
 }
 
-func setup(t *testing.T, routes map[string]handler) (*mock, func(string, map[string]any) (bool, string, map[string]any)) {
+func setup(t *testing.T, routes map[string]handler) (srv *mock, call func(string, map[string]any) (isErr bool, text string, out map[string]any)) {
 	t.Helper()
 	mergeableWait = 0
 	m := &mock{routes: routes}
@@ -451,7 +451,7 @@ func revertPR(state string, merged bool) string {
 		`,"mergeable":true,"mergeable_state":"clean","head":{"sha":"` + revSHA + `","ref":"` + revertBranch + `"},"base":{"ref":"main"}}`
 }
 
-func revertRoutes(found string, revertChecks string) map[string]handler {
+func revertRoutes(found, revertChecks string) map[string]handler {
 	merged := false
 	routes := map[string]handler{
 		"GET " + pr7:                          reply(200, mergedPR),

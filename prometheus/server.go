@@ -211,7 +211,7 @@ func (v *service) queryRange(ctx context.Context, _ *mcp.CallToolRequest, in ran
 	case step < time.Second/1000:
 		return nil, out, fmt.Errorf("%w: step is too small", kit.ErrInvalidInput)
 	case float64(end.Sub(start))/float64(step) > maxPoints:
-		return nil, out, fmt.Errorf("%w: the range holds more than %d points. Use a larger step.", kit.ErrInvalidInput, maxPoints)
+		return nil, out, fmt.Errorf("%w: the range holds more than %d points. Use a larger step", kit.ErrInvalidInput, maxPoints)
 	}
 	form := url.Values{"query": {in.Query}, "start": {in.Start}, "end": {in.End}, "step": {in.Step},
 		"limit": {strconv.Itoa(limit)}}

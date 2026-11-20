@@ -16,7 +16,8 @@ import (
 const uid = "00ub0oNGTSWTBKOLGLNR"
 
 // The mock follows the Okta Management API:
-// https://developer.okta.com/docs/api/openapi/okta-management/management/
+// https://developer.okta.com/docs/api/openapi/okta-management/management/tag/UserSessions/ and
+// https://developer.okta.com/docs/api/openapi/okta-management/management/tag/UserLifecycle/
 // and the OpenAPI spec https://github.com/okta/okta-management-openapi-spec.
 // Revoke sessions answers 204. Suspend and unsuspend answer 200 with an empty
 // body. A user in the wrong state gets 400 with the Okta error object. An
@@ -60,7 +61,7 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func setup(t *testing.T) (*mock, func(string, map[string]any) (bool, string), map[string]*mcp.Tool) {
+func setup(t *testing.T) (srv *mock, call func(string, map[string]any) (bool, string), tools map[string]*mcp.Tool) {
 	t.Helper()
 	m := &mock{status: "ACTIVE"}
 	ts := httptest.NewTLSServer(m)
@@ -71,7 +72,7 @@ func setup(t *testing.T) (*mock, func(string, map[string]any) (bool, string), ma
 		t.Fatal(err)
 	}
 	cs := kittest.Connect(t, register)
-	call := func(tool string, args map[string]any) (bool, string) {
+	call = func(tool string, args map[string]any) (bool, string) {
 		res := kittest.Call(t, cs, tool, args)
 		return res.IsError, kittest.Text(t, res)
 	}

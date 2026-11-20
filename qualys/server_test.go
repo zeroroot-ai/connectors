@@ -85,7 +85,7 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(sampleXML))
 }
 
-func setup(t *testing.T, pass string) (*mock, func(string, map[string]any) (bool, string)) {
+func setup(t *testing.T, pass string) (srv *mock, call func(string, map[string]any) (bool, string)) {
 	t.Helper()
 	m := &mock{}
 	ts := httptest.NewTLSServer(m)

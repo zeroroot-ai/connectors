@@ -13,7 +13,7 @@ MCP server for response actions on Okta users. The vendor server of Okta only re
 
 ## Tools
 
-Reference: https://developer.okta.com/docs/api/openapi/okta-management/management/ and the OpenAPI spec https://github.com/okta/okta-management-openapi-spec.
+Reference: https://developer.okta.com/docs/api/openapi/okta-management/management/tag/UserSessions/ and https://developer.okta.com/docs/api/openapi/okta-management/management/tag/UserLifecycle/, and the OpenAPI spec https://github.com/okta/okta-management-openapi-spec.
 
 | Tool | Vendor call | Undo | Annotations |
 |---|---|---|---|

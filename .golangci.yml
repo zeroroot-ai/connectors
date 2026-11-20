@@ -46,6 +46,12 @@ linters:
     exhaustive:
       default-signifies-exhaustive: false
       check: [switch]
+    wrapcheck:
+      # An error from an internal package of this module is already one of ours:
+      # kit.CheckString and kit.CheckRange return kit.ErrInvalidInput with the
+      # name of the field. A second wrap would only repeat the text.
+      ignore-package-globs:
+        - github.com/zeroroot-ai/connectors/internal/*
     gocyclo:
       min-complexity: 20
     dupl:

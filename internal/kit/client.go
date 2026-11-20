@@ -171,7 +171,7 @@ func (c *Client) DoBytes(ctx context.Context, r Request) ([]byte, error) {
 	}
 }
 
-func encodeBody(r Request) ([]byte, string, error) {
+func encodeBody(r Request) (body []byte, contentType string, err error) {
 	switch {
 	case r.JSON != nil:
 		b, err := json.Marshal(r.JSON)

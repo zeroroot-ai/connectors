@@ -149,12 +149,12 @@ type glMR struct {
 
 // parseRef reads the project path and the number from the URL of a merge
 // request on this host, or from its short reference group/project!12.
-func (v *service) parseRef(raw string) (string, int, error) {
+func (v *service) parseRef(raw string) (project string, number int, err error) {
 	if err := kit.CheckString("merge_request", raw, maxRefLen, nil); err != nil {
 		return "", 0, err
 	}
 	bad := fmt.Errorf("%w: merge_request must be a merge request URL of the GitLab server, or group/project!12", kit.ErrInvalidInput)
-	if m := shortRef.FindStringSubmatch(raw); m != nil && fixloop.ValidPath(m[1]) {
+	if m := shortRef.FindStringSubmatch(raw); len(m) == 3 && fixloop.ValidPath(m[1]) {
 		n, _ := strconv.Atoi(m[2])
 		return m[1], n, nil
 	}
@@ -402,7 +402,7 @@ func (v *service) revertMergeRequest(ctx context.Context, _ *mcp.CallToolRequest
 		return nil, out, fmt.Errorf("%w: the merge request is not merged, so there is nothing to revert", kit.ErrInvalidInput)
 	case commit == "":
 		return nil, out, errors.New("GitLab gives no merge commit or squash commit for this merge request. " +
-			"A fast-forward merge has neither. Revert the commits by hand.")
+			"A fast-forward merge has neither, so revert the commits by hand")
 	}
 	branch := "zeroroot/revert-mr" + strconv.Itoa(iid) + "-" + commit[:8]
 	revertIID, err := v.findOrOpenRevert(ctx, project, orig, commit, branch)

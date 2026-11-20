@@ -25,15 +25,15 @@ var (
 	Alnum = regexp.MustCompile(`^[A-Za-z0-9]+$`)
 )
 
-// CheckString refuses an empty value, a value longer than max bytes, a value
+// CheckString refuses an empty value, a value longer than limit bytes, a value
 // that is not valid UTF-8, a value that holds a control character, and a value
 // that does not match re (when re is not nil).
-func CheckString(field, v string, max int, re *regexp.Regexp) error {
+func CheckString(field, v string, limit int, re *regexp.Regexp) error {
 	switch {
 	case v == "":
 		return fmt.Errorf("%w: %s is required", ErrInvalidInput, field)
-	case len(v) > max:
-		return fmt.Errorf("%w: %s is longer than %d bytes", ErrInvalidInput, field, max)
+	case len(v) > limit:
+		return fmt.Errorf("%w: %s is longer than %d bytes", ErrInvalidInput, field, limit)
 	case !utf8.ValidString(v):
 		return fmt.Errorf("%w: %s is not valid UTF-8", ErrInvalidInput, field)
 	}

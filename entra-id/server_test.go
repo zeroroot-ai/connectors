@@ -64,7 +64,7 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func setup(t *testing.T) (*mock, func(string, map[string]any) (bool, string), map[string]*mcp.Tool) {
+func setup(t *testing.T) (srv *mock, call func(string, map[string]any) (bool, string), tools map[string]*mcp.Tool) {
 	t.Helper()
 	m := &mock{enabled: true}
 	ts := httptest.NewServer(m)

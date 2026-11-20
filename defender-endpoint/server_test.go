@@ -70,7 +70,7 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		`","computerDnsName":"desktop-test","creationDateTimeUtc":"2026-11-20T14:39:38Z","relatedFileInfo":null}`))
 }
 
-func setup(t *testing.T) (*mock, func(string, map[string]any) (bool, string), map[string]*mcp.Tool) {
+func setup(t *testing.T) (srv *mock, call func(string, map[string]any) (bool, string), tools map[string]*mcp.Tool) {
 	t.Helper()
 	m := &mock{}
 	ts := httptest.NewServer(m)

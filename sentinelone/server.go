@@ -27,7 +27,7 @@ import (
 
 // agentID is the id of an agent in SentinelOne: a decimal number of 18 or 19
 // digits. The pattern is wider so that it holds an id of another length.
-var agentID = regexp.MustCompile(`^[0-9]{10,24}$`)
+var agentID = regexp.MustCompile(`^\d{10,24}$`)
 
 func build(env *kit.Env, log *slog.Logger) (func(*mcp.Server), error) {
 	return buildWith(env, log, nil)

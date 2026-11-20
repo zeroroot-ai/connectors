@@ -42,7 +42,7 @@ var (
 	envFormat  = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 	// certname is the name of a node. Puppet lower-cases it.
 	certname = regexp.MustCompile(`^[a-z0-9]([a-z0-9._-]{0,250}[a-z0-9])?$`)
-	jobID    = regexp.MustCompile(`^[0-9]{1,12}$`)
+	jobID    = regexp.MustCompile(`^\d{1,12}$`)
 )
 
 type taskSpec struct {

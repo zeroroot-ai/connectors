@@ -17,7 +17,8 @@ import (
 
 // The tools follow the Okta Management API (OpenAPI spec of Okta,
 // https://github.com/okta/okta-management-openapi-spec, and the reference at
-// https://developer.okta.com/docs/api/openapi/okta-management/management/):
+// https://developer.okta.com/docs/api/openapi/okta-management/management/tag/UserSessions/ and
+// https://developer.okta.com/docs/api/openapi/okta-management/management/tag/UserLifecycle/):
 //   - DELETE /api/v1/users/{userId}/sessions                (revokeUserSessions, 204)
 //   - POST   /api/v1/users/{id}/lifecycle/suspend           (suspendUser, 200)
 //   - POST   /api/v1/users/{id}/lifecycle/unsuspend         (unsuspendUser, 200)

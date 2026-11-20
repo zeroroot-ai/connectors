@@ -56,7 +56,7 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func setup(t *testing.T, extra map[string]string) (*mock, func(string, map[string]any) (bool, string)) {
+func setup(t *testing.T, extra map[string]string) (srv *mock, call func(string, map[string]any) (bool, string)) {
 	t.Helper()
 	m := &mock{}
 	ts := httptest.NewServer(m)
@@ -223,7 +223,7 @@ const healthSince = "2026-11-20T10:00:00Z"
 func series(start, step, n int, v string, zeros ...int) string {
 	var b strings.Builder
 	b.WriteString(`{"metric":{"service":"api"},"values":[`)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if i > 0 {
 			b.WriteString(",")
 		}
@@ -243,9 +243,9 @@ func matrix(parts ...string) string {
 	return `{"status":"success","data":{"resultType":"matrix","result":[` + strings.Join(parts, ",") + `]}}`
 }
 
-func healthSetup(t *testing.T, now string, queries map[string]string, body string) (*int, func(map[string]any) (bool, string, map[string]any)) {
+func healthSetup(t *testing.T, now string, queries map[string]string, body string) (calls *int, call func(map[string]any) (isErr bool, text string, out map[string]any)) {
 	t.Helper()
-	calls := new(int)
+	calls = new(int)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		*calls++
 		w.Header().Set("Content-Type", "application/json")

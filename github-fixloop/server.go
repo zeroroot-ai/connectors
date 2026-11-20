@@ -188,7 +188,7 @@ func (v *service) parseRef(raw string) (prRef, error) {
 		return prRef{}, err
 	}
 	bad := fmt.Errorf("%w: merge_request must be a pull request URL of the GitHub server, or owner/repo#12", kit.ErrInvalidInput)
-	if m := shortRef.FindStringSubmatch(raw); m != nil && validRepo(m[2]) {
+	if m := shortRef.FindStringSubmatch(raw); len(m) == 4 && validRepo(m[2]) {
 		n, _ := strconv.Atoi(m[3])
 		return prRef{m[1], m[2], n}, nil
 	}
@@ -530,7 +530,7 @@ func (v *service) findOrOpenRevert(ctx context.Context, r prRef, orig *ghPR, bra
 	case errors.As(err, &ae) && ae.Status == http.StatusNotFound:
 		if tip.Object.SHA != commit {
 			return nil, errors.New("the base branch has commits after the merge commit. A revert that uses the tree of the " +
-				"parent would drop them. Revert by hand.")
+				"parent would drop them, so revert by hand")
 		}
 		if err := v.createRevertBranch(ctx, r, orig, commit, branch); err != nil {
 			return nil, err

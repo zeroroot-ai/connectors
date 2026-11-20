@@ -93,7 +93,7 @@ const mergedMR = `{"iid":7,"title":"Fix SQL injection","state":"merged","web_url
 	`"merged_at":"2026-11-20T09:00:00.000Z","updated_at":"2026-11-20T09:00:00.000Z",` +
 	`"head_pipeline":{"id":1,"sha":"` + headSHA + `","status":"success"}}`
 
-func setup(t *testing.T, routes map[string]func(http.ResponseWriter, *http.Request, map[string]any)) (*mock, func(string, map[string]any) (bool, string, map[string]any)) {
+func setup(t *testing.T, routes map[string]func(http.ResponseWriter, *http.Request, map[string]any)) (srv *mock, call func(string, map[string]any) (isErr bool, text string, out map[string]any)) {
 	t.Helper()
 	m := &mock{routes: routes}
 	ts := httptest.NewServer(m)
@@ -330,7 +330,7 @@ const (
 		`"head_pipeline":{"id":2,"sha":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","status":"success"}}`
 )
 
-func revertRoutes(found string, revertMR string) map[string]func(http.ResponseWriter, *http.Request, map[string]any) {
+func revertRoutes(found, revertMR string) map[string]func(http.ResponseWriter, *http.Request, map[string]any) {
 	return map[string]func(http.ResponseWriter, *http.Request, map[string]any){
 		"GET " + api + mr7:                                            reply(200, mergedMR),
 		"GET " + api + "/merge_requests":                              reply(200, found),
