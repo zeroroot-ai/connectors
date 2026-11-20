@@ -25,6 +25,15 @@ A tool accepts a user id only: 20 letters and digits. It does not accept a login
 
 `revoke_user_sessions` has no undo. Okta cannot restore a session. The user restores access by signing in. The issue of this server (gibson#1548) asked for a release tool on each action. That cannot hold for a session, so the tool says so in its description and carries `destructiveHint: true`.
 
+## Deployment requirement
+
+The MCP endpoint on `:8080` has no caller authentication. Any caller that reaches the port can call each tool with the vendor credential of this server. The ToolHive proxy of the connector authenticates the daemon in front of it.
+
+1. Apply a NetworkPolicy that admits ingress to this port only from the ToolHive proxy pod of the connector.
+2. Do not expose the port through a Service of type `LoadBalancer` or `NodePort`, an Ingress or a port-forward.
+
+The server has no second authentication scheme, by design. The proxy and the NetworkPolicy are the access control.
+
 ## Vendor permission
 
 Okta lists two forms of authorization for these three operations: an API token (`apiToken`) or an OAuth 2.0 token with the scope `okta.users.manage`.

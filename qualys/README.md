@@ -26,6 +26,15 @@ The tool takes one host id or one IP address, and optional filters: `status`, `m
 
 A detection is a flaw on a host, so a reader can turn it into a finding. A fixed detection stays in the list when you ask for the status `Fixed`. The tool does not use the Knowledge Base API, so it does not return the title or the CVE of a QID.
 
+## Deployment requirement
+
+The MCP endpoint on `:8080` has no caller authentication. Any caller that reaches the port can call each tool with the vendor credential of this server. The ToolHive proxy of the connector authenticates the daemon in front of it.
+
+1. Apply a NetworkPolicy that admits ingress to this port only from the ToolHive proxy pod of the connector.
+2. Do not expose the port through a Service of type `LoadBalancer` or `NodePort`, an Ingress or a port-forward.
+
+The server has no second authentication scheme, by design. The proxy and the NetworkPolicy are the access control.
+
 ## Vendor permission
 
 Use a Qualys user with the role Reader and the permission "API Access", and assign it only the asset groups that the agent may read. The guide says that the API returns only the hosts that are assigned to the user through asset groups. A Reader needs no write permission. Do not use a Manager.

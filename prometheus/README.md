@@ -52,6 +52,15 @@ The tool runs the query as a range query from `since` to `since + hold_seconds`,
 
 An absent metric is a failure and not a pass. A service that stops to report fails its hold time.
 
+## Deployment requirement
+
+The MCP endpoint on `:8080` has no caller authentication. Any caller that reaches the port can call each tool with the vendor credential of this server. The ToolHive proxy of the connector authenticates the daemon in front of it.
+
+1. Apply a NetworkPolicy that admits ingress to this port only from the ToolHive proxy pod of the connector.
+2. Do not expose the port through a Service of type `LoadBalancer` or `NodePort`, an Ingress or a port-forward.
+
+The server has no second authentication scheme, by design. The proxy and the NetworkPolicy are the access control.
+
 ## Vendor permission
 
 Prometheus has no scope or role model. The server needs network access to three read endpoints: `/api/v1/query`, `/api/v1/query_range` and `/api/v1/alerts`. Put a reverse proxy in front of Prometheus and let it pass only these three paths. The server does not use the admin API, the write API or the management API (`/-/`).

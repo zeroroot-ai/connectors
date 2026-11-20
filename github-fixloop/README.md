@@ -81,6 +81,15 @@ Limits:
 - The tool does not wait for the checks. The caller calls it again.
 - The commit has the author of the token. GitHub shows it as unverified unless the token belongs to a GitHub App that signs commits.
 
+## Deployment requirement
+
+The MCP endpoint on `:8080` has no caller authentication. Any caller that reaches the port can call each tool with the vendor credential of this server. The ToolHive proxy of the connector authenticates the daemon in front of it.
+
+1. Apply a NetworkPolicy that admits ingress to this port only from the ToolHive proxy pod of the connector.
+2. Do not expose the port through a Service of type `LoadBalancer` or `NodePort`, an Ingress or a port-forward.
+
+The server has no second authentication scheme, by design. The proxy and the NetworkPolicy are the access control.
+
 ## Vendor permission
 
 Use a fine-grained token or a GitHub App installation, for the repositories that the agents fix and no others. It needs these repository permissions.

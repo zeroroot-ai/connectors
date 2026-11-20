@@ -77,6 +77,15 @@ Limits:
 - A project without a pipeline has no head pipeline. The tool opens the revert merge request and never merges it.
 - The tool does not wait for the pipeline. The caller calls it again.
 
+## Deployment requirement
+
+The MCP endpoint on `:8080` has no caller authentication. Any caller that reaches the port can call each tool with the vendor credential of this server. The ToolHive proxy of the connector authenticates the daemon in front of it.
+
+1. Apply a NetworkPolicy that admits ingress to this port only from the ToolHive proxy pod of the connector.
+2. Do not expose the port through a Service of type `LoadBalancer` or `NodePort`, an Ingress or a port-forward.
+
+The server has no second authentication scheme, by design. The proxy and the NetworkPolicy are the access control.
+
 ## Vendor permission
 
 The scope `api` of the access token. GitLab has no finer scope for a merge, a branch, a commit or a merge request write. Use a project access token with the role Developer, or Maintainer when the protected target branch allows only Maintainers to merge. Give the token to the projects that the agents fix and to no other project. Do not use a personal token of an administrator.

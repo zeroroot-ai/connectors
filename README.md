@@ -32,6 +32,15 @@ This copies `_template/` to `<tool>/`. Then edit `<tool>/server.go`, cite the pa
 - It serves streamable HTTP on `LISTEN_ADDR` (default `:8080`) at `/mcp`. It answers `/healthz` with HTTP 200. The session is stateless.
 - It reads each credential and each base URL from its environment. A missing variable stops the start and names the variable, never its value.
 - The server has no authentication of its own. The ToolHive proxy of the connector authenticates the daemon in front of it. Do not expose the port in any other way.
+
+## Deployment requirement
+
+The MCP endpoint of each server binds `:8080` with no caller authentication. A caller that reaches the port can call each tool with the vendor credential of the server. The ToolHive proxy of the connector is the only access control.
+
+1. Apply a NetworkPolicy to each server pod that admits ingress to port 8080 only from the ToolHive proxy pod of its connector.
+2. Do not expose the port through a Service of type `LoadBalancer` or `NodePort`, an Ingress or a port-forward.
+
+The servers have no second authentication scheme, by design. The README of each server states the same requirement.
 - The vendor client sends a request to the fixed base URL only. It builds each path from escaped segments, never follows a redirect, limits the time and the size of a call, and retries only a request that is safe to repeat.
 - A log line holds the name of a tool, its outcome and its duration. It never holds an input, an output or a credential.
 

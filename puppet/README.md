@@ -31,6 +31,15 @@ Puppet has no patch API. A patch is a task, and the operator names that task in 
 
 The rollback is a task of the operator. The tool description says that Puppet does not check that the task restores the state before the patch. The gibson#1544 issue asked for a rollback, so the server needs `PUPPET_ROLLBACK_TASK` and does not start without it.
 
+## Deployment requirement
+
+The MCP endpoint on `:8080` has no caller authentication. Any caller that reaches the port can call each tool with the vendor credential of this server. The ToolHive proxy of the connector authenticates the daemon in front of it.
+
+1. Apply a NetworkPolicy that admits ingress to this port only from the ToolHive proxy pod of the connector.
+2. Do not expose the port through a Service of type `LoadBalancer` or `NodePort`, an Ingress or a port-forward.
+
+The server has no second authentication scheme, by design. The proxy and the NetworkPolicy are the access control.
+
 ## Vendor permission
 
 Create a Puppet Enterprise role for the user of the token. Give it only these permissions, and scope task permission to the two tasks and to the node group that the agent may patch.

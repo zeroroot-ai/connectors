@@ -30,6 +30,15 @@ A tool accepts the object id of a user (a GUID) only. It does not accept a user 
 
 Two points of Microsoft behavior matter for a response. A disabled account does not end a session that exists, so call `revoke_sign_in_sessions` after `disable_account`. A revoke does not invalidate an access token before it expires, and tokens can take a few minutes to stop. The gibson#1549 issue asked for a release tool on each action. A session has none, so `revoke_sign_in_sessions` says so and carries `destructiveHint: true`.
 
+## Deployment requirement
+
+The MCP endpoint on `:8080` has no caller authentication. Any caller that reaches the port can call each tool with the vendor credential of this server. The ToolHive proxy of the connector authenticates the daemon in front of it.
+
+1. Apply a NetworkPolicy that admits ingress to this port only from the ToolHive proxy pod of the connector.
+2. Do not expose the port through a Service of type `LoadBalancer` or `NodePort`, an Ingress or a port-forward.
+
+The server has no second authentication scheme, by design. The proxy and the NetworkPolicy are the access control.
+
 ## Vendor permission
 
 Grant these Microsoft Graph application permissions to the app, with admin consent, and no other.

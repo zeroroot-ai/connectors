@@ -27,6 +27,15 @@ Falcon answers HTTP 202. The request is queued, and the change takes effect when
 
 The CrowdStrike API reference needs a Falcon login. The request and response shapes come from the open source clients of CrowdStrike: `falconpy` (endpoint `PerformActionV2`) and `gofalcon` (models `MsaEntityActionRequestV2` and `MsaReplyAffectedEntities`). The mock of the tests follows those shapes. No test ran against a Falcon tenant.
 
+## Deployment requirement
+
+The MCP endpoint on `:8080` has no caller authentication. Any caller that reaches the port can call each tool with the vendor credential of this server. The ToolHive proxy of the connector authenticates the daemon in front of it.
+
+1. Apply a NetworkPolicy that admits ingress to this port only from the ToolHive proxy pod of the connector.
+2. Do not expose the port through a Service of type `LoadBalancer` or `NodePort`, an Ingress or a port-forward.
+
+The server has no second authentication scheme, by design. The proxy and the NetworkPolicy are the access control.
+
 ## Vendor permission
 
 Create a Falcon API client with the scope `Hosts: Write` and no other scope. Falcon documents this scope for host actions (contain and lift containment). Restrict the API client to the host groups that the agent may act on when your plan supports it.

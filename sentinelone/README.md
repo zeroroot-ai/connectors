@@ -22,6 +22,15 @@ A tool accepts one agent id: a decimal number. It does not accept a host name, a
 
 The reference of SentinelOne needs a console login. The request and response shapes come from public clients of the API: the PowerShell module `PS-SentinelOne` and the SentinelOne extension of LimaCharlie. The mock of the tests follows those shapes. No test ran against a SentinelOne console. The array form of `filter.ids` is not checked against the official reference.
 
+## Deployment requirement
+
+The MCP endpoint on `:8080` has no caller authentication. Any caller that reaches the port can call each tool with the vendor credential of this server. The ToolHive proxy of the connector authenticates the daemon in front of it.
+
+1. Apply a NetworkPolicy that admits ingress to this port only from the ToolHive proxy pod of the connector.
+2. Do not expose the port through a Service of type `LoadBalancer` or `NodePort`, an Ingress or a port-forward.
+
+The server has no second authentication scheme, by design. The proxy and the NetworkPolicy are the access control.
+
 ## Vendor permission
 
 Create a service user for this server in SentinelOne. Give it a custom role that holds only the permissions to disconnect an endpoint from the network and to connect it back, and scope it to the sites that the agent may act on. Create the API token for that service user. Do not use an Admin role.

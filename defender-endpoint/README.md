@@ -28,6 +28,15 @@ A tool accepts the device id of Defender only: 40 hexadecimal characters. It doe
 
 Microsoft limits both calls to 100 for each minute and 1500 for each hour. Defender refuses a second release for a device while a release is pending.
 
+## Deployment requirement
+
+The MCP endpoint on `:8080` has no caller authentication. Any caller that reaches the port can call each tool with the vendor credential of this server. The ToolHive proxy of the connector authenticates the daemon in front of it.
+
+1. Apply a NetworkPolicy that admits ingress to this port only from the ToolHive proxy pod of the connector.
+2. Do not expose the port through a Service of type `LoadBalancer` or `NodePort`, an Ingress or a port-forward.
+
+The server has no second authentication scheme, by design. The proxy and the NetworkPolicy are the access control.
+
 ## Vendor permission
 
 Grant the application permission `Machine.Isolate` of the API `WindowsDefenderATP` ("Isolate machine") to the app, with admin consent, and no other permission. This is the only permission that the two pages above name for both calls.
