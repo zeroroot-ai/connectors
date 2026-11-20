@@ -293,7 +293,9 @@ type runResult struct {
 // required that no check run and no status has makes the status pending: GitHub
 // blocks the merge until that check reports. The second result holds the names
 // of these required checks.
-func (v *service) pipeline(ctx context.Context, r prRef, sha string, required []string) (string, []string, error) {
+func (v *service) pipeline(
+	ctx context.Context, r prRef, sha string, required []string,
+) (status string, waiting []string, err error) {
 	rr, err := v.checkRunsOf(ctx, r, sha)
 	if err != nil {
 		return "", nil, err
@@ -303,7 +305,7 @@ func (v *service) pipeline(ctx context.Context, r prRef, sha string, required []
 		return "", nil, err
 	}
 	// A required check that has not reported can still fail.
-	waiting := missing(required, rr.names, cs)
+	waiting = missing(required, rr.names, cs)
 	failed, pending, seen := rr.failed, rr.pending || len(waiting) > 0, rr.seen+cs.Total
 	if cs.Total > 0 {
 		switch cs.State {
