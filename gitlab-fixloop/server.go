@@ -636,9 +636,12 @@ func (v *service) getCommit(ctx context.Context, project, sha string) (*glCommit
 // checkRevertCommit accepts the commit of an existing revert branch only when
 // it is the commit that the revert call of GitLab makes: one parent, which
 // holds the merge commit, and a change that is the change of the merge commit
-// back to its first parent. The tool compares the added and removed lines of
-// each file. The line numbers and the context lines can differ, because the
-// target branch can have moved on before the revert.
+// back to its first parent. The tool compares each hunk of each file: its old
+// and new line ranges, and its added and removed lines. A commit that makes the
+// same edit in another place of a file is not the revert. The context lines can
+// differ. When the target branch moved the lines of the edit before the revert,
+// the ranges differ and the tool refuses the branch. That refusal is safe: a
+// person deletes the branch, and the next call makes a new one.
 func (v *service) checkRevertCommit(ctx context.Context, project, branch, commit, revert string) error {
 	refuse := fmt.Errorf("the branch %s exists, and its commit does not revert the merge commit %s. "+
 		"A person made the branch. Revert by hand, or delete the branch", branch, commit)
@@ -668,8 +671,9 @@ func (v *service) checkRevertCommit(ctx context.Context, project, branch, commit
 }
 
 // change returns the change from one commit to another as text: for each file,
-// the paths, the kind of change, and the added and removed lines. It returns
-// an error when GitLab cuts the diff, because a cut diff proves nothing.
+// the paths, the kind of change, and for each hunk its line ranges and its
+// added and removed lines. It returns an error when GitLab cuts the diff,
+// because a cut diff proves nothing.
 func (v *service) change(ctx context.Context, project, from, to string) (string, error) {
 	var cmp struct {
 		CompareTimeout bool `json:"compare_timeout"`
@@ -701,18 +705,49 @@ func (v *service) change(ctx context.Context, project, from, to string) (string,
 			return "", errors.New("GitLab cut a diff of two commits, so the tool cannot check the revert branch. " +
 				"Revert by hand, or delete the branch")
 		}
-		var b strings.Builder
-		fmt.Fprintf(&b, "%s\x00%s\x00%t%t%t\n", d.OldPath, d.NewPath, d.NewFile, d.RenamedFile, d.DeletedFile)
-		for _, line := range strings.Split(d.Diff, "\n") {
-			if strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") {
-				b.WriteString(line)
-				b.WriteByte('\n')
-			}
+		hunks, err := hunksOf(d.Diff)
+		if err != nil {
+			return "", err
 		}
-		files = append(files, b.String())
+		files = append(files, fmt.Sprintf("%s\x00%s\x00%t%t%t\n%s", d.OldPath, d.NewPath,
+			d.NewFile, d.RenamedFile, d.DeletedFile, hunks))
 	}
 	sort.Strings(files)
 	return strings.Join(files, "\x01"), nil
+}
+
+// hunkHeader reads the line ranges of a unified diff hunk: "@@ -10,3 +10,3 @@".
+// A range without a count has the count 1.
+var hunkHeader = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
+
+// hunksOf returns the hunks of one file diff as text: the old and new line
+// ranges of each hunk, and its added and removed lines. It drops the context
+// lines and the section text after the ranges.
+func hunksOf(diff string) (string, error) {
+	var b strings.Builder
+	for _, line := range strings.Split(diff, "\n") {
+		switch {
+		case strings.HasPrefix(line, "@@"):
+			m := hunkHeader.FindStringSubmatch(line)
+			if m == nil {
+				return "", fmt.Errorf("GitLab sent a diff hunk with an unknown header %q, so the tool cannot "+
+					"check the revert branch. Revert by hand, or delete the branch", line)
+			}
+			fmt.Fprintf(&b, "@@ -%s,%s +%s,%s\n", m[1], hunkCount(m[2]), m[3], hunkCount(m[4]))
+		case strings.HasPrefix(line, "+"), strings.HasPrefix(line, "-"):
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String(), nil
+}
+
+// hunkCount returns the line count of a hunk range. An empty count means 1.
+func hunkCount(n string) string {
+	if n == "" {
+		return "1"
+	}
+	return n
 }
 
 // ---- deployment_state ----

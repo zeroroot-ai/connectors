@@ -495,8 +495,12 @@ const (
 	laterTarget = "dddddddddddddddddddddddddddddddddddddddd"
 	// mergeChange is the compare of the merge commit to its first parent: the
 	// change that a revert makes.
-	mergeChange  = "@@ -10,3 +10,3 @@ func query() {\n ctx := context()\n-db.Query(sql, args...)\n+db.Query(raw)\n }\n"
-	revertChange = "@@ -14,3 +14,3 @@ func query() {\n log := logger()\n-db.Query(sql, args...)\n+db.Query(raw)\n }\n"
+	mergeChange = "@@ -10,3 +10,3 @@ func query() {\n ctx := context()\n-db.Query(sql, args...)\n+db.Query(raw)\n }\n"
+	// revertChange is the same edit at the same lines. The target branch moved
+	// on, so a context line differs.
+	revertChange = "@@ -10,3 +10,3 @@ func query() {\n log := logger()\n-db.Query(sql, args...)\n+db.Query(raw)\n }\n"
+	// movedChange is the same edit at other lines of the file.
+	movedChange = "@@ -14,3 +14,3 @@ func query() {\n log := logger()\n-db.Query(sql, args...)\n+db.Query(raw)\n }\n"
 )
 
 // existingBranch answers the routes of a revert branch that exists already:
@@ -537,7 +541,7 @@ func jsonString(s string) string {
 
 // TestRevertKeepsABranchThatHoldsTheRevert asserts that the tool keeps a
 // branch from an earlier call. The target branch moved on before the revert,
-// so the line numbers and the context lines differ from the merge commit.
+// so a context line differs from the merge commit. The line ranges are equal.
 func TestRevertKeepsABranchThatHoldsTheRevert(t *testing.T) {
 	routes := revertRoutes(`[]`, revertMRJSON)
 	existingBranch(routes, `[{"id":"`+revertSHA+`"}]`, laterTarget, revertChange)
@@ -561,7 +565,12 @@ func TestRevertRefusesABranchThatAPersonMade(t *testing.T) {
 		name, commits, parent, diff, want string
 	}{
 		{"other change", `[{"id":"` + revertSHA + `"}]`, laterTarget,
-			"@@ -14,3 +14,3 @@\n-db.Query(sql, args...)\n+db.Exec(raw)\n", "does not revert the merge commit"},
+			"@@ -10,3 +10,3 @@\n-db.Query(sql, args...)\n+db.Exec(raw)\n", "does not revert the merge commit"},
+		// The same added and removed lines at another place of the file.
+		{"same lines in another place", `[{"id":"` + revertSHA + `"}]`, laterTarget, movedChange,
+			"does not revert the merge commit"},
+		{"unknown hunk header", `[{"id":"` + revertSHA + `"}]`, laterTarget,
+			"@@ bad @@\n-db.Query(sql, args...)\n+db.Query(raw)\n", "unknown header"},
 		{"parent without the merge", `[{"id":"` + revertSHA + `"}]`, "9999999999999999999999999999999999999999",
 			revertChange, "does not revert the merge commit"},
 		{"two commits", `[{"id":"` + revertSHA + `"},{"id":"1234"}]`, laterTarget, revertChange, "has 2 commits"},
