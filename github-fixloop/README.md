@@ -50,7 +50,7 @@ The input and the result follow `fixloop/connector.go`. Where GitHub differs, th
 
 1. The pull request is open.
 2. The head commit has `pipeline_green`.
-3. `mergeable_state` is `clean` or `has_hooks`. When GitHub has not computed it yet, the tool reads the pull request again after one second.
+3. `mergeable_state` is `clean` or `has_hooks`. When GitHub has not computed it yet, the tool reads the pull request again after one second. When that second read shows a different head, the tool does not merge.
 4. The `sha` argument, when given, is the head commit.
 
 The tool sends the head sha that it checked in the merge call. GitHub refuses the merge with HTTP 409 when a push changed the head after the check. The result then has `merged: false` and the state `open`. The optional `merge_method` is `merge` (the default) or `squash`. The tool does not offer a rebase merge, because `revert_merge_request` cannot revert one.
