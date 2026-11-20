@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -308,14 +309,9 @@ func (v *service) pipeline(ctx context.Context, r prRef, sha string, required []
 	if err != nil {
 		return "", err
 	}
-	for _, s := range cs.Statuses {
-		names[s.Context] = true
-	}
-	for _, name := range required {
-		if !names[name] {
-			// A required check that has not reported. It can still fail.
-			pending = true
-		}
+	if missing(required, names, cs) {
+		// A required check that has not reported. It can still fail.
+		pending = true
 	}
 	if cs.Total > 0 {
 		seen += cs.Total
@@ -356,6 +352,21 @@ func (v *service) combinedStatus(ctx context.Context, r prRef, sha string) (*com
 		return nil, fmt.Errorf("read commit status: %w", err)
 	}
 	return &cs, nil
+}
+
+// missing is true when a name in required has no check run in runs and no
+// status in cs.
+func missing(required []string, runs map[string]bool, cs *combined) bool {
+	seen := maps.Clone(runs)
+	for _, s := range cs.Statuses {
+		seen[s.Context] = true
+	}
+	for _, name := range required {
+		if !seen[name] {
+			return true
+		}
+	}
+	return false
 }
 
 // stateOf maps a GitHub pull request to the state of the daemon.
