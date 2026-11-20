@@ -304,18 +304,9 @@ func (v *service) pipeline(ctx context.Context, r prRef, sha string, required []
 		return "", fmt.Errorf("the commit has %d check runs, and the tool reads at most %d of them. "+
 			"It does not count the checks as passed", total, maxCheckPage*100)
 	}
-	var cs struct {
-		State    string `json:"state"`
-		Total    int    `json:"total_count"`
-		Statuses []struct {
-			Context string `json:"context"`
-		} `json:"statuses"`
-	}
-	err := v.client.Do(ctx, kit.Request{
-		Method: http.MethodGet, Path: repoPath(r, "commits", sha, "status"), Query: url.Values{"per_page": {"100"}},
-	}, &cs)
+	cs, err := v.combinedStatus(ctx, r, sha)
 	if err != nil {
-		return "", fmt.Errorf("read commit status: %w", err)
+		return "", err
 	}
 	for _, s := range cs.Statuses {
 		names[s.Context] = true
@@ -344,6 +335,27 @@ func (v *service) pipeline(ctx context.Context, r prRef, sha string, required []
 		return fixloop.PipelineNone, nil
 	}
 	return fixloop.PipelineSuccess, nil
+}
+
+type combined struct {
+	State    string `json:"state"`
+	Total    int    `json:"total_count"`
+	Statuses []struct {
+		Context string `json:"context"`
+	} `json:"statuses"`
+}
+
+// combinedStatus reads the combined commit status and the first 100 statuses
+// of a commit.
+func (v *service) combinedStatus(ctx context.Context, r prRef, sha string) (*combined, error) {
+	var cs combined
+	err := v.client.Do(ctx, kit.Request{
+		Method: http.MethodGet, Path: repoPath(r, "commits", sha, "status"), Query: url.Values{"per_page": {"100"}},
+	}, &cs)
+	if err != nil {
+		return nil, fmt.Errorf("read commit status: %w", err)
+	}
+	return &cs, nil
 }
 
 // stateOf maps a GitHub pull request to the state of the daemon.
