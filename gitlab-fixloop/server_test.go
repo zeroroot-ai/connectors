@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -492,19 +493,33 @@ func TestDeploymentNotYet(t *testing.T) {
 	}
 }
 
+// TestDeploymentQuery asserts the whole query of the deployment list. GitLab
+// answers 400 when updated_after comes without order_by=updated_at
+// (https://docs.gitlab.com/api/deployments/#list-project-deployments).
 func TestDeploymentQuery(t *testing.T) {
-	var query string
+	var got url.Values
+	var method string
 	routes := deployments(`[]`)
 	routes["GET "+api+"/deployments"] = func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
-		query = r.URL.RawQuery
+		got, method = r.URL.Query(), r.Method
+		if got.Has("updated_after") && got.Get("order_by") != "updated_at" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"message":"400 Bad request - order_by must be updated_at with updated_after"}`))
+			return
+		}
 		_, _ = w.Write([]byte(`[]`))
 	}
 	_, call := setup(t, routes)
-	call("deployment_state", map[string]any{"merge_request": ref})
-	for _, want := range []string{"environment=production", "status=success", "updated_after=2026-11-20T09%3A00%3A00Z"} {
-		if !strings.Contains(query, want) {
-			t.Errorf("query %q lacks %s", query, want)
-		}
+	isErr, text, _ := call("deployment_state", map[string]any{"merge_request": ref})
+	if isErr {
+		t.Fatalf("tool error: %s", text)
+	}
+	want := url.Values{
+		"environment": {"production"}, "status": {"success"}, "order_by": {"updated_at"}, "sort": {"asc"},
+		"per_page": {"50"}, "updated_after": {"2026-11-20T09:00:00Z"},
+	}
+	if method != http.MethodGet || got.Encode() != want.Encode() {
+		t.Errorf("request = %s ?%s, want GET ?%s", method, got.Encode(), want.Encode())
 	}
 }
 

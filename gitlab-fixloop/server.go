@@ -518,7 +518,8 @@ func (v *service) deploymentState(ctx context.Context, _ *mcp.CallToolRequest, i
 		out.Reason = "the merge request is not merged, or GitLab gives no merge commit for it"
 		return nil, out, nil
 	}
-	q := url.Values{"environment": {v.environment}, "status": {"success"}, "order_by": {"created_at"}, "sort": {"asc"},
+	// GitLab answers 400 when updated_after comes without order_by=updated_at.
+	q := url.Values{"environment": {v.environment}, "status": {"success"}, "order_by": {"updated_at"}, "sort": {"asc"},
 		"per_page": {strconv.Itoa(maxDeploys)}}
 	if t := fixloop.ParseTime(mr.MergedAt); !t.IsZero() {
 		q.Set("updated_after", fixloop.Time(t))
