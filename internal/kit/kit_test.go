@@ -207,7 +207,7 @@ func TestClientCredentials(t *testing.T) {
 		_ = r.ParseForm()
 		if r.Form.Get("grant_type") != "client_credentials" || r.Form.Get("client_id") != "id" ||
 			r.Form.Get("client_secret") != "sec" || r.Form.Get("scope") != "s" {
-			w.WriteHeader(400)
+			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 		_, _ = w.Write([]byte(`{"access_token":"T","expires_in":3600}`))
