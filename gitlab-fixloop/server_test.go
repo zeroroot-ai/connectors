@@ -157,6 +157,25 @@ func TestMergeRequestStateMergedAndClosed(t *testing.T) {
 	}
 }
 
+// A head pipeline counts only when it ran on the head commit. A pipeline with
+// an empty or another sha tested other code.
+func TestPipelineOfAnotherCommitIsNotGreen(t *testing.T) {
+	for name, sha := range map[string]string{"empty sha": "", "other sha": "cccccccccccccccccccccccccccccccccccccccc"} {
+		mr := strings.Replace(openMR("success", "mergeable"), `"id":1,"sha":"`+headSHA+`"`, `"id":1,"sha":"`+sha+`"`, 1)
+		m, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
+			"GET " + api + mr7: reply(200, mr),
+		})
+		_, _, out := call("merge_request_state", map[string]any{"merge_request": ref})
+		if out["pipeline_green"] != false {
+			t.Errorf("%s: state = %v", name, out)
+		}
+		_, _, out = call("merge_merge_request", map[string]any{"merge_request": ref})
+		if out["merged"] != false || m.called("PUT "+api+mr7+"/merge") != 0 {
+			t.Errorf("%s: merged on a pipeline of another commit: %v", name, out)
+		}
+	}
+}
+
 func TestMergeRequestStateNoPipelineAndMissing(t *testing.T) {
 	_, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
 		"GET " + api + mr7: reply(200, openMR("", "mergeable")),

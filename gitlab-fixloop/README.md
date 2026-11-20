@@ -34,7 +34,7 @@ The input and the result follow `fixloop/connector.go`. Where GitLab differs, th
 | `state` = `open` | `state` is `opened` or `locked`. |
 | `state` = `merged`, `closed` | `state` is `merged` or `closed`. |
 | `state` = `refused` | GitLab has no such state. See the next section. |
-| `pipeline_green` | `head_pipeline.status` is `success`. The result also holds `pipeline_status`, the raw status, or `none`. |
+| `pipeline_green` | `head_pipeline.status` is `success`, and `head_pipeline.sha` is the head sha of the merge request. A pipeline with an empty sha does not count. The result also holds `pipeline_status`, the raw status, or `none`. |
 | `at` | `merged_at`, `closed_at` or `updated_at`. |
 | `merge_commit` | `merge_commit_sha`, or `squash_commit_sha` for a squash merge. |
 | `deployment_state.deployed` | A deployment with status `success` to `GITLAB_ENVIRONMENT` holds the merge commit. |

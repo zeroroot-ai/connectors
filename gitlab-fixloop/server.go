@@ -36,7 +36,7 @@ import (
 // of zeroroot-ai/gibson. The mapping of the GitLab fields to the fields of the daemon:
 //   - state: opened and locked are "open". merged is "merged". closed is "closed".
 //     "refused" is a merge that GitLab refused, see the Refusals type.
-//   - pipeline_green: true when head_pipeline.status is "success".
+//   - pipeline_green: true when head_pipeline.status is "success" and head_pipeline.sha is the head sha.
 //   - at: merged_at, closed_at or updated_at of the merge request.
 //   - deployment_state.application: the path of the project. restart is always off.
 
@@ -198,7 +198,9 @@ func pipelineStatus(mr *glMR) (string, bool) {
 	if mr.HeadPipeline == nil {
 		return fixloop.PipelineNone, false
 	}
-	green := mr.HeadPipeline.Status == "success" && (mr.HeadPipeline.SHA == "" || mr.HeadPipeline.SHA == mr.SHA)
+	// A pipeline counts only when it ran on the head commit. An empty sha
+	// proves nothing about the code that the merge would take.
+	green := mr.HeadPipeline.Status == "success" && mr.SHA != "" && mr.HeadPipeline.SHA == mr.SHA
 	return mr.HeadPipeline.Status, green
 }
 
