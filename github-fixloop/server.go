@@ -136,7 +136,8 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 		Name: "revert_merge_request",
 		Description: "Revert one merged GitHub pull request. GitHub has no revert call, so the tool builds the revert with the git data API: " +
 			"a new commit that has the tree of the parent of the merge commit, on a new branch, and a pull request from that branch. " +
-			"It works only while the base branch still ends at the merge commit. " +
+			"It works only while the base branch still ends at the merge commit. It refuses a rebase merge of more than one " +
+			"commit, because a revert of the merge commit would undo only part of the pull request. " +
 			"It merges the revert pull request when its checks passed. Otherwise it returns the state of the revert pull request, " +
 			"and the caller calls the tool again later. The same call twice opens one revert pull request. " +
 			"Undo: call revert_merge_request with the revert_merge_request value of the result.",
@@ -165,12 +166,14 @@ type ghPR struct {
 	MergeCommitSHA string `json:"merge_commit_sha"`
 	Mergeable      *bool  `json:"mergeable"`
 	MergeableState string `json:"mergeable_state"`
+	Commits        int    `json:"commits"`
 	Head           struct {
 		SHA string `json:"sha"`
 		Ref string `json:"ref"`
 	} `json:"head"`
 	Base struct {
 		Ref string `json:"ref"`
+		SHA string `json:"sha"`
 	} `json:"base"`
 }
 
@@ -590,6 +593,11 @@ func (v *service) createRevertBranch(ctx context.Context, r prRef, orig *ghPR, c
 	if len(merge.Parents) == 0 {
 		return errors.New("the merge commit has no parent")
 	}
+	if len(merge.Parents) == 1 && orig.Commits > 1 {
+		if err := v.checkSquash(ctx, r, orig, commit); err != nil {
+			return err
+		}
+	}
 	if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: repoPath(r, "git", "commits", merge.Parents[0].SHA)}, &parent); err != nil {
 		return fmt.Errorf("read the parent of the merge commit: %w", err)
 	}
@@ -610,6 +618,38 @@ func (v *service) createRevertBranch(ctx context.Context, r prRef, orig *ghPR, c
 	}, nil)
 	if err != nil {
 		return fmt.Errorf("create the revert branch: %w", err)
+	}
+	return nil
+}
+
+// checkSquash refuses a revert when the merge can be a rebase merge. A merge
+// commit with one parent comes from a squash merge or a rebase merge. After a
+// rebase merge, the merge commit is the last of the rebased commits, and the
+// tree of its parent still holds the other commits of the pull request. A
+// squash merge puts exactly one commit on the base, so the tool accepts the
+// merge only when the base of the pull request is one commit behind the merge
+// commit. A squash merge after the base moved on is refused too: the tool
+// cannot prove that it is not a rebase merge.
+func (v *service) checkSquash(ctx context.Context, r prRef, orig *ghPR, commit string) error {
+	refuse := fmt.Errorf("the merge commit has one parent and the pull request has %d commits. This is a rebase merge, "+
+		"or a squash merge after the base branch moved on. A revert of the merge commit can undo only part of the "+
+		"pull request, so revert by hand", orig.Commits)
+	if orig.Base.SHA == "" {
+		return refuse
+	}
+	var cmp struct {
+		Status  string `json:"status"`
+		AheadBy int    `json:"ahead_by"`
+	}
+	err := v.client.Do(ctx, kit.Request{
+		Method: http.MethodGet, Path: repoPath(r, "compare", orig.Base.SHA+"..."+commit),
+		Query: url.Values{"per_page": {"1"}},
+	}, &cmp)
+	if err != nil {
+		return fmt.Errorf("compare the base with the merge commit: %w", err)
+	}
+	if cmp.Status != "ahead" || cmp.AheadBy != 1 {
+		return refuse
 	}
 	return nil
 }

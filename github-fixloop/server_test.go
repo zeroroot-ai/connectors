@@ -80,6 +80,7 @@ const (
 	mergeSHA  = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	parentSHA = "cccccccccccccccccccccccccccccccccccccccc"
 	revSHA    = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	baseSHA   = "9999999999999999999999999999999999999999"
 	pr7       = repo + "/pulls/7"
 	ref       = "acme/shop#7"
 )
@@ -89,7 +90,7 @@ func pullJSON(state string, merged bool, mergeable, ms, head string) string {
 		`"html_url":"https://github.com/acme/shop/pull/7","merged_at":` + nullable(merged, "2026-11-20T09:00:00Z") + `,` +
 		`"closed_at":` + nullable(state == "closed", "2026-11-20T07:00:00Z") + `,"updated_at":"2026-11-20T08:00:00Z",` +
 		`"merge_commit_sha":` + nullable(merged, mergeSHA) + `,"mergeable":` + mergeable + `,"mergeable_state":"` + ms + `",` +
-		`"head":{"sha":"` + head + `","ref":"fix"},"base":{"ref":"main"}}`
+		`"commits":3,"head":{"sha":"` + head + `","ref":"fix"},"base":{"ref":"main","sha":"` + baseSHA + `"}}`
 }
 
 func boolStr(b bool) string {
@@ -580,6 +581,45 @@ func TestRevertRefusesWhenTheBranchMovedOn(t *testing.T) {
 	}
 }
 
+// A merge commit with one parent comes from a squash merge or a rebase merge.
+// After a rebase merge of three commits, the merge commit is the last of the
+// three, and a revert of it undoes one third of the pull request
+// (https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/about-merge-methods-on-github).
+func TestRevertRefusesARebaseMerge(t *testing.T) {
+	routes := revertRoutes(`[]`, greenRun)
+	routes["GET "+repo+"/git/commits/"+mergeSHA] = reply(200, `{"sha":"`+mergeSHA+`","tree":{"sha":"tmerge"},"parents":[{"sha":"`+parentSHA+`"}]}`)
+	compare := "GET " + repo + "/compare/" + baseSHA + "..." + mergeSHA
+	routes[compare] = reply(200, `{"status":"ahead","ahead_by":3,"behind_by":0,"total_commits":3}`)
+	m, call := setup(t, routes)
+	isErr, text, _ := call("revert_merge_request", map[string]any{"merge_request": ref})
+	if !isErr || !strings.Contains(text, "rebase merge") {
+		t.Errorf("isErr=%v %s", isErr, text)
+	}
+	if m.called(compare) != 1 {
+		t.Errorf("the tool did not compare the base with the merge commit: %v", m.calls)
+	}
+	for _, c := range []string{"POST " + repo + "/git/commits", "POST " + repo + "/git/refs", "POST " + repo + "/pulls"} {
+		if m.called(c) != 0 {
+			t.Errorf("a partial revert reached GitHub: %s", c)
+		}
+	}
+}
+
+func TestRevertOfASquashMerge(t *testing.T) {
+	routes := revertRoutes(`[]`, greenRun)
+	routes["GET "+repo+"/git/commits/"+mergeSHA] = reply(200, `{"sha":"`+mergeSHA+`","tree":{"sha":"tmerge"},"parents":[{"sha":"`+parentSHA+`"}]}`)
+	compare := "GET " + repo + "/compare/" + baseSHA + "..." + mergeSHA
+	routes[compare] = reply(200, `{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1}`)
+	m, call := setup(t, routes)
+	isErr, text, out := call("revert_merge_request", map[string]any{"merge_request": ref})
+	if isErr || out["merged"] != true {
+		t.Fatalf("isErr=%v out=%v %s", isErr, out, text)
+	}
+	if got := m.bodies["POST "+repo+"/git/commits"]["tree"]; got != "tparent" {
+		t.Errorf("the revert tree is %v, want the tree of the parent", got)
+	}
+}
+
 func TestRevertOfAnOpenPullRequest(t *testing.T) {
 	routes := checks(greenRun, "success", 1)
 	routes["GET "+pr7] = reply(200, openPR("clean"))
@@ -591,7 +631,7 @@ func TestRevertOfAnOpenPullRequest(t *testing.T) {
 
 func TestRevertBranchWithASlashInTheBaseName(t *testing.T) {
 	routes := revertRoutes(`[]`, greenRun)
-	routes["GET "+pr7] = reply(200, strings.Replace(mergedPR, `"base":{"ref":"main"}`, `"base":{"ref":"release/2026"}`, 1))
+	routes["GET "+pr7] = reply(200, strings.Replace(mergedPR, `"base":{"ref":"main",`, `"base":{"ref":"release/2026",`, 1))
 	routes["GET "+repo+"/git/ref/heads/release/2026"] = reply(200, `{"object":{"sha":"`+mergeSHA+`"}}`)
 	m, call := setup(t, routes)
 	isErr, text, _ := call("revert_merge_request", map[string]any{"merge_request": ref})

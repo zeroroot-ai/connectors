@@ -72,7 +72,7 @@ GitHub has no revert call in the REST API. `revert_merge_request` builds the rev
 Limits:
 
 - The revert is exact only while no commit came after the merge. The tree of the parent of the merge commit holds no later work. When the base branch has later commits, the tool refuses and makes nothing. A person must revert by hand. This tool does not do a three-way merge, because the git data API has none.
-- The tool reverts a merge commit and a squash commit. It does not revert a rebase merge, because the merge commit of a rebase is the last of several commits.
+- The tool reverts a merge commit and a squash commit. It refuses a rebase merge of more than one commit, because the merge commit of a rebase is the last of several commits. A revert of it would undo only part of the pull request. A merge commit with one parent comes from a squash merge or a rebase merge. The tool accepts it only when the pull request has one commit, or when the compare call shows that the merge commit is one commit ahead of `base.sha` of the pull request. A squash merge after the base branch moved on is refused too, because the tool cannot prove that it is not a rebase merge.
 - A repository with no check run and no commit status has no `pipeline_green`. The tool opens the revert pull request and never merges it.
 - The tool does not wait for the checks. The caller calls it again.
 - The commit has the author of the token. GitHub shows it as unverified unless the token belongs to a GitHub App that signs commits.
@@ -85,7 +85,7 @@ Use a fine-grained token or a GitHub App installation, for the repositories that
 |---|---|---|
 | Metadata | Read | Required by GitHub. |
 | Pull requests | Read and write | Read, open and merge a pull request. |
-| Contents | Read and write | Merge a pull request. Create the revert commit and branch. |
+| Contents | Read and write | Merge a pull request. Create the revert commit and branch. Compare two commits. |
 | Checks | Read | Read the check runs. |
 | Commit statuses | Read | Read the combined status. |
 | Deployments | Read | Read the deployments and their statuses. |
