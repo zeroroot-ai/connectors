@@ -62,7 +62,7 @@ A rule of the project can block a merge: a missing approval, an open thread, a d
 `revert_merge_request` follows these steps.
 
 1. It reads the merge request. The merge request must be merged and must have a merge commit or a squash commit.
-2. It looks for a merge request from the branch `zeroroot/revert-mr<number>-<commit>`. It finds the work of an earlier call, so the same call twice opens one revert merge request.
+2. It looks for a merge request from the branch `zeroroot/revert-mr<number>-<commit>`. It finds the work of an earlier call, so the same call twice opens one revert merge request. When a person closed that merge request without a merge, it tries the branch with the suffix `-2`, then `-3`. After three closed revert merge requests, the tool returns an error and a person reverts by hand. A closed revert never stops the loop without an answer.
 3. It creates that branch from the target branch, and reverts the merge commit onto it with the commits API. It opens a merge request from the branch.
 4. It merges the revert merge request by the merge rule above. When the pipeline has not finished, it returns the state of the revert merge request and `merged: false`. Call the tool again later to merge it.
 

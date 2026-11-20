@@ -109,7 +109,10 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 		Description: "Revert one merged GitLab merge request. The tool opens a new merge request that reverts the merge commit, " +
 			"and merges it when its head pipeline succeeded. When the pipeline has not finished, it returns the state of the " +
 			"revert merge request. Call the tool again with the same input to merge it later. The same call twice opens one " +
-			"revert merge request. Undo: call revert_merge_request with the revert_merge_request value of the result.",
+			"revert merge request. When a person closed the revert merge request without a merge, the next call opens a new " +
+			"one on a new branch. After "+strconv.Itoa(fixloop.RevertTries)+" closed revert merge requests, the tool returns " +
+			"an error, and a person reverts by hand. " +
+			"Undo: call revert_merge_request with the revert_merge_request value of the result.",
 		Annotations: kit.Reversible("Revert GitLab merge request", true),
 	}, v.revertMergeRequest)
 	kit.AddTool(s, log, &mcp.Tool{
@@ -424,24 +427,38 @@ func (v *service) revertMergeRequest(ctx context.Context, _ *mcp.CallToolRequest
 
 // findOrOpenRevert returns the number of the revert merge request of the
 // merge. The branch name holds the merge request and the commit, so a second
-// call finds the work of the first call and does not repeat it.
-func (v *service) findOrOpenRevert(ctx context.Context, project string, orig *glMR, commit, branch string) (int, error) {
-	var found []glMR
-	err := v.client.Do(ctx, kit.Request{
-		Method: http.MethodGet, Path: kit.Path("projects", project, "merge_requests"),
-		Query: url.Values{"source_branch": {branch}, "target_branch": {orig.TargetBranch}, "state": {"all"}, "per_page": {"1"}},
-	}, &found)
-	if err != nil {
-		return 0, fmt.Errorf("look for a revert merge request: %w", err)
+// call finds the work of the first call and does not repeat it. When a person
+// closed the revert merge request without a merge, the next try opens a new
+// one on a new branch.
+func (v *service) findOrOpenRevert(ctx context.Context, project string, orig *glMR, commit, base string) (int, error) {
+	for try := 1; try <= fixloop.RevertTries; try++ {
+		branch := fixloop.RevertBranch(base, try)
+		var found []glMR
+		err := v.client.Do(ctx, kit.Request{
+			Method: http.MethodGet, Path: kit.Path("projects", project, "merge_requests"),
+			Query: url.Values{"source_branch": {branch}, "target_branch": {orig.TargetBranch}, "state": {"all"}, "per_page": {"1"}},
+		}, &found)
+		if err != nil {
+			return 0, fmt.Errorf("look for a revert merge request: %w", err)
+		}
+		if len(found) == 0 {
+			return v.openRevert(ctx, project, orig, commit, branch)
+		}
+		if found[0].State != "closed" {
+			return found[0].IID, nil
+		}
 	}
-	if len(found) > 0 {
-		return found[0].IID, nil
-	}
+	return 0, fixloop.ErrRevertsClosed
+}
+
+// openRevert puts the revert commit on the branch and opens the revert merge
+// request from the branch.
+func (v *service) openRevert(ctx context.Context, project string, orig *glMR, commit, branch string) (int, error) {
 	if err := v.ensureRevertBranch(ctx, project, orig.TargetBranch, branch, commit); err != nil {
 		return 0, err
 	}
 	var created glMR
-	err = v.client.Do(ctx, kit.Request{
+	err := v.client.Do(ctx, kit.Request{
 		Method: http.MethodPost, Path: kit.Path("projects", project, "merge_requests"),
 		JSON: map[string]any{
 			"source_branch": branch, "target_branch": orig.TargetBranch,

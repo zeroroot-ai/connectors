@@ -411,6 +411,66 @@ func TestRevertSecondCallFindsTheFirst(t *testing.T) {
 	}
 }
 
+// closedReverts answers the list of merge requests by the source branch: the
+// closed branches have a closed revert merge request, the others have none.
+func closedReverts(closed ...string) func(http.ResponseWriter, *http.Request, map[string]any) {
+	return func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+		for _, b := range closed {
+			if r.URL.Query().Get("source_branch") == b {
+				_, _ = w.Write([]byte(`[{"iid":5,"state":"closed","source_branch":"` + b + `"}]`))
+				return
+			}
+		}
+		_, _ = w.Write([]byte(`[]`))
+	}
+}
+
+func TestRevertOpensANewOneAfterAPersonClosedIt(t *testing.T) {
+	const first = "zeroroot/revert-mr7-bbbbbbbb"
+	routes := revertRoutes(`[]`, revertMRJSON)
+	routes["GET "+api+"/merge_requests"] = closedReverts(first)
+	var branchQuery url.Values
+	routes["POST "+api+"/repository/branches"] = func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+		branchQuery = r.URL.Query()
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"name":"x"}`))
+	}
+	m, call := setup(t, routes)
+	isErr, text, out := call("revert_merge_request", map[string]any{"merge_request": ref})
+	if isErr || out["merged"] != true {
+		t.Fatalf("isErr=%v out=%v %s", isErr, out, text)
+	}
+	if branchQuery.Get("branch") != first+"-2" || branchQuery.Get("ref") != "main" {
+		t.Errorf("branch query = %v", branchQuery)
+	}
+	if got := m.bodies["POST "+api+"/repository/commits/"+mergeSHA+"/revert"]["branch"]; got != first+"-2" {
+		t.Errorf("revert branch = %v", got)
+	}
+	if got := m.bodies["POST "+api+"/merge_requests"]; got["source_branch"] != first+"-2" || got["target_branch"] != "main" {
+		t.Errorf("merge request body = %v", got)
+	}
+}
+
+func TestRevertStopsAfterThreeClosedReverts(t *testing.T) {
+	const first = "zeroroot/revert-mr7-bbbbbbbb"
+	routes := revertRoutes(`[]`, revertMRJSON)
+	routes["GET "+api+"/merge_requests"] = closedReverts(first, first+"-2", first+"-3")
+	m, call := setup(t, routes)
+	isErr, text, _ := call("revert_merge_request", map[string]any{"merge_request": ref})
+	if !isErr || !strings.Contains(text, "closed 3 revert") {
+		t.Errorf("isErr=%v %s", isErr, text)
+	}
+	if n := m.called("GET " + api + "/merge_requests"); n != 3 {
+		t.Errorf("looked for %d revert merge requests, want 3", n)
+	}
+	for _, c := range []string{"POST " + api + "/repository/branches", "POST " + api + "/merge_requests",
+		"POST " + api + "/repository/commits/" + mergeSHA + "/revert", "PUT " + api + "/merge_requests/8/merge"} {
+		if m.called(c) != 0 {
+			t.Errorf("called %s after three closed reverts", c)
+		}
+	}
+}
+
 func TestRevertKeepsABranchThatHoldsTheRevert(t *testing.T) {
 	routes := revertRoutes(`[]`, revertMRJSON)
 	routes["POST "+api+"/repository/branches"] = reply(400, `{"message":"Branch already exists"}`)

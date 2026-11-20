@@ -140,6 +140,9 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 			"commit, because a revert of the merge commit would undo only part of the pull request. " +
 			"It merges the revert pull request when its checks passed. Otherwise it returns the state of the revert pull request, " +
 			"and the caller calls the tool again later. The same call twice opens one revert pull request. " +
+			"When a person closed the revert pull request without a merge, the next call opens a new one on a new branch. " +
+			"After "+strconv.Itoa(fixloop.RevertTries)+" closed revert pull requests, the tool returns an error, "+
+			"and a person reverts by hand. " +
 			"Undo: call revert_merge_request with the revert_merge_request value of the result.",
 		Annotations: kit.Reversible("Revert GitHub pull request", true),
 	}, v.revertMergeRequest)
@@ -519,11 +522,29 @@ func (v *service) revertMergeRequest(ctx context.Context, _ *mcp.CallToolRequest
 
 // findOrOpenRevert returns the revert pull request of the merge. The branch
 // name holds the pull request and the commit, so a second call finds the work
-// of the first call and does not repeat it.
-func (v *service) findOrOpenRevert(ctx context.Context, r prRef, orig *ghPR, branch string) (*ghPR, error) {
-	if pr, err := v.findPR(ctx, r, branch); err != nil || pr != nil {
-		return pr, err
+// of the first call and does not repeat it. When a person closed the revert
+// pull request without a merge, the next try opens a new one on a new branch.
+func (v *service) findOrOpenRevert(ctx context.Context, r prRef, orig *ghPR, base string) (*ghPR, error) {
+	for try := 1; try <= fixloop.RevertTries; try++ {
+		branch := fixloop.RevertBranch(base, try)
+		pr, err := v.findPR(ctx, r, branch)
+		if err != nil {
+			return nil, err
+		}
+		if pr == nil {
+			return v.openRevert(ctx, r, orig, branch)
+		}
+		// The list of pull requests has merged_at, not merged.
+		if pr.State != "closed" || pr.MergedAt != "" {
+			return pr, nil
+		}
 	}
+	return nil, fixloop.ErrRevertsClosed
+}
+
+// openRevert makes the revert commit and the branch, and opens the revert pull
+// request from the branch.
+func (v *service) openRevert(ctx context.Context, r prRef, orig *ghPR, branch string) (*ghPR, error) {
 	commit := orig.MergeCommitSHA
 	// The revert is exact only when no commit came after the merge: the tree of
 	// the parent of the merge commit then equals the tree before the merge.

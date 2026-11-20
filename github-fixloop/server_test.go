@@ -555,6 +555,58 @@ func TestRevertSecondCallFindsTheFirst(t *testing.T) {
 	}
 }
 
+// closedRevert answers the list of pull requests by the head branch: the
+// closed branches have a closed revert pull request, the others have none.
+func closedRevert(closed ...string) handler {
+	return func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+		head := r.URL.Query().Get("head")
+		for _, b := range closed {
+			if head == "acme:"+b {
+				_, _ = w.Write([]byte(`[` + strings.Replace(revertPR("closed", false), `"merged":false`,
+					`"merged":false,"closed_at":"2026-11-20T09:30:00Z"`, 1) + `]`))
+				return
+			}
+		}
+		_, _ = w.Write([]byte(`[]`))
+	}
+}
+
+func TestRevertOpensANewOneAfterAPersonClosedIt(t *testing.T) {
+	routes := revertRoutes(`[]`, greenRun)
+	routes["GET "+repo+"/pulls"] = closedRevert(revertBranch)
+	routes["GET "+repo+"/git/ref/heads/zeroroot/revert-pr-7-bbbbbbbb-2"] = reply(404, `{"message":"Not Found"}`)
+	m, call := setup(t, routes)
+	isErr, text, out := call("revert_merge_request", map[string]any{"merge_request": ref})
+	if isErr || out["merged"] != true {
+		t.Fatalf("isErr=%v out=%v %s", isErr, out, text)
+	}
+	if got := m.bodies["POST "+repo+"/git/refs"]; got["ref"] != "refs/heads/"+revertBranch+"-2" {
+		t.Errorf("ref body = %v", got)
+	}
+	if got := m.bodies["POST "+repo+"/pulls"]; got["head"] != revertBranch+"-2" || got["base"] != "main" {
+		t.Errorf("pull request body = %v", got)
+	}
+}
+
+func TestRevertStopsAfterThreeClosedReverts(t *testing.T) {
+	routes := revertRoutes(`[]`, greenRun)
+	routes["GET "+repo+"/pulls"] = closedRevert(revertBranch, revertBranch+"-2", revertBranch+"-3")
+	m, call := setup(t, routes)
+	isErr, text, _ := call("revert_merge_request", map[string]any{"merge_request": ref})
+	if !isErr || !strings.Contains(text, "closed 3 revert") {
+		t.Errorf("isErr=%v %s", isErr, text)
+	}
+	if n := m.called("GET " + repo + "/pulls"); n != 3 {
+		t.Errorf("looked for %d revert pull requests, want 3", n)
+	}
+	for _, c := range []string{"POST " + repo + "/git/commits", "POST " + repo + "/git/refs", "POST " + repo + "/pulls",
+		"PUT " + repo + "/pulls/8/merge"} {
+		if m.called(c) != 0 {
+			t.Errorf("called %s after three closed reverts", c)
+		}
+	}
+}
+
 func TestRevertKeepsABranchFromAnEarlierCall(t *testing.T) {
 	routes := revertRoutes(`[]`, greenRun)
 	routes["GET "+repo+"/git/ref/heads/zeroroot/revert-pr-7-bbbbbbbb"] = reply(200, `{"object":{"sha":"`+revSHA+`"}}`)

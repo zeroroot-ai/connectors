@@ -4,6 +4,8 @@
 package fixloop
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -80,6 +82,27 @@ func ValidPath(p string) bool {
 	}
 	return true
 }
+
+// RevertTries is the number of revert merge requests that revert_merge_request
+// opens for one merge. A person can close a revert merge request without a
+// merge. The next call then opens a new one on a new branch. After RevertTries
+// closed revert merge requests, the tool stops and a person reverts by hand.
+const RevertTries = 3
+
+// RevertBranch returns the branch of the revert merge request number try,
+// from 1 to RevertTries. The first try uses the base name. A later try adds
+// its number.
+func RevertBranch(base string, try int) string {
+	if try <= 1 {
+		return base
+	}
+	return base + "-" + strconv.Itoa(try)
+}
+
+// ErrRevertsClosed is the error of revert_merge_request when a person closed
+// RevertTries revert merge requests of one merge.
+var ErrRevertsClosed = fmt.Errorf("a person closed %d revert merge requests of this merge without a merge. "+
+	"The tool opens no more. Reopen one, or revert by hand", RevertTries)
 
 // RevertResult is the result of revert_merge_request.
 type RevertResult struct {

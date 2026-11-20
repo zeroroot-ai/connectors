@@ -64,7 +64,7 @@ A rule of the repository can block a merge: a missing review, a conflict, a draf
 GitHub has no revert call in the REST API. `revert_merge_request` builds the revert with the git data API.
 
 1. It reads the pull request. The pull request must be merged.
-2. It looks for a pull request from the branch `zeroroot/revert-pr-<number>-<commit>`. It finds the work of an earlier call, so the same call twice opens one revert pull request.
+2. It looks for a pull request from the branch `zeroroot/revert-pr-<number>-<commit>`. It finds the work of an earlier call, so the same call twice opens one revert pull request. When a person closed that pull request without a merge, it tries the branch with the suffix `-2`, then `-3`. After three closed revert pull requests, the tool returns an error and a person reverts by hand. A closed revert never stops the loop without an answer.
 3. It reads the base branch. The base branch must end at the merge commit.
 4. It makes a commit with the tree of the first parent of the merge commit and the merge commit as its parent. It creates the branch at that commit and opens a pull request from the branch.
 5. It merges the revert pull request by the merge rule above. When the checks have not finished, it returns the state of the revert pull request and `merged: false`. Call the tool again later to merge it.
