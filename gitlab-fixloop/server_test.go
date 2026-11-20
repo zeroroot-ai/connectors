@@ -272,24 +272,32 @@ func TestMergeNotAttempted(t *testing.T) {
 	}
 }
 
-func TestRefusalShowsInStateUntilTheHeadChanges(t *testing.T) {
-	head := openMR("success", "not_approved")
-	_, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
-		"GET " + api + mr7: func(w http.ResponseWriter, _ *http.Request, _ map[string]any) { _, _ = w.Write([]byte(head)) },
+// TestRefusalComesFromTheLiveState asserts that "refused" is the state of
+// GitLab now. A fresh server, which stands for a second replica or a restart,
+// sees the refusal with no merge attempt. When a person removes the block, the
+// next read shows the merge request as open.
+func TestRefusalComesFromTheLiveState(t *testing.T) {
+	mr := openMR("success", "not_approved")
+	m, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
+		"GET " + api + mr7: func(w http.ResponseWriter, _ *http.Request, _ map[string]any) { _, _ = w.Write([]byte(mr)) },
 	})
 	_, _, out := call("merge_request_state", map[string]any{"merge_request": ref})
-	if out["state"] != "open" {
-		t.Fatalf("before a try the state is open: %v", out)
+	if out["state"] != "refused" || out["reason"] != "GitLab does not allow the merge: not_approved" {
+		t.Errorf("a blocked merge request with a green pipeline: %v", out)
 	}
 	call("merge_merge_request", map[string]any{"merge_request": ref})
-	_, _, out = call("merge_request_state", map[string]any{"merge_request": ref})
-	if out["state"] != "refused" || !strings.Contains(out["reason"].(string), "not_approved") {
-		t.Errorf("after the refusal: %v", out)
+	if m.called("PUT "+api+mr7+"/merge") != 0 {
+		t.Error("the tool called merge on a blocked merge request")
 	}
-	head = strings.ReplaceAll(head, headSHA, "dddddddddddddddddddddddddddddddddddddddd")
+	mr = openMR("success", "mergeable") // a person approved the merge request
+	_, _, out = call("merge_request_state", map[string]any{"merge_request": ref})
+	if out["state"] != "open" || out["reason"] != nil {
+		t.Errorf("after a person removed the block: %v", out)
+	}
+	mr = openMR("running", "not_approved")
 	_, _, out = call("merge_request_state", map[string]any{"merge_request": ref})
 	if out["state"] != "open" {
-		t.Errorf("a new head clears the refusal: %v", out)
+		t.Errorf("a running pipeline is not a refusal: %v", out)
 	}
 }
 

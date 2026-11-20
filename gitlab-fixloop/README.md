@@ -55,7 +55,11 @@ The tool sends the head sha that it checked in the merge call. GitLab refuses th
 
 ### Refused
 
-A rule of the project can block a merge: a missing approval, an open thread, a draft, a conflict. The tool then returns the state `refused` with the status of GitLab as the reason, and it does not call the merge. A refusal of the merge call (HTTP 403, 405, 406 or 422) has the same result. `merge_request_state` returns `refused` for that merge request while its head commit stays the same. The server keeps this memory in its process. After a restart, the next call of `merge_merge_request` sets it again.
+A rule of the project can block a merge: a missing approval, an open thread, a draft, a conflict. GitLab shows the rule in `detailed_merge_status`. When the head pipeline succeeded and the status is not `mergeable` and not a status that GitLab still computes (`checking`, `unchecked`, `preparing`, `approvals_syncing`, `ci_still_running`, `ci_must_pass`), both `merge_request_state` and `merge_merge_request` return the state `refused`. The reason is `GitLab does not allow the merge: <detailed_merge_status>`, for example `GitLab does not allow the merge: not_approved`. `merge_merge_request` then does not call the merge.
+
+The server keeps no memory of a refusal. It reads the state from GitLab on each call. When a person removes the block, the next call returns `open`. Each replica of the server, and a server after a restart, gives the same answer.
+
+A refusal of the merge call (HTTP 403, 405, 406 or 422) returns `refused` in the result of that call only. The reason is `GitLab refused the merge: <message of GitLab>`. The next `merge_request_state` reads the state of GitLab again.
 
 ### Revert
 

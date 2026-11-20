@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -152,45 +151,4 @@ func ParseTime(s string) time.Time {
 		return time.Time{}
 	}
 	return t
-}
-
-// Refusals remembers the merges that the host refused. A merge request has no
-// "refused" state on a Git host, so the server records the refusal that it saw
-// and reports it from merge_request_state while the head of the merge request
-// stays the same. The memory is in the process. A restart clears it, and the
-// next merge attempt records the refusal again.
-type Refusals struct {
-	mu sync.Mutex
-	m  map[string]refusal
-}
-
-type refusal struct{ sha, reason string }
-
-// Note records a refusal for the merge request at the head sha.
-func (r *Refusals) Note(key, sha, reason string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.m == nil {
-		r.m = map[string]refusal{}
-	}
-	r.m[key] = refusal{sha: sha, reason: reason}
-}
-
-// Get returns the refusal of the merge request at the head sha. A refusal of
-// an older head does not count.
-func (r *Refusals) Get(key, sha string) (string, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	f, ok := r.m[key]
-	if !ok || f.sha != sha {
-		return "", false
-	}
-	return f.reason, true
-}
-
-// Clear forgets the refusal of the merge request.
-func (r *Refusals) Clear(key string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.m, key)
 }

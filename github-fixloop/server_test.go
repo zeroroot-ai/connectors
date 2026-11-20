@@ -397,26 +397,37 @@ func TestMergeRefusesAHeadThatMovedDuringTheWait(t *testing.T) {
 	}
 }
 
-func TestRefusalShowsInStateUntilTheHeadChanges(t *testing.T) {
+// TestRefusalComesFromTheLiveState asserts that "refused" is the state of
+// GitHub now. A fresh server, which stands for a second replica or a restart,
+// sees the refusal with no merge attempt. When a person removes the block, the
+// next read shows the pull request as open.
+func TestRefusalComesFromTheLiveState(t *testing.T) {
 	pr := openPR("blocked")
 	routes := checks(greenRun, "success", 1)
 	routes["GET "+pr7] = func(w http.ResponseWriter, _ *http.Request, _ map[string]any) { _, _ = w.Write([]byte(pr)) }
+	m, call := setup(t, routes)
+	_, _, out := call("merge_request_state", map[string]any{"merge_request": ref})
+	if out["state"] != "refused" || out["reason"] != "GitHub does not allow the merge: blocked" {
+		t.Errorf("a blocked pull request with green checks: %v", out)
+	}
+	call("merge_merge_request", map[string]any{"merge_request": ref})
+	if m.called("PUT "+pr7+"/merge") != 0 {
+		t.Error("the tool called merge on a blocked pull request")
+	}
+	pr = openPR("clean") // a person approved the review
+	_, _, out = call("merge_request_state", map[string]any{"merge_request": ref})
+	if out["state"] != "open" || out["reason"] != nil {
+		t.Errorf("after a person removed the block: %v", out)
+	}
+}
+
+func TestBlockedWithRunningChecksIsOpen(t *testing.T) {
+	routes := checks(queuedRun, "pending", 0)
+	routes["GET "+pr7] = reply(200, openPR("blocked"))
 	_, call := setup(t, routes)
 	_, _, out := call("merge_request_state", map[string]any{"merge_request": ref})
 	if out["state"] != "open" {
-		t.Fatalf("before a try: %v", out)
-	}
-	call("merge_merge_request", map[string]any{"merge_request": ref})
-	_, _, out = call("merge_request_state", map[string]any{"merge_request": ref})
-	if out["state"] != "refused" || !strings.Contains(out["reason"].(string), "blocked") {
-		t.Errorf("after the refusal: %v", out)
-	}
-	pr = strings.ReplaceAll(pr, headSHA, "dddddddddddddddddddddddddddddddddddddddd")
-	routes["GET "+repo+"/commits/dddddddddddddddddddddddddddddddddddddddd/check-runs"] = reply(200, `{"total_count":0,"check_runs":[]}`)
-	routes["GET "+repo+"/commits/dddddddddddddddddddddddddddddddddddddddd/status"] = reply(200, `{"state":"pending","total_count":0}`)
-	_, _, out = call("merge_request_state", map[string]any{"merge_request": ref})
-	if out["state"] != "open" {
-		t.Errorf("a new head clears the refusal: %v", out)
+		t.Errorf("GitHub blocks a merge while required checks run. That is not a refusal: %v", out)
 	}
 }
 

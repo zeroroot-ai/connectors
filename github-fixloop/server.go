@@ -37,7 +37,8 @@ import (
 // The input and the result of each tool follow internal/engine/fixloop/connector.go
 // of zeroroot-ai/gibson. The mapping of the GitHub fields to the fields of the daemon:
 //   - state: open is "open". closed with merged true is "merged". Other closed is "closed".
-//     "refused" is a merge that GitHub refused, see the Refusals type.
+//     "refused" is an open pull request whose checks passed and whose mergeable_state
+//     shows a rule that blocks the merge now. The tool reads it from GitHub on each call.
 //   - pipeline_green: every check run is complete with the conclusion success, neutral or
 //     skipped, and the combined status is success or has no status. At least one must exist.
 //   - at: merged_at, closed_at or updated_at of the pull request.
@@ -101,7 +102,6 @@ type service struct {
 	client      *kit.Client
 	host        string // host of the GitHub web address
 	environment string
-	refusals    fixloop.Refusals
 	sleep       func(context.Context, time.Duration) error
 }
 
@@ -121,7 +121,9 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 		Name: "merge_request_state",
 		Description: "Read the state of one GitHub pull request: open, merged, closed or refused, the status of its checks, " +
 			"the merge commit and the time of the merge. Read only. " +
-			"The state is refused when GitHub refused a merge that merge_merge_request tried and the head did not change since.",
+			"The state is refused when the checks passed and a rule of the repository blocks the merge now: a review, a " +
+			"conflict, a draft, a branch that is behind. The reason is \"GitHub does not allow the merge: \" and the " +
+			"mergeable_state of GitHub. The tool reads this from GitHub on each call and keeps no memory of it.",
 		Annotations: kit.ReadOnly("GitHub pull request state"),
 	}, v.mergeRequestState)
 	kit.AddTool(s, log, &mcp.Tool{
@@ -303,19 +305,29 @@ func (v *service) stateOf(ctx context.Context, r prRef, pr *ghPR) (fixloop.State
 		st.MergeCommit = pr.MergeCommitSHA
 		st.MergedAt = fixloop.Time(fixloop.ParseTime(pr.MergedAt))
 		st.At = st.MergedAt
-		v.refusals.Clear(st.MergeRequest)
 	case pr.State == "closed":
 		st.State = fixloop.Closed
 		st.At = fixloop.Time(fixloop.ParseTime(pr.ClosedAt))
-		v.refusals.Clear(st.MergeRequest)
 	default:
 		st.State = fixloop.Open
 		st.At = fixloop.Time(fixloop.ParseTime(pr.UpdatedAt))
-		if reason, ok := v.refusals.Get(st.MergeRequest, pr.Head.SHA); ok {
+		if reason, ok := blocked(pr); ok && st.PipelineGreen {
 			st.State, st.Reason = fixloop.Refused, reason
 		}
 	}
 	return st, nil
+}
+
+// blocked returns the reason when the mergeable state of GitHub shows a rule
+// of the repository that blocks the merge: a review, a conflict, a draft, a
+// branch that is behind. The fix then waits on a person. A state that GitHub
+// has not settled does not block.
+func blocked(pr *ghPR) (string, bool) {
+	switch pr.MergeableState {
+	case "clean", "has_hooks", "unknown", "unstable", "":
+		return "", false
+	}
+	return "GitHub does not allow the merge: " + pr.MergeableState, true
 }
 
 // ---- merge_request_state ----
@@ -378,6 +390,8 @@ func (v *service) tryMerge(ctx context.Context, r prRef, pr *ghPR, wantSHA, meth
 	case pr.State == "closed":
 		st.Reason = "the pull request is closed"
 		return st, false, nil
+	case st.State == fixloop.Refused:
+		return st, false, nil
 	case wantSHA != "" && !strings.EqualFold(wantSHA, pr.Head.SHA):
 		st.Reason = "the head of the pull request is not the sha that was tested. A push changed it."
 		return st, false, nil
@@ -399,15 +413,13 @@ func (v *service) tryMerge(ctx context.Context, r prRef, pr *ghPR, wantSHA, meth
 			return st, false, nil
 		}
 	}
-	switch pr.MergeableState {
-	case "clean", "has_hooks":
-	case "unknown", "unstable", "":
+	if reason, ok := blocked(pr); ok {
+		st.State, st.Reason = fixloop.Refused, reason
+		return st, false, nil
+	}
+	if pr.MergeableState != "clean" && pr.MergeableState != "has_hooks" {
 		st.Reason = "GitHub has not settled the merge status: " + pr.MergeableState
 		return st, false, nil
-	default:
-		// A rule of the repository blocks the merge: a review, a conflict, a
-		// draft, a branch that is behind. The fix waits on a person.
-		return v.refuse(st, pr.Head.SHA, "GitHub does not allow the merge: "+pr.MergeableState), false, nil
 	}
 	body := map[string]any{"sha": st.HeadSHA}
 	if method != "" {
@@ -417,7 +429,7 @@ func (v *service) tryMerge(ctx context.Context, r prRef, pr *ghPR, wantSHA, meth
 		Method: http.MethodPut, Path: repoPath(r, "pulls", strconv.Itoa(r.number), "merge"), JSON: body,
 	}, nil)
 	if err != nil {
-		return v.mergeError(ctx, r, pr, st, err)
+		return v.mergeError(ctx, r, st, err)
 	}
 	latest, err := v.getPR(ctx, r)
 	if err != nil {
@@ -430,7 +442,7 @@ func (v *service) tryMerge(ctx context.Context, r prRef, pr *ghPR, wantSHA, meth
 // mergeError turns an error of the merge call into a result. A retry of a
 // merge that GitHub already did answers with a refusal, so the tool reads the
 // pull request again before it reports one.
-func (v *service) mergeError(ctx context.Context, r prRef, pr *ghPR, st fixloop.State, err error) (fixloop.State, bool, error) {
+func (v *service) mergeError(ctx context.Context, r prRef, st fixloop.State, err error) (fixloop.State, bool, error) {
 	var ae *kit.APIError
 	if !errors.As(err, &ae) {
 		return st, false, fmt.Errorf("merge pull request: %w", err)
@@ -445,15 +457,10 @@ func (v *service) mergeError(ctx context.Context, r prRef, pr *ghPR, st fixloop.
 			merged, serr := v.stateOf(ctx, r, latest)
 			return merged, serr == nil, serr
 		}
-		return v.refuse(st, pr.Head.SHA, "GitHub refused the merge: "+briefBody(ae)), false, nil
+		st.State, st.Reason = fixloop.Refused, "GitHub refused the merge: "+briefBody(ae)
+		return st, false, nil
 	}
 	return st, false, fmt.Errorf("merge pull request: %w", err)
-}
-
-func (v *service) refuse(st fixloop.State, sha, reason string) fixloop.State {
-	v.refusals.Note(st.MergeRequest, sha, reason)
-	st.State, st.Reason = fixloop.Refused, reason
-	return st
 }
 
 // briefBody returns the message of a GitHub error body, or the HTTP status.

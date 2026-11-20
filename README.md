@@ -13,7 +13,7 @@ The repo is one Go module. We chose one module over one module for each tool for
 | Path | Content |
 |---|---|
 | `internal/kit` | Environment, secret type, logger, vendor HTTP client, validation, tool helpers and the streamable HTTP server. |
-| `internal/fixloop` | The types of the fix loop that the two Git host servers share, and the memory of refused merges. |
+| `internal/fixloop` | The types of the fix loop that the two Git host servers share. |
 | `internal/kit/kittest` | Test helpers: an in-memory MCP client. |
 | `<tool>/` | One server: `main.go`, `server.go`, tests, `Dockerfile`, `README.md`. |
 | `_template/` | The template of a new server. |

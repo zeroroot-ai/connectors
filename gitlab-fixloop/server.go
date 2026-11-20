@@ -35,7 +35,9 @@ import (
 // The input and the result of each tool follow internal/engine/fixloop/connector.go
 // of zeroroot-ai/gibson. The mapping of the GitLab fields to the fields of the daemon:
 //   - state: opened and locked are "open". merged is "merged". closed is "closed".
-//     "refused" is a merge that GitLab refused, see the Refusals type.
+//     "refused" is an open merge request whose head pipeline succeeded and whose
+//     detailed_merge_status shows a rule that blocks the merge now. The tool reads it
+//     from GitLab on each call.
 //   - pipeline_green: true when head_pipeline.status is "success" and head_pipeline.sha is the head sha.
 //   - at: merged_at, closed_at or updated_at of the merge request.
 //   - deployment_state.application: the path of the project. restart is always off.
@@ -85,7 +87,6 @@ type service struct {
 	client      *kit.Client
 	host        string // host and port of the GitLab web address
 	environment string
-	refusals    fixloop.Refusals
 }
 
 func (v *service) register(s *mcp.Server, log *slog.Logger) {
@@ -93,7 +94,9 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 		Name: "merge_request_state",
 		Description: "Read the state of one GitLab merge request: open, merged, closed or refused, the status of its head " +
 			"pipeline, the merge commit and the time of the merge. Read only. " +
-			"The state is refused when GitLab refused a merge that merge_merge_request tried and the head did not change since.",
+			"The state is refused when the head pipeline succeeded and a rule of the project blocks the merge now: an " +
+			"approval, a thread, a draft, a conflict. The reason is \"GitLab does not allow the merge: \" and the " +
+			"detailed_merge_status of GitLab. The tool reads this from GitLab on each call and keeps no memory of it.",
 		Annotations: kit.ReadOnly("GitLab merge request state"),
 	}, v.mergeRequestState)
 	kit.AddTool(s, log, &mcp.Tool{
@@ -208,7 +211,7 @@ func pipelineStatus(mr *glMR) (string, bool) {
 }
 
 // stateOf maps a GitLab merge request to the state of the daemon.
-func (v *service) stateOf(key string, mr *glMR) fixloop.State {
+func stateOf(key string, mr *glMR) fixloop.State {
 	status, green := pipelineStatus(mr)
 	st := fixloop.State{MergeRequest: key, PipelineStatus: status, PipelineGreen: green, HeadSHA: mr.SHA}
 	switch mr.State {
@@ -220,19 +223,31 @@ func (v *service) stateOf(key string, mr *glMR) fixloop.State {
 		}
 		st.MergedAt = fixloop.Time(fixloop.ParseTime(mr.MergedAt))
 		st.At = st.MergedAt
-		v.refusals.Clear(key)
 	case "closed":
 		st.State = fixloop.Closed
 		st.At = fixloop.Time(fixloop.ParseTime(mr.ClosedAt))
-		v.refusals.Clear(key)
 	default:
 		st.State = fixloop.Open
 		st.At = fixloop.Time(fixloop.ParseTime(mr.UpdatedAt))
-		if reason, ok := v.refusals.Get(key, mr.SHA); ok {
-			st.State, st.Reason = fixloop.Refused, reason
+		if status := mergeStatus(mr); green && status != "mergeable" && !transientStatus[status] {
+			// A rule of the project blocks the merge: an approval, a thread, a
+			// draft, a conflict. The fix waits on a person.
+			st.State, st.Reason = fixloop.Refused, "GitLab does not allow the merge: "+status
 		}
 	}
 	return st
+}
+
+// mergeStatus returns the detailed_merge_status of the merge request. GitLab
+// before 15.6 has merge_status only.
+func mergeStatus(mr *glMR) string {
+	if mr.DetailedMergeStatus != "" {
+		return mr.DetailedMergeStatus
+	}
+	if status := map[string]string{"can_be_merged": "mergeable", "cannot_be_merged": "conflict"}[mr.MergeStatus]; status != "" {
+		return status
+	}
+	return "checking"
 }
 
 // ---- merge_request_state ----
@@ -246,7 +261,7 @@ func (v *service) mergeRequestState(ctx context.Context, _ *mcp.CallToolRequest,
 	if err != nil {
 		return nil, fixloop.State{}, err
 	}
-	return nil, v.stateOf(refKey(project, iid), mr), nil
+	return nil, stateOf(refKey(project, iid), mr), nil
 }
 
 // ---- merge_merge_request ----
@@ -284,12 +299,14 @@ var transientStatus = map[string]bool{"checking": true, "unchecked": true, "prep
 // after the check cannot be merged.
 func (v *service) tryMerge(ctx context.Context, project string, iid int, mr *glMR, wantSHA string) (fixloop.State, bool, error) {
 	key := refKey(project, iid)
-	st := v.stateOf(key, mr)
+	st := stateOf(key, mr)
 	switch {
 	case mr.State == "merged":
 		return st, true, nil
 	case mr.State == "closed":
 		st.Reason = "the merge request is closed"
+		return st, false, nil
+	case st.State == fixloop.Refused:
 		return st, false, nil
 	case wantSHA != "" && !strings.EqualFold(wantSHA, mr.SHA):
 		st.Reason = "the head of the merge request is not the sha that was tested. A push changed it."
@@ -298,22 +315,9 @@ func (v *service) tryMerge(ctx context.Context, project string, iid int, mr *glM
 		st.Reason = "the head pipeline has not succeeded: " + st.PipelineStatus
 		return st, false, nil
 	}
-	status := mr.DetailedMergeStatus
-	if status == "" { // GitLab before 15.6 has merge_status only
-		status = map[string]string{"can_be_merged": "mergeable", "cannot_be_merged": "conflict"}[mr.MergeStatus]
-		if status == "" {
-			status = "checking"
-		}
-	}
-	switch {
-	case status == "mergeable":
-	case transientStatus[status]:
+	if status := mergeStatus(mr); status != "mergeable" {
 		st.Reason = "GitLab has not settled the merge status: " + status
 		return st, false, nil
-	default:
-		// A rule of the project blocks the merge: an approval, a thread, a
-		// draft, a conflict. The fix waits on a person.
-		return v.refuse(st, key, mr.SHA, "GitLab does not allow the merge: "+status), false, nil
 	}
 	var merged glMR
 	err := v.client.Do(ctx, kit.Request{
@@ -328,15 +332,15 @@ func (v *service) tryMerge(ctx context.Context, project string, iid int, mr *glM
 			}
 			merged = *latest
 		}
-		return v.stateOf(key, &merged), merged.State == "merged", nil
+		return stateOf(key, &merged), merged.State == "merged", nil
 	}
-	return v.mergeError(ctx, project, iid, mr, st, err)
+	return v.mergeError(ctx, project, iid, st, err)
 }
 
 // mergeError turns an error of the merge call into a result. A retry of a
 // merge that GitLab already did answers with a refusal, so the tool reads the
 // merge request again before it reports one.
-func (v *service) mergeError(ctx context.Context, project string, iid int, mr *glMR, st fixloop.State, err error) (fixloop.State, bool, error) {
+func (v *service) mergeError(ctx context.Context, project string, iid int, st fixloop.State, err error) (fixloop.State, bool, error) {
 	var ae *kit.APIError
 	if !errors.As(err, &ae) {
 		return st, false, fmt.Errorf("merge merge request: %w", err)
@@ -349,17 +353,12 @@ func (v *service) mergeError(ctx context.Context, project string, iid int, mr *g
 		key := refKey(project, iid)
 		latest, rerr := v.getMR(ctx, project, iid)
 		if rerr == nil && latest.State == "merged" {
-			return v.stateOf(key, latest), true, nil
+			return stateOf(key, latest), true, nil
 		}
-		return v.refuse(st, key, mr.SHA, "GitLab refused the merge: "+briefBody(ae)), false, nil
+		st.State, st.Reason = fixloop.Refused, "GitLab refused the merge: "+briefBody(ae)
+		return st, false, nil
 	}
 	return st, false, fmt.Errorf("merge merge request: %w", err)
-}
-
-func (v *service) refuse(st fixloop.State, key, sha, reason string) fixloop.State {
-	v.refusals.Note(key, sha, reason)
-	st.State, st.Reason = fixloop.Refused, reason
-	return st
 }
 
 // briefBody returns the message of a GitLab error body, or the raw start of it.

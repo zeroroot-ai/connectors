@@ -5,21 +5,11 @@ import (
 	"time"
 )
 
-func TestRefusals(t *testing.T) {
-	var r Refusals
-	if _, ok := r.Get("a!1", "s1"); ok {
-		t.Fatal("empty memory returned a refusal")
-	}
-	r.Note("a!1", "s1", "not approved")
-	if got, ok := r.Get("a!1", "s1"); !ok || got != "not approved" {
-		t.Fatalf("Get = %q, %v", got, ok)
-	}
-	if _, ok := r.Get("a!1", "s2"); ok {
-		t.Error("a refusal of an older head counted")
-	}
-	r.Clear("a!1")
-	if _, ok := r.Get("a!1", "s1"); ok {
-		t.Error("Clear kept the refusal")
+func TestRevertBranch(t *testing.T) {
+	for try, want := range map[int]string{1: "b", 2: "b-2", 3: "b-3"} {
+		if got := RevertBranch("b", try); got != want {
+			t.Errorf("RevertBranch(b, %d) = %s, want %s", try, got, want)
+		}
 	}
 }
 

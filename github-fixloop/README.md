@@ -57,7 +57,11 @@ The tool sends the head sha that it checked in the merge call. GitHub refuses th
 
 ### Refused
 
-A rule of the repository can block a merge: a missing review, a conflict, a draft, a branch that is behind. The tool then returns the state `refused` with `mergeable_state` as the reason, and it does not call the merge. A refusal of the merge call (HTTP 403, 405 or 422) has the same result. `merge_request_state` returns `refused` for that pull request while its head commit stays the same. The server keeps this memory in its process. After a restart, the next call of `merge_merge_request` sets it again.
+A rule of the repository can block a merge: a missing review, a conflict, a draft, a branch that is behind. GitHub shows the rule in `mergeable_state`. When the checks of the head passed and `mergeable_state` is not `clean`, `has_hooks`, `unstable` or `unknown`, both `merge_request_state` and `merge_merge_request` return the state `refused`. The reason is `GitHub does not allow the merge: <mergeable_state>`, for example `GitHub does not allow the merge: blocked`. `merge_merge_request` then does not call the merge.
+
+The server keeps no memory of a refusal. It reads the state from GitHub on each call. When a person removes the block, the next call returns `open`. Each replica of the server, and a server after a restart, gives the same answer.
+
+A refusal of the merge call (HTTP 403, 405 or 422) returns `refused` in the result of that call only. The reason is `GitHub refused the merge: <message of GitHub>`. The next `merge_request_state` reads the state of GitHub again.
 
 ### Revert
 
