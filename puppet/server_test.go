@@ -141,7 +141,8 @@ func TestGetJob(t *testing.T) {
 	if isErr {
 		t.Fatalf("tool error: %s", text)
 	}
-	for _, want := range []string{`"state":"finished"`, `"task":"pe_patch::patch_server"`, `"node_count":1`, `"name":"web01.example.com"`, "patched 12 packages", `"output":"ok"`} {
+	for _, want := range []string{`"state":"finished"`, `"task":"pe_patch::patch_server"`, `"node_count":1`,
+		`"name":"web01.example.com"`, "patched 12 packages", `"output":"ok"`} {
 		if !strings.Contains(text, want) {
 			t.Errorf("output lacks %s: %s", want, text)
 		}

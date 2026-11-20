@@ -143,7 +143,7 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 			"It merges the revert pull request when its checks passed. Otherwise it returns the state of the revert pull request, " +
 			"and the caller calls the tool again later. The same call twice opens one revert pull request. " +
 			"When a person closed the revert pull request without a merge, the next call opens a new one on a new branch. " +
-			"After "+strconv.Itoa(fixloop.RevertTries)+" closed revert pull requests, the tool returns an error, "+
+			"After " + strconv.Itoa(fixloop.RevertTries) + " closed revert pull requests, the tool returns an error, " +
 			"and a person reverts by hand. " +
 			"Undo: call revert_merge_request with the revert_merge_request value of the result.",
 		Annotations: kit.Reversible("Revert GitHub pull request", true),

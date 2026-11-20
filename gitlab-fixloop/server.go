@@ -113,8 +113,8 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 			"and merges it when its head pipeline succeeded. When the pipeline has not finished, it returns the state of the " +
 			"revert merge request. Call the tool again with the same input to merge it later. The same call twice opens one " +
 			"revert merge request. When a person closed the revert merge request without a merge, the next call opens a new " +
-			"one on a new branch. After "+strconv.Itoa(fixloop.RevertTries)+" closed revert merge requests, the tool returns " +
-			"an error, and a person reverts by hand. " +
+			"one on a new branch. After " + strconv.Itoa(fixloop.RevertTries) + " closed revert merge requests, " +
+			"the tool returns an error, and a person reverts by hand. " +
 			"Undo: call revert_merge_request with the revert_merge_request value of the result.",
 		Annotations: kit.Reversible("Revert GitLab merge request", true),
 	}, v.revertMergeRequest)
