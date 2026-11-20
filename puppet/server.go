@@ -25,8 +25,10 @@ import (
 //     answer 202 {"job": {"id": "<job url>", "name": "<job number>"}}
 //   - GET /orchestrator/v1/jobs/{id}
 //     https://help.puppet.com/pe/current/topics/orchestrator_api_get_jobs_job_id.htm
-//     answer {"id","state","options","node_count","timestamp","status","nodes"}
+//     answer {"id","type","state","options","node_count","timestamp","status","nodes"}
 //     state is new, ready, running, stopping, stopped, finished or failed
+//     options holds the description of the job. The top-level description key
+//     is deprecated, and the example of the page still shows it.
 //   - GET /orchestrator/v1/jobs/{id}/nodes
 //     https://help.puppet.com/pe/current/topics/orchestrator_api_get_jobs_job_id_nodes.htm
 //     answer {"items":[{"name","state","result","details","duration",
@@ -35,8 +37,13 @@ import (
 //
 // Puppet has no patch API of its own. A patch is a task that the operator
 // names in the configuration. The model never names a task, so it cannot run
-// an arbitrary task. get_job reads options.task and type of the job, and shows
-// only a job of those two tasks.
+// an arbitrary task.
+//
+// The page of GET /jobs/{id} does not show the task name of a task job. So
+// the start tools set the description of the job to jobPrefix and the task
+// name, and get_job shows only a task job with one of these two descriptions.
+// When the job also holds options.task, it must name the same task. This is
+// not verified against a live orchestrator.
 
 var (
 	taskFormat = regexp.MustCompile(`^[a-z][a-z0-9_]*(::[a-z][a-z0-9_]*)*$`)
@@ -45,6 +52,12 @@ var (
 	certname = regexp.MustCompile(`^[a-z0-9]([a-z0-9._-]{0,250}[a-z0-9])?$`)
 	jobID    = regexp.MustCompile(`^\d{1,12}$`)
 )
+
+// jobPrefix starts the description of each job that this server starts. The
+// task name follows it.
+const jobPrefix = "zeroroot fix loop task: "
+
+func jobDescription(task string) string { return jobPrefix + task }
 
 type taskSpec struct {
 	Name   string
@@ -169,14 +182,14 @@ type startOutput struct {
 }
 
 func (v *service) startPatch(ctx context.Context, _ *mcp.CallToolRequest, in nodeInput) (*mcp.CallToolResult, startOutput, error) {
-	return v.start(ctx, v.patch, in.Node, "Zero Root: patch")
+	return v.start(ctx, v.patch, in.Node)
 }
 
 func (v *service) startRollback(ctx context.Context, _ *mcp.CallToolRequest, in nodeInput) (*mcp.CallToolResult, startOutput, error) {
-	return v.start(ctx, v.rollback, in.Node, "Zero Root: rollback")
+	return v.start(ctx, v.rollback, in.Node)
 }
 
-func (v *service) start(ctx context.Context, t taskSpec, node, description string) (*mcp.CallToolResult, startOutput, error) {
+func (v *service) start(ctx context.Context, t taskSpec, node string) (*mcp.CallToolResult, startOutput, error) {
 	out := startOutput{Task: t.Name, Node: node}
 	if err := kit.CheckString("node", node, 253, certname); err != nil {
 		return nil, out, err
@@ -194,7 +207,7 @@ func (v *service) start(ctx context.Context, t taskSpec, node, description strin
 			"task":        t.Name,
 			"params":      t.Params,
 			"scope":       map[string]any{"nodes": []string{node}},
-			"description": description,
+			"description": jobDescription(t.Name),
 		},
 	}, &resp)
 	if err != nil {
@@ -236,12 +249,14 @@ func (v *service) getJob(ctx context.Context, _ *mcp.CallToolRequest, in jobInpu
 		return nil, out, err
 	}
 	var job struct {
-		Type      string `json:"type"`
-		State     string `json:"state"`
-		NodeCount int    `json:"node_count"`
-		Timestamp string `json:"timestamp"`
-		Options   struct {
-			Task string `json:"task"`
+		Type        string `json:"type"`
+		State       string `json:"state"`
+		NodeCount   int    `json:"node_count"`
+		Timestamp   string `json:"timestamp"`
+		Description string `json:"description"`
+		Options     struct {
+			Task        string `json:"task"`
+			Description string `json:"description"`
 		} `json:"options"`
 	}
 	if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: kit.Path("jobs", in.JobID)}, &job); err != nil {
@@ -249,11 +264,21 @@ func (v *service) getJob(ctx context.Context, _ *mcp.CallToolRequest, in jobInpu
 	}
 	// The tool shows only a job of the two tasks of this server. Another job
 	// can hold the output of any task on any node.
-	if job.Type != "task" || (job.Options.Task != v.patch.Name && job.Options.Task != v.rollback.Name) {
+	description := job.Options.Description
+	if description == "" {
+		description = job.Description
+	}
+	task := ""
+	for _, t := range []string{v.patch.Name, v.rollback.Name} {
+		if description == jobDescription(t) && (job.Options.Task == "" || job.Options.Task == t) {
+			task = t
+		}
+	}
+	if job.Type != "task" || task == "" {
 		return nil, out, fmt.Errorf("%w: job %s is not a job of the patch task or the rollback task of this server",
 			kit.ErrInvalidInput, in.JobID)
 	}
-	out.Task = job.Options.Task
+	out.Task = task
 	var nodes struct {
 		Items []struct {
 			Name     string  `json:"name"`

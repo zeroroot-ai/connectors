@@ -60,20 +60,28 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"job":{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/81","name":"81"}}`))
 	case r.URL.Path == "/orchestrator/v1/jobs/81":
 		_, _ = w.Write([]byte(`{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/81","type":"task","state":"finished",` +
-			`"options":{"noop":false,"environment":"production","task":"pe_patch::patch_server","params":{"reboot":"never"}},` +
+			`"options":{"noop":false,"environment":"production","description":"zeroroot fix loop task: pe_patch::patch_server"},` +
 			`"node_count":1,"timestamp":"2026-11-20T16:45:31Z",` +
 			`"status":[{"state":"new","enter_time":"2026-11-20T16:44:31Z"}],` +
 			`"nodes":{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/81/nodes"}}`))
+	case r.URL.Path == "/orchestrator/v1/jobs/84":
+		// A rollback job with the deprecated top-level description key.
+		_, _ = w.Write([]byte(`{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/84","type":"task","state":"running",` +
+			`"description":"zeroroot fix loop task: acme::rollback_patch","options":{"environment":"production"},"node_count":1}`))
 	case r.URL.Path == "/orchestrator/v1/jobs/82":
-		// A job that the patch server did not start: another task.
+		// A job of another task that copies the description of the patch job.
 		_, _ = w.Write([]byte(`{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/82","type":"task","state":"finished",` +
-			`"options":{"environment":"production","task":"acme::read_secrets","params":{}},"node_count":40}`))
+			`"options":{"environment":"production","task":"acme::read_secrets",` +
+			`"description":"zeroroot fix loop task: pe_patch::patch_server"},"node_count":40}`))
+	case r.URL.Path == "/orchestrator/v1/jobs/85":
+		// A task job that a person started, with no description.
+		_, _ = w.Write([]byte(`{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/85","type":"task","state":"finished",` +
+			`"options":{"environment":"production"},"node_count":40}`))
 	case r.URL.Path == "/orchestrator/v1/jobs/83":
 		// A Puppet run, not a task.
 		_, _ = w.Write([]byte(`{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/83","type":"deploy","state":"finished",` +
 			`"options":{"environment":"production","noop":false},"node_count":40}`))
-	case r.URL.Path == "/orchestrator/v1/jobs/81/nodes", r.URL.Path == "/orchestrator/v1/jobs/82/nodes",
-		r.URL.Path == "/orchestrator/v1/jobs/83/nodes":
+	case strings.HasSuffix(r.URL.Path, "/nodes"):
 		_, _ = w.Write([]byte(`{"next-events":{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/81/events?start=10"},` +
 			`"items":[{"duration":48.0,"state":"finished","name":"web01.example.com","details":{"message":"patched 12 packages"},` +
 			`"start_timestamp":"2026-11-20T16:44:40Z","finish_timestamp":"2026-11-20T16:45:28Z","result":{"output":"ok"}}]}`))
@@ -122,7 +130,7 @@ func TestStartPatchAndRollback(t *testing.T) {
 	}
 	_ = json.Unmarshal([]byte(m.bodies[0]), &body)
 	if body.Environment != "production" || body.Task != "pe_patch::patch_server" || body.Params["reboot"] != "never" ||
-		body.Scope["nodes"][0] != "web01.example.com" || !strings.HasPrefix(body.Description, "Zero Root") {
+		body.Scope["nodes"][0] != "web01.example.com" || body.Description != "zeroroot fix loop task: pe_patch::patch_server" {
 		t.Errorf("body = %+v", body)
 	}
 	if m.token != "tok" {
@@ -130,7 +138,8 @@ func TestStartPatchAndRollback(t *testing.T) {
 	}
 	isErr, text = call("start_rollback_job", map[string]any{"node": "web01.example.com"})
 	_ = json.Unmarshal([]byte(m.bodies[1]), &body)
-	if isErr || body.Task != "acme::rollback_patch" || !strings.Contains(text, `"job_id":"81"`) {
+	if isErr || body.Task != "acme::rollback_patch" || !strings.Contains(text, `"job_id":"81"`) ||
+		body.Description != "zeroroot fix loop task: acme::rollback_patch" {
 		t.Errorf("rollback: %v %s %+v", isErr, text, body)
 	}
 }
@@ -152,12 +161,25 @@ func TestGetJob(t *testing.T) {
 	}
 }
 
+// TestGetJobReadsDeprecatedDescription asserts that a job with the top-level
+// description key, which the example of the Puppet page shows, is found.
+func TestGetJobReadsDeprecatedDescription(t *testing.T) {
+	m, call, _ := setup(t)
+	isErr, text := call("get_job", map[string]any{"job_id": "84"})
+	if isErr || !strings.Contains(text, `"task":"acme::rollback_patch"`) || !strings.Contains(text, `"state":"running"`) {
+		t.Fatalf("job 84: %v %s", isErr, text)
+	}
+	if len(m.calls) != 2 || m.calls[1] != "GET /orchestrator/v1/jobs/84/nodes" {
+		t.Errorf("calls = %v", m.calls)
+	}
+}
+
 // TestGetJobRefusesOtherJobs asserts that get_job shows only a job of the
 // patch task or the rollback task of the operator. The model cannot read the
 // nodes or the output of any other orchestrator job.
 func TestGetJobRefusesOtherJobs(t *testing.T) {
 	m, call, _ := setup(t)
-	for _, id := range []string{"82", "83"} {
+	for _, id := range []string{"82", "83", "85"} {
 		m.calls = nil
 		isErr, text := call("get_job", map[string]any{"job_id": id})
 		if !isErr || !strings.Contains(text, "not a job of the patch task or the rollback task") {
