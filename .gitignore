@@ -1,0 +1,15 @@
+# Git worktrees of parallel sessions
+.worktrees/
+
+# Compiled binaries (each server is a directory, so the binary has its name)
+/bin/
+
+# Go toolchain
+*.test
+*.out
+coverage.html
+
+# Editor cruft
+.DS_Store
+.idea/
+.vscode/
