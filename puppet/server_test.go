@@ -59,11 +59,21 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte(`{"job":{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/81","name":"81"}}`))
 	case r.URL.Path == "/orchestrator/v1/jobs/81":
-		_, _ = w.Write([]byte(`{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/81","state":"finished",` +
-			`"options":{"noop":false,"environment":"production"},"node_count":1,"timestamp":"2026-11-20T16:45:31Z",` +
+		_, _ = w.Write([]byte(`{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/81","type":"task","state":"finished",` +
+			`"options":{"noop":false,"environment":"production","task":"pe_patch::patch_server","params":{"reboot":"never"}},` +
+			`"node_count":1,"timestamp":"2026-11-20T16:45:31Z",` +
 			`"status":[{"state":"new","enter_time":"2026-11-20T16:44:31Z"}],` +
 			`"nodes":{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/81/nodes"}}`))
-	case r.URL.Path == "/orchestrator/v1/jobs/81/nodes":
+	case r.URL.Path == "/orchestrator/v1/jobs/82":
+		// A job that the patch server did not start: another task.
+		_, _ = w.Write([]byte(`{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/82","type":"task","state":"finished",` +
+			`"options":{"environment":"production","task":"acme::read_secrets","params":{}},"node_count":40}`))
+	case r.URL.Path == "/orchestrator/v1/jobs/83":
+		// A Puppet run, not a task.
+		_, _ = w.Write([]byte(`{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/83","type":"deploy","state":"finished",` +
+			`"options":{"environment":"production","noop":false},"node_count":40}`))
+	case r.URL.Path == "/orchestrator/v1/jobs/81/nodes", r.URL.Path == "/orchestrator/v1/jobs/82/nodes",
+		r.URL.Path == "/orchestrator/v1/jobs/83/nodes":
 		_, _ = w.Write([]byte(`{"next-events":{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/81/events?start=10"},` +
 			`"items":[{"duration":48.0,"state":"finished","name":"web01.example.com","details":{"message":"patched 12 packages"},` +
 			`"start_timestamp":"2026-11-20T16:44:40Z","finish_timestamp":"2026-11-20T16:45:28Z","result":{"output":"ok"}}]}`))
@@ -131,13 +141,30 @@ func TestGetJob(t *testing.T) {
 	if isErr {
 		t.Fatalf("tool error: %s", text)
 	}
-	for _, want := range []string{`"state":"finished"`, `"node_count":1`, `"name":"web01.example.com"`, "patched 12 packages", `"output":"ok"`} {
+	for _, want := range []string{`"state":"finished"`, `"task":"pe_patch::patch_server"`, `"node_count":1`, `"name":"web01.example.com"`, "patched 12 packages", `"output":"ok"`} {
 		if !strings.Contains(text, want) {
 			t.Errorf("output lacks %s: %s", want, text)
 		}
 	}
 	if m.calls[0] != "GET /orchestrator/v1/jobs/81" || m.calls[1] != "GET /orchestrator/v1/jobs/81/nodes" {
 		t.Errorf("calls = %v", m.calls)
+	}
+}
+
+// TestGetJobRefusesOtherJobs asserts that get_job shows only a job of the
+// patch task or the rollback task of the operator. The model cannot read the
+// nodes or the output of any other orchestrator job.
+func TestGetJobRefusesOtherJobs(t *testing.T) {
+	m, call, _ := setup(t)
+	for _, id := range []string{"82", "83"} {
+		m.calls = nil
+		isErr, text := call("get_job", map[string]any{"job_id": id})
+		if !isErr || !strings.Contains(text, "not a job of the patch task or the rollback task") {
+			t.Errorf("job %s: isErr=%v %s", id, isErr, text)
+		}
+		if len(m.calls) != 1 || m.calls[0] != "GET /orchestrator/v1/jobs/"+id {
+			t.Errorf("job %s: calls = %v, want only the job read", id, m.calls)
+		}
 	}
 }
 

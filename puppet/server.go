@@ -35,7 +35,8 @@ import (
 //
 // Puppet has no patch API of its own. A patch is a task that the operator
 // names in the configuration. The model never names a task, so it cannot run
-// an arbitrary task.
+// an arbitrary task. get_job reads options.task and type of the job, and shows
+// only a job of those two tasks.
 
 var (
 	taskFormat = regexp.MustCompile(`^[a-z][a-z0-9_]*(::[a-z][a-z0-9_]*)*$`)
@@ -150,7 +151,9 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 	kit.AddTool(s, log, &mcp.Tool{
 		Name: "get_job",
 		Description: "Read the state of one Puppet orchestrator job and the result of each node in it. Read only. " +
-			"The job state is new, ready, running, stopping, stopped, finished or failed.",
+			"The job state is new, ready, running, stopping, stopped, finished or failed. " +
+			"The tool shows only a job of the patch task or the rollback task of this server, " +
+			"as start_patch_job and start_rollback_job start them. It refuses any other job.",
 		Annotations: kit.ReadOnly("Get Puppet job"),
 	}, v.getJob)
 }
@@ -220,6 +223,7 @@ type nodeResult struct {
 
 type jobOutput struct {
 	JobID     string       `json:"job_id"`
+	Task      string       `json:"task"`
 	State     string       `json:"state"`
 	NodeCount int          `json:"node_count"`
 	Updated   string       `json:"timestamp,omitempty"`
@@ -232,13 +236,24 @@ func (v *service) getJob(ctx context.Context, _ *mcp.CallToolRequest, in jobInpu
 		return nil, out, err
 	}
 	var job struct {
+		Type      string `json:"type"`
 		State     string `json:"state"`
 		NodeCount int    `json:"node_count"`
 		Timestamp string `json:"timestamp"`
+		Options   struct {
+			Task string `json:"task"`
+		} `json:"options"`
 	}
 	if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: kit.Path("jobs", in.JobID)}, &job); err != nil {
 		return nil, out, puppetError("get job", err)
 	}
+	// The tool shows only a job of the two tasks of this server. Another job
+	// can hold the output of any task on any node.
+	if job.Type != "task" || (job.Options.Task != v.patch.Name && job.Options.Task != v.rollback.Name) {
+		return nil, out, fmt.Errorf("%w: job %s is not a job of the patch task or the rollback task of this server",
+			kit.ErrInvalidInput, in.JobID)
+	}
+	out.Task = job.Options.Task
 	var nodes struct {
 		Items []struct {
 			Name     string  `json:"name"`
