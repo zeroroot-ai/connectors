@@ -41,9 +41,11 @@ import (
 //
 // The page of GET /jobs/{id} does not show the task name of a task job. So
 // the start tools set the description of the job to jobPrefix and the task
-// name, and get_job shows only a task job with one of these two descriptions.
-// When the job also holds options.task, it must name the same task. This is
-// not verified against a live orchestrator.
+// name. get_job shows only a task job with one of these two descriptions and
+// an options.task that names the same task. A job with no options.task is
+// refused, also when its description matches. No live orchestrator has
+// confirmed that a task job holds options.task. Until one does, get_job can
+// refuse each job, and that refusal is safe.
 
 var (
 	taskFormat = regexp.MustCompile(`^[a-z][a-z0-9_]*(::[a-z][a-z0-9_]*)*$`)
@@ -270,7 +272,9 @@ func (v *service) getJob(ctx context.Context, _ *mcp.CallToolRequest, in jobInpu
 	}
 	task := ""
 	for _, t := range []string{v.patch.Name, v.rollback.Name} {
-		if description == jobDescription(t) && (job.Options.Task == "" || job.Options.Task == t) {
+		// options.task must name the task. A description alone is text that
+		// any person can copy, so an empty options.task is refused.
+		if description == jobDescription(t) && job.Options.Task == t {
 			task = t
 		}
 	}

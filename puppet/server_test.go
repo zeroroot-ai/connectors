@@ -60,14 +60,19 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"job":{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/81","name":"81"}}`))
 	case r.URL.Path == "/orchestrator/v1/jobs/81":
 		_, _ = w.Write([]byte(`{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/81","type":"task","state":"finished",` +
-			`"options":{"noop":false,"environment":"production","description":"zeroroot fix loop task: pe_patch::patch_server"},` +
-			`"node_count":1,"timestamp":"2026-11-20T16:45:31Z",` +
+			`"options":{"noop":false,"environment":"production","task":"pe_patch::patch_server",` +
+			`"description":"zeroroot fix loop task: pe_patch::patch_server"},"node_count":1,"timestamp":"2026-11-20T16:45:31Z",` +
 			`"status":[{"state":"new","enter_time":"2026-11-20T16:44:31Z"}],` +
 			`"nodes":{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/81/nodes"}}`))
 	case r.URL.Path == "/orchestrator/v1/jobs/84":
 		// A rollback job with the deprecated top-level description key.
 		_, _ = w.Write([]byte(`{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/84","type":"task","state":"running",` +
-			`"description":"zeroroot fix loop task: acme::rollback_patch","options":{"environment":"production"},"node_count":1}`))
+			`"description":"zeroroot fix loop task: acme::rollback_patch","options":{"environment":"production",` +
+			`"task":"acme::rollback_patch"},"node_count":1}`))
+	case r.URL.Path == "/orchestrator/v1/jobs/86":
+		// A job with the description of the patch job and no options.task.
+		_, _ = w.Write([]byte(`{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/86","type":"task","state":"finished",` +
+			`"options":{"environment":"production","description":"zeroroot fix loop task: pe_patch::patch_server"},"node_count":40}`))
 	case r.URL.Path == "/orchestrator/v1/jobs/82":
 		// A job of another task that copies the description of the patch job.
 		_, _ = w.Write([]byte(`{"id":"https://orchestrator.example.com:8143/orchestrator/v1/jobs/82","type":"task","state":"finished",` +
@@ -176,10 +181,11 @@ func TestGetJobReadsDeprecatedDescription(t *testing.T) {
 
 // TestGetJobRefusesOtherJobs asserts that get_job shows only a job of the
 // patch task or the rollback task of the operator. The model cannot read the
-// nodes or the output of any other orchestrator job.
+// nodes or the output of any other orchestrator job. Job 86 has the
+// description of the patch job and no options.task, so it is refused too.
 func TestGetJobRefusesOtherJobs(t *testing.T) {
 	m, call, _ := setup(t)
-	for _, id := range []string{"82", "83", "85"} {
+	for _, id := range []string{"82", "83", "85", "86"} {
 		m.calls = nil
 		isErr, text := call("get_job", map[string]any{"job_id": id})
 		if !isErr || !strings.Contains(text, "not a job of the patch task or the rollback task") {
