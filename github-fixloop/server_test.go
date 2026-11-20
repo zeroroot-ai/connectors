@@ -20,8 +20,11 @@ import (
 // https://docs.github.com/en/rest/checks/runs,
 // https://docs.github.com/en/rest/commits/statuses,
 // https://docs.github.com/en/rest/git/commits, https://docs.github.com/en/rest/git/refs,
-// https://docs.github.com/en/rest/deployments/deployments and
-// https://docs.github.com/en/rest/commits/commits#compare-two-commits.
+// https://docs.github.com/en/rest/deployments/deployments,
+// https://docs.github.com/en/rest/commits/commits#compare-two-commits,
+// https://docs.github.com/en/rest/repos/repos#get-a-repository,
+// https://docs.github.com/en/rest/branches/branches#get-a-branch and
+// https://docs.github.com/en/rest/repos/rules#get-rules-for-a-branch.
 type handler = func(http.ResponseWriter, *http.Request, map[string]any)
 
 type mock struct {
@@ -113,11 +116,24 @@ var mergedPR = pullJSON("closed", true, "null", "unknown", headSHA)
 
 func checks(runs, statusState string, statusTotal int) map[string]handler {
 	total := strings.Count(runs, `"status"`)
-	return map[string]handler{
+	return merge(repoRules(), map[string]handler{
 		"GET " + repo + "/commits/" + headSHA + "/check-runs": reply(200, `{"total_count":`+itoa(total)+`,"check_runs":[`+runs+`]}`),
 		"GET " + repo + "/commits/" + headSHA + "/status":     reply(200, `{"state":"`+statusState+`","total_count":`+itoa(statusTotal)+`}`),
+	})
+}
+
+// repoRules answers the merge methods of the repository and the rules of the
+// branch main: all merge methods allowed, no required check.
+func repoRules() map[string]handler {
+	return map[string]handler{
+		"GET " + repo: reply(200, allMethods),
+		"GET " + repo + "/branches/main": reply(200, `{"name":"main","protected":true,"protection":{"enabled":true,`+
+			`"required_status_checks":{"enforcement_level":"non_admins","contexts":[],"checks":[]}}}`),
+		"GET " + repo + "/rules/branches/main": reply(200, `[]`),
 	}
 }
+
+const allMethods = `{"full_name":"acme/shop","allow_merge_commit":true,"allow_squash_merge":true,"allow_rebase_merge":true}`
 
 func itoa(n int) string { return strconv.Itoa(n) }
 
@@ -533,11 +549,23 @@ func revertRoutes(found, revertChecks string) map[string]handler {
 			_, _ = w.Write([]byte(`{"merged":true}`))
 		},
 	}
-	return merge(routes, map[string]handler{
+	return merge(merge(routes, repoRules()), map[string]handler{
 		"GET " + repo + "/commits/" + revSHA + "/check-runs": reply(200, `{"total_count":1,"check_runs":[`+revertChecks+`]}`),
 		"GET " + repo + "/commits/" + revSHA + "/status":     reply(200, `{"state":"pending","total_count":0}`),
+		"GET " + repo + "/git/commits/" + revSHA: reply(200, `{"sha":"`+revSHA+`","tree":{"sha":"tparent"},`+
+			`"parents":[{"sha":"`+mergeSHA+`"}]}`),
+		"GET " + pr7 + "/commits": reply(200, prCommits),
 	})
 }
+
+// prCommits is the list of the three commits of pull request 7.
+const prCommits = `[` +
+	`{"sha":"1000000000000000000000000000000000000001","commit":{"message":"Add the query builder",` +
+	`"author":{"name":"Ada","email":"ada@example.com","date":"2026-11-19T10:00:00Z"}}},` +
+	`{"sha":"1000000000000000000000000000000000000002","commit":{"message":"Use bound parameters",` +
+	`"author":{"name":"Ada","email":"ada@example.com","date":"2026-11-19T11:00:00Z"}}},` +
+	`{"sha":"` + headSHA + `","commit":{"message":"Add a test",` +
+	`"author":{"name":"Ada","email":"ada@example.com","date":"2026-11-19T12:00:00Z"}}}]`
 
 func TestRevertBuildsTheCommitAndMerges(t *testing.T) {
 	m, call := setup(t, revertRoutes(`[]`, greenRun))
@@ -564,6 +592,11 @@ func TestRevertBuildsTheCommitAndMerges(t *testing.T) {
 	}
 	if got := m.bodies["PUT "+repo+"/pulls/8/merge"]["sha"]; got != revSHA {
 		t.Errorf("merge sha = %v", got)
+	}
+	// A merge commit has two parents. It is not a squash merge or a rebase
+	// merge, so the tool does not list the commits of the pull request.
+	if m.called("GET "+pr7+"/commits") != 0 {
+		t.Errorf("listed the commits of a merge with a merge commit: %v", m.calls)
 	}
 }
 
@@ -654,6 +687,9 @@ func TestRevertKeepsABranchFromAnEarlierCall(t *testing.T) {
 	if m.called("POST "+repo+"/git/commits") != 0 || m.called("POST "+repo+"/git/refs") != 0 {
 		t.Error("made the commit a second time")
 	}
+	if m.called("GET "+repo+"/git/commits/"+revSHA) != 1 {
+		t.Errorf("the tool kept the branch without a check of its commit: %v", m.calls)
+	}
 }
 
 func TestRevertRefusesWhenTheBranchMovedOn(t *testing.T) {
@@ -673,18 +709,29 @@ func TestRevertRefusesWhenTheBranchMovedOn(t *testing.T) {
 // After a rebase merge of three commits, the merge commit is the last of the
 // three, and a revert of it undoes one third of the pull request
 // (https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/about-merge-methods-on-github).
+// The rebase gives the commits new shas and keeps the author, its date and the
+// message. So the parent of the merge commit has a new sha and the author,
+// the date and the message of the second commit of the pull request.
 func TestRevertRefusesARebaseMerge(t *testing.T) {
 	routes := revertRoutes(`[]`, greenRun)
-	routes["GET "+repo+"/git/commits/"+mergeSHA] = reply(200, `{"sha":"`+mergeSHA+`","tree":{"sha":"tmerge"},"parents":[{"sha":"`+parentSHA+`"}]}`)
-	compare := "GET " + repo + "/compare/" + baseSHA + "..." + mergeSHA
-	routes[compare] = reply(200, `{"status":"ahead","ahead_by":3,"behind_by":0,"total_commits":3}`)
+	routes["GET "+repo+"/git/commits/"+mergeSHA] = reply(200, `{"sha":"`+mergeSHA+`","tree":{"sha":"tmerge"},`+
+		`"message":"Add a test","author":{"name":"Ada","email":"ada@example.com","date":"2026-11-19T12:00:00Z"},`+
+		`"parents":[{"sha":"`+parentSHA+`"}]}`)
+	routes["GET "+repo+"/git/commits/"+parentSHA] = reply(200, `{"sha":"`+parentSHA+`","tree":{"sha":"tparent"},`+
+		`"message":"Use bound parameters\n","author":{"name":"Ada","email":"ada@example.com","date":"2026-11-19T11:00:00Z"},`+
+		`"parents":[{"sha":"7777777777777777777777777777777777777777"}]}`)
+	var pages []string
+	routes["GET "+pr7+"/commits"] = func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+		pages = append(pages, r.URL.Query().Encode())
+		_, _ = w.Write([]byte(prCommits))
+	}
 	m, call := setup(t, routes)
 	isErr, text, _ := call("revert_merge_request", map[string]any{"merge_request": ref})
-	if !isErr || !strings.Contains(text, "rebase merge") {
+	if !isErr || !strings.Contains(text, "rebase merge of 3 commits") {
 		t.Errorf("isErr=%v %s", isErr, text)
 	}
-	if m.called(compare) != 1 {
-		t.Errorf("the tool did not compare the base with the merge commit: %v", m.calls)
+	if strings.Join(pages, " ") != "page=1&per_page=100" {
+		t.Errorf("pages of the commit list = %v", pages)
 	}
 	for _, c := range []string{"POST " + repo + "/git/commits", "POST " + repo + "/git/refs", "POST " + repo + "/pulls"} {
 		if m.called(c) != 0 {
@@ -693,18 +740,73 @@ func TestRevertRefusesARebaseMerge(t *testing.T) {
 	}
 }
 
-func TestRevertOfASquashMerge(t *testing.T) {
+// TestRevertOfASquashMergeAfterTheBaseMoved asserts that a squash merge is
+// accepted when the base branch moved after the pull request was opened. The
+// parent of the squash commit is the tip of the base before the merge, which
+// is not a commit of the pull request.
+func TestRevertOfASquashMergeAfterTheBaseMoved(t *testing.T) {
 	routes := revertRoutes(`[]`, greenRun)
-	routes["GET "+repo+"/git/commits/"+mergeSHA] = reply(200, `{"sha":"`+mergeSHA+`","tree":{"sha":"tmerge"},"parents":[{"sha":"`+parentSHA+`"}]}`)
-	compare := "GET " + repo + "/compare/" + baseSHA + "..." + mergeSHA
-	routes[compare] = reply(200, `{"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1}`)
+	routes["GET "+repo+"/git/commits/"+mergeSHA] = reply(200, `{"sha":"`+mergeSHA+`","tree":{"sha":"tmerge"},`+
+		`"message":"Fix SQL injection (#7)","author":{"name":"Ada","email":"ada@example.com","date":"2026-11-20T09:00:00Z"},`+
+		`"parents":[{"sha":"`+parentSHA+`"}]}`)
+	routes["GET "+repo+"/git/commits/"+parentSHA] = reply(200, `{"sha":"`+parentSHA+`","tree":{"sha":"tparent"},`+
+		`"message":"Bump the version (#6)","author":{"name":"Bo","email":"bo@example.com","date":"2026-11-20T08:30:00Z"},`+
+		`"parents":[{"sha":"`+baseSHA+`"}]}`)
 	m, call := setup(t, routes)
 	isErr, text, out := call("revert_merge_request", map[string]any{"merge_request": ref})
 	if isErr || out["merged"] != true {
 		t.Fatalf("isErr=%v out=%v %s", isErr, out, text)
 	}
+	if m.called("GET "+pr7+"/commits") != 1 {
+		t.Errorf("the tool did not list the commits of the pull request: %v", m.calls)
+	}
 	if got := m.bodies["POST "+repo+"/git/commits"]["tree"]; got != "tparent" {
 		t.Errorf("the revert tree is %v, want the tree of the parent", got)
+	}
+}
+
+// TestRevertRefusesAPullRequestOfMoreThan250Commits asserts the limit of the
+// commit list of GitHub. The tool cannot see every commit, so it refuses.
+func TestRevertRefusesAPullRequestOfMoreThan250Commits(t *testing.T) {
+	routes := revertRoutes(`[]`, greenRun)
+	routes["GET "+pr7] = reply(200, strings.Replace(mergedPR, `"commits":3`, `"commits":251`, 1))
+	routes["GET "+repo+"/git/commits/"+mergeSHA] = reply(200, `{"sha":"`+mergeSHA+`","tree":{"sha":"tmerge"},"parents":[{"sha":"`+parentSHA+`"}]}`)
+	m, call := setup(t, routes)
+	isErr, text, _ := call("revert_merge_request", map[string]any{"merge_request": ref})
+	if !isErr || !strings.Contains(text, "at most 250 commits") {
+		t.Errorf("isErr=%v %s", isErr, text)
+	}
+	if m.called("POST "+repo+"/git/commits") != 0 {
+		t.Error("made a revert commit")
+	}
+}
+
+// TestRevertRefusesABranchThatAPersonMade asserts that a branch with the name
+// of the revert branch is kept only when its tip is the revert commit of the
+// tool: one parent, the merge commit, and the tree of the parent.
+func TestRevertRefusesABranchThatAPersonMade(t *testing.T) {
+	const other = "4444444444444444444444444444444444444444"
+	for name, tip := range map[string]string{
+		"other tree":   `{"sha":"` + other + `","tree":{"sha":"tother"},"parents":[{"sha":"` + mergeSHA + `"}]}`,
+		"other parent": `{"sha":"` + other + `","tree":{"sha":"tparent"},"parents":[{"sha":"` + parentSHA + `"}]}`,
+		"two parents":  `{"sha":"` + other + `","tree":{"sha":"tparent"},"parents":[{"sha":"` + mergeSHA + `"},{"sha":"x"}]}`,
+	} {
+		routes := revertRoutes(`[]`, greenRun)
+		routes["GET "+repo+"/git/ref/heads/zeroroot/revert-pr-7-bbbbbbbb"] = reply(200, `{"object":{"sha":"`+other+`"}}`)
+		routes["GET "+repo+"/git/commits/"+other] = reply(200, tip)
+		m, call := setup(t, routes)
+		isErr, text, _ := call("revert_merge_request", map[string]any{"merge_request": ref})
+		if !isErr || !strings.Contains(text, "not the revert commit of this tool") {
+			t.Errorf("%s: isErr=%v %s", name, isErr, text)
+		}
+		if m.called("GET "+repo+"/git/commits/"+other) != 1 {
+			t.Errorf("%s: the tool did not read the tip of the branch: %v", name, m.calls)
+		}
+		for _, c := range []string{"POST " + repo + "/git/commits", "POST " + repo + "/git/refs", "POST " + repo + "/pulls"} {
+			if m.called(c) != 0 {
+				t.Errorf("%s: called %s", name, c)
+			}
+		}
 	}
 }
 
@@ -909,6 +1011,136 @@ func TestConfigErrors(t *testing.T) {
 		_, err := build(kit.NewEnvFrom(cfg), slog.New(slog.DiscardHandler))
 		if err == nil {
 			t.Errorf("%s: no error", name)
+		}
+	}
+}
+
+// TestRequiredCheckThatHasNotStartedIsPending asserts that a blocked pull
+// request is not refused while a check that a rule of the base branch
+// requires has not reported. The check of another app starts later.
+func TestRequiredCheckThatHasNotStartedIsPending(t *testing.T) {
+	for name, rule := range map[string]map[string]handler{
+		"branch protection": {"GET " + repo + "/branches/main": reply(200, `{"name":"main","protection":{"enabled":true,`+
+			`"required_status_checks":{"contexts":["security-scan"],"checks":[{"context":"security-scan","app_id":null}]}}}`)},
+		"ruleset": {"GET " + repo + "/rules/branches/main": reply(200, `[{"type":"pull_request"},`+
+			`{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":false,`+
+			`"required_status_checks":[{"context":"security-scan","integration_id":42}]}}]`)},
+	} {
+		routes := merge(checks(greenRun, "success", 1), rule)
+		routes["GET "+pr7] = reply(200, openPR("blocked"))
+		m, call := setup(t, routes)
+		_, _, out := call("merge_request_state", map[string]any{"merge_request": ref})
+		if out["state"] != "open" || out["pipeline_status"] != "pending" || out["pipeline_green"] != false {
+			t.Errorf("%s: a required check that has not started: %v", name, out)
+		}
+		if m.called("GET "+repo+"/branches/main") != 1 || m.called("GET "+repo+"/rules/branches/main") != 1 {
+			t.Errorf("%s: calls = %v", name, m.calls)
+		}
+		// The required check reports as a commit status. The block now is a refusal.
+		routes["GET "+repo+"/commits/"+headSHA+"/status"] = reply(200, `{"state":"success","total_count":1,`+
+			`"statuses":[{"context":"security-scan","state":"success"}]}`)
+		_, call = setup(t, routes)
+		_, _, out = call("merge_request_state", map[string]any{"merge_request": ref})
+		if out["state"] != "refused" || out["reason"] != "GitHub does not allow the merge: blocked" {
+			t.Errorf("%s: after the required check passed: %v", name, out)
+		}
+	}
+}
+
+// TestRulesOf404MeansNoRules asserts that a GitHub Enterprise Server without
+// rulesets, which answers 404 for the rules, does not break the state.
+func TestRulesOf404MeansNoRules(t *testing.T) {
+	routes := checks(greenRun, "success", 1)
+	delete(routes, "GET "+repo+"/rules/branches/main")
+	routes["GET "+pr7] = reply(200, openPR("clean"))
+	_, call := setup(t, routes)
+	isErr, text, out := call("merge_request_state", map[string]any{"merge_request": ref})
+	if isErr || out["pipeline_green"] != true {
+		t.Errorf("isErr=%v out=%v %s", isErr, out, text)
+	}
+}
+
+// TestMergeUsesAMethodThatTheRepositoryAllows asserts the merge_method that
+// reaches GitHub, and the stable refusal when no usable method is allowed.
+func TestMergeUsesAMethodThatTheRepositoryAllows(t *testing.T) {
+	cases := []struct {
+		name, settings, want, method, reason string
+	}{
+		{"all allowed", allMethods, "merge", "", ""},
+		{"squash only", `{"allow_merge_commit":false,"allow_squash_merge":true,"allow_rebase_merge":true}`, "squash", "", ""},
+		{"rebase only", `{"allow_merge_commit":false,"allow_squash_merge":false,"allow_rebase_merge":true}`, "", "", reasonNoMethod},
+		{"merge asked, squash only", `{"allow_merge_commit":false,"allow_squash_merge":true}`, "", "merge", reasonMethodOff + "merge"},
+		{"settings hidden", `{"full_name":"acme/shop"}`, "", "", reasonHiddenMethods},
+	}
+	for _, c := range cases {
+		merged := false
+		routes := checks(greenRun, "success", 1)
+		routes["GET "+repo] = reply(200, c.settings)
+		routes["GET "+pr7] = func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+			if merged {
+				_, _ = w.Write([]byte(mergedPR))
+				return
+			}
+			_, _ = w.Write([]byte(openPR("clean")))
+		}
+		routes["PUT "+pr7+"/merge"] = func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+			merged = true
+			_, _ = w.Write([]byte(`{"merged":true}`))
+		}
+		m, call := setup(t, routes)
+		args := map[string]any{"merge_request": ref}
+		if c.method != "" {
+			args["merge_method"] = c.method
+		}
+		isErr, text, out := call("merge_merge_request", args)
+		if isErr {
+			t.Errorf("%s: %s", c.name, text)
+			continue
+		}
+		if c.reason == "" {
+			if got := m.bodies["PUT "+pr7+"/merge"]["merge_method"]; got != c.want || out["merged"] != true {
+				t.Errorf("%s: merge_method = %v out = %v", c.name, got, out)
+			}
+			continue
+		}
+		if out["state"] != "refused" || out["reason"] != c.reason || m.called("PUT "+pr7+"/merge") != 0 {
+			t.Errorf("%s: out = %v calls = %v", c.name, out, m.calls)
+		}
+		if c.method != "" {
+			continue
+		}
+		// The state tool reports the same refusal on each read.
+		_, _, out = call("merge_request_state", map[string]any{"merge_request": ref})
+		if out["state"] != "refused" || out["reason"] != c.reason {
+			t.Errorf("%s: state = %v", c.name, out)
+		}
+	}
+}
+
+// TestMergeChecksTheHeadBeforeTheRefusal asserts that a moved head is the
+// reason, also when GitHub blocks the merge.
+func TestMergeChecksTheHeadBeforeTheRefusal(t *testing.T) {
+	routes := checks(greenRun, "success", 1)
+	routes["GET "+pr7] = reply(200, openPR("blocked"))
+	m, call := setup(t, routes)
+	_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref, "sha": "dddddddddddddddddddddddddddddddddddddddd"})
+	reason, _ := out["reason"].(string)
+	if !strings.Contains(reason, "A push changed it") || m.called("PUT "+pr7+"/merge") != 0 {
+		t.Errorf("out = %v", out)
+	}
+}
+
+// TestMergeRefusalReasonIsStable asserts that a refusal of the merge call
+// gives the same reason on each call: the HTTP status and the message.
+func TestMergeRefusalReasonIsStable(t *testing.T) {
+	routes := checks(greenRun, "success", 1)
+	routes["GET "+pr7] = reply(200, openPR("clean"))
+	routes["PUT "+pr7+"/merge"] = reply(405, `{"message":"Repository rule violations found"}`)
+	_, call := setup(t, routes)
+	for range 2 {
+		_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref})
+		if out["state"] != "refused" || out["reason"] != "GitHub refused the merge (HTTP 405): Repository rule violations found" {
+			t.Errorf("out = %v", out)
 		}
 	}
 }
