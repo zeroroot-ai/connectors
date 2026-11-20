@@ -25,7 +25,7 @@ import (
 //     https://docs.github.com/en/rest/pulls/pulls
 //   - the check runs of a commit:
 //     https://docs.github.com/en/rest/checks/runs#list-check-runs-for-a-git-reference
-//   - the combined commit status:
+//   - the combined commit status, 100 statuses on a page:
 //     https://docs.github.com/en/rest/commits/statuses#get-the-combined-status-for-a-specific-reference
 //   - git data: get a commit, get a reference, create a commit, create a reference:
 //     https://docs.github.com/en/rest/git/commits and https://docs.github.com/en/rest/git/refs
@@ -36,9 +36,12 @@ import (
 //     https://docs.github.com/en/rest/commits/commits#compare-two-commits
 //   - list the commits of a pull request (at most 250, 100 on a page):
 //     https://docs.github.com/en/rest/pulls/pulls#list-commits-on-a-pull-request
+//   - list the pull requests of a commit:
+//     https://docs.github.com/en/rest/commits/commits#list-pull-requests-associated-with-a-commit
 //   - the merge methods that a repository allows (allow_merge_commit,
-//     allow_squash_merge, allow_rebase_merge). GitHub shows them only to a
-//     token with the contents write permission:
+//     allow_squash_merge, allow_rebase_merge). The page says: "To view
+//     merge-related settings, you must have the contents:read and
+//     contents:write permissions":
 //     https://docs.github.com/en/rest/repos/repos#get-a-repository
 //   - the checks that a rule of the base branch requires: branch protection in
 //     "get a branch", and rulesets in "get rules for a branch":
@@ -54,7 +57,8 @@ import (
 //   - pipeline_green: every check run is complete with the conclusion success, neutral or
 //     skipped, and the combined status is success or has no status. At least one must exist.
 //     For an open pull request, each check that a rule of the base branch requires must
-//     exist. A required check that has not started makes the checks pending.
+//     exist. A required check that has not started makes the checks pending, and the
+//     reason names each such check.
 //   - at: merged_at, closed_at or updated_at of the pull request.
 //   - deployment_state.application: owner/repo. restart is always off.
 
@@ -65,18 +69,26 @@ const (
 	maxAncestors = 20
 	maxPRCommits = 250 // GitHub lists at most 250 commits of a pull request
 	maxRulePages = 10  // pages of 100 rules that one read of the branch rules takes
+	maxStatPages = 10  // pages of 100 statuses that one read of the combined status takes
 	apiVersion   = "2022-11-28"
 )
 
 // The reasons of a refusal by the merge methods of the repository. They do
 // not change between calls, so the daemon can tell one refusal from another.
 const (
-	reasonHiddenMethods = "GitHub does not allow the merge: GitHub does not show the merge methods of the repository. " +
-		"The token needs the contents write permission"
 	reasonNoMethod = "GitHub does not allow the merge: the repository allows neither a merge commit nor a squash merge, " +
 		"and the revert tool cannot undo a rebase merge"
 	reasonMethodOff = "GitHub does not allow the merge: the repository does not allow the merge method "
+	// reasonWaiting starts the reason of pending checks when a check that a
+	// rule of the base branch requires has not reported. The names follow.
+	reasonWaiting = "these required checks have not reported: "
 )
+
+// errHiddenMethods is the error when GitHub does not show the merge methods
+// of the repository. It is not a refusal: the repository did not block the
+// merge, the token cannot read the settings.
+var errHiddenMethods = errors.New("GitHub does not show the merge methods of the repository (allow_merge_commit, " +
+	"allow_squash_merge). The token needs the contents:read and contents:write permissions of the repository")
 
 // mergeableWait is the time that the tool waits before it reads a pull request
 // again when GitHub has not computed its mergeable state. Tests set it to zero.
@@ -269,52 +281,31 @@ type checkRuns struct {
 	} `json:"check_runs"`
 }
 
+// runResult sums up the check runs of a commit.
+type runResult struct {
+	names           map[string]bool
+	failed, pending bool
+	seen            int
+}
+
 // pipeline reads the checks of a commit: the check runs and the combined
 // commit status. The status is success only when every one passed. A name in
 // required that no check run and no status has makes the status pending: GitHub
-// blocks the merge until that check reports.
-func (v *service) pipeline(ctx context.Context, r prRef, sha string, required []string) (string, error) {
-	failed, pending, seen, total := false, false, 0, 0
-	names := map[string]bool{}
-	for page := 1; page <= maxCheckPage; page++ {
-		var cr checkRuns
-		err := v.client.Do(ctx, kit.Request{
-			Method: http.MethodGet, Path: repoPath(r, "commits", sha, "check-runs"),
-			Query: url.Values{"per_page": {"100"}, "page": {strconv.Itoa(page)}},
-		}, &cr)
-		if err != nil {
-			return "", fmt.Errorf("read check runs: %w", err)
-		}
-		for _, run := range cr.Runs {
-			seen++
-			names[run.Name] = true
-			switch {
-			case run.Status != "completed":
-				pending = true
-			case run.Conclusion != "success" && run.Conclusion != "neutral" && run.Conclusion != "skipped":
-				failed = true
-			}
-		}
-		total = cr.Total
-		if len(cr.Runs) == 0 || seen >= cr.Total {
-			break
-		}
-	}
-	if seen < total {
-		// A run that the tool did not read can be red. The commit is not green.
-		return "", fmt.Errorf("the commit has %d check runs, and the tool reads at most %d of them. "+
-			"It does not count the checks as passed", total, maxCheckPage*100)
+// blocks the merge until that check reports. The second result holds the names
+// of these required checks.
+func (v *service) pipeline(ctx context.Context, r prRef, sha string, required []string) (string, []string, error) {
+	rr, err := v.checkRunsOf(ctx, r, sha)
+	if err != nil {
+		return "", nil, err
 	}
 	cs, err := v.combinedStatus(ctx, r, sha)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	if missing(required, names, cs) {
-		// A required check that has not reported. It can still fail.
-		pending = true
-	}
+	// A required check that has not reported can still fail.
+	waiting := missing(required, rr.names, cs)
+	failed, pending, seen := rr.failed, rr.pending || len(waiting) > 0, rr.seen+cs.Total
 	if cs.Total > 0 {
-		seen += cs.Total
 		switch cs.State {
 		case "failure", "error":
 			failed = true
@@ -324,13 +315,50 @@ func (v *service) pipeline(ctx context.Context, r prRef, sha string, required []
 	}
 	switch {
 	case failed:
-		return fixloop.PipelineFailed, nil
+		return fixloop.PipelineFailed, waiting, nil
 	case pending:
-		return fixloop.PipelinePending, nil
+		return fixloop.PipelinePending, waiting, nil
 	case seen == 0:
-		return fixloop.PipelineNone, nil
+		return fixloop.PipelineNone, waiting, nil
 	}
-	return fixloop.PipelineSuccess, nil
+	return fixloop.PipelineSuccess, waiting, nil
+}
+
+// checkRunsOf reads each page of the check runs of a commit. It returns an
+// error when the commit has more runs than it reads.
+func (v *service) checkRunsOf(ctx context.Context, r prRef, sha string) (runResult, error) {
+	rr := runResult{names: map[string]bool{}}
+	total := 0
+	for page := 1; page <= maxCheckPage; page++ {
+		var cr checkRuns
+		err := v.client.Do(ctx, kit.Request{
+			Method: http.MethodGet, Path: repoPath(r, "commits", sha, "check-runs"),
+			Query: url.Values{"per_page": {"100"}, "page": {strconv.Itoa(page)}},
+		}, &cr)
+		if err != nil {
+			return rr, fmt.Errorf("read check runs: %w", err)
+		}
+		for _, run := range cr.Runs {
+			rr.seen++
+			rr.names[run.Name] = true
+			switch {
+			case run.Status != "completed":
+				rr.pending = true
+			case run.Conclusion != "success" && run.Conclusion != "neutral" && run.Conclusion != "skipped":
+				rr.failed = true
+			}
+		}
+		total = cr.Total
+		if len(cr.Runs) == 0 || rr.seen >= cr.Total {
+			break
+		}
+	}
+	if rr.seen < total {
+		// A run that the tool did not read can be red. The commit is not green.
+		return rr, fmt.Errorf("the commit has %d check runs, and the tool reads at most %d of them. "+
+			"It does not count the checks as passed", total, maxCheckPage*100)
+	}
+	return rr, nil
 }
 
 type combined struct {
@@ -341,32 +369,50 @@ type combined struct {
 	} `json:"statuses"`
 }
 
-// combinedStatus reads the combined commit status and the first 100 statuses
-// of a commit.
+// combinedStatus reads the combined commit status and each page of its
+// statuses. It returns an error when the commit has more statuses than it
+// reads, because a required check can be in a status that it did not read.
 func (v *service) combinedStatus(ctx context.Context, r prRef, sha string) (*combined, error) {
-	var cs combined
-	err := v.client.Do(ctx, kit.Request{
-		Method: http.MethodGet, Path: repoPath(r, "commits", sha, "status"), Query: url.Values{"per_page": {"100"}},
-	}, &cs)
-	if err != nil {
-		return nil, fmt.Errorf("read commit status: %w", err)
+	var all combined
+	for page := 1; page <= maxStatPages; page++ {
+		var cs combined
+		err := v.client.Do(ctx, kit.Request{
+			Method: http.MethodGet, Path: repoPath(r, "commits", sha, "status"),
+			Query: url.Values{"per_page": {"100"}, "page": {strconv.Itoa(page)}},
+		}, &cs)
+		if err != nil {
+			return nil, fmt.Errorf("read commit status: %w", err)
+		}
+		if page == 1 {
+			all.State, all.Total = cs.State, cs.Total
+		}
+		all.Statuses = append(all.Statuses, cs.Statuses...)
+		if len(cs.Statuses) < 100 || len(all.Statuses) >= all.Total {
+			break
+		}
 	}
-	return &cs, nil
+	if len(all.Statuses) < all.Total {
+		return nil, fmt.Errorf("the commit has %d statuses, and the tool read %d of them. "+
+			"It does not count the checks as passed", all.Total, len(all.Statuses))
+	}
+	return &all, nil
 }
 
-// missing is true when a name in required has no check run in runs and no
-// status in cs.
-func missing(required []string, runs map[string]bool, cs *combined) bool {
+// missing returns each name in required that has no check run in runs and no
+// status in cs, once, in the order of required.
+func missing(required []string, runs map[string]bool, cs *combined) []string {
 	seen := maps.Clone(runs)
 	for _, s := range cs.Statuses {
 		seen[s.Context] = true
 	}
+	var out []string
 	for _, name := range required {
 		if !seen[name] {
-			return true
+			out = append(out, name)
+			seen[name] = true // list a name once
 		}
 	}
-	return false
+	return out
 }
 
 // stateOf maps a GitHub pull request to the state of the daemon.
@@ -379,11 +425,14 @@ func (v *service) stateOf(ctx context.Context, r prRef, pr *ghPR) (fixloop.State
 			return st, err
 		}
 	}
-	status, err := v.pipeline(ctx, r, pr.Head.SHA, required)
+	status, waiting, err := v.pipeline(ctx, r, pr.Head.SHA, required)
 	if err != nil {
 		return st, err
 	}
 	st.PipelineStatus, st.PipelineGreen = status, status == fixloop.PipelineSuccess
+	if len(waiting) > 0 {
+		st.Reason = reasonWaiting + strings.Join(waiting, ", ")
+	}
 	switch {
 	case pr.State == "closed" && pr.Merged:
 		st.State = fixloop.Merged
@@ -477,7 +526,8 @@ func (v *service) requiredChecks(ctx context.Context, r prRef, branch string) ([
 // mergeMethod returns the merge method for the merge call: want when the
 // repository allows it, or else merge, then squash. It never returns rebase,
 // because the revert tool cannot undo a rebase merge of more than one commit.
-// A refusal is a stable reason, and the state tool reports the same one.
+// A refusal is a stable reason, and the state tool reports the same one. A
+// token that cannot read the merge methods gets errHiddenMethods.
 func (v *service) mergeMethod(ctx context.Context, r prRef, want string) (method, refusal string, err error) {
 	var repo struct {
 		AllowMerge  *bool `json:"allow_merge_commit"`
@@ -487,7 +537,7 @@ func (v *service) mergeMethod(ctx context.Context, r prRef, want string) (method
 		return "", "", fmt.Errorf("read the merge methods of the repository: %w", err)
 	}
 	if repo.AllowMerge == nil || repo.AllowSquash == nil {
-		return "", reasonHiddenMethods, nil
+		return "", "", errHiddenMethods
 	}
 	allowed := map[string]bool{"merge": *repo.AllowMerge, "squash": *repo.AllowSquash}
 	if want != "" {
@@ -570,34 +620,15 @@ func (v *service) tryMerge(ctx context.Context, r prRef, pr *ghPR, wantSHA, meth
 	if err != nil {
 		return st, false, err
 	}
-	switch {
-	case st.State == fixloop.Merged:
+	if st.State == fixloop.Merged {
 		return st, true, nil
-	case pr.State == "closed":
-		st.Reason = "the pull request is closed"
-		return st, false, nil
-	case wantSHA != "" && !strings.EqualFold(wantSHA, pr.Head.SHA):
-		st.Reason = "the head of the pull request is not the sha that was tested. A push changed it."
-		return st, false, nil
-	case st.State == fixloop.Refused:
-		return st, false, nil
-	case !st.PipelineGreen:
-		st.Reason = "the checks have not succeeded: " + st.PipelineStatus
+	}
+	if holdMerge(&st, pr, wantSHA) {
 		return st, false, nil
 	}
-	if pr.Mergeable == nil || pr.MergeableState == "unknown" { // GitHub computes it on the first read
-		if err := v.sleep(ctx, mergeableWait); err != nil {
-			return st, false, err
-		}
-		if pr, err = v.getPR(ctx, r); err != nil {
-			return st, false, err
-		}
-		if !strings.EqualFold(pr.Head.SHA, st.HeadSHA) {
-			// The checks passed on st.HeadSHA only. A merge of the new head
-			// would merge code that no check tested.
-			st.Reason = "the head of the pull request changed after the check. A push changed it."
-			return st, false, nil
-		}
+	pr, ok, err := v.settle(ctx, r, pr, &st)
+	if err != nil || !ok {
+		return st, false, err
 	}
 	if reason, ok := blocked(pr); ok {
 		st.State, st.Reason = fixloop.Refused, reason
@@ -628,6 +659,51 @@ func (v *service) tryMerge(ctx context.Context, r prRef, pr *ghPR, wantSHA, meth
 	}
 	st, err = v.stateOf(ctx, r, latest)
 	return st, st.State == fixloop.Merged, err
+}
+
+// holdMerge is true when the state shows that the tool must not merge now. It
+// sets the reason. A reason of the state, such as the names of the required
+// checks that have not reported, stays in the reason.
+func holdMerge(st *fixloop.State, pr *ghPR, wantSHA string) bool {
+	switch {
+	case pr.State == "closed":
+		st.Reason = "the pull request is closed"
+	case wantSHA != "" && !strings.EqualFold(wantSHA, pr.Head.SHA):
+		st.Reason = "the head of the pull request is not the sha that was tested. A push changed it."
+	case st.State == fixloop.Refused:
+	case !st.PipelineGreen:
+		reason := "the checks have not succeeded: " + st.PipelineStatus
+		if st.Reason != "" {
+			reason += ". " + st.Reason
+		}
+		st.Reason = reason
+	default:
+		return false
+	}
+	return true
+}
+
+// settle reads the pull request again when GitHub has not computed its
+// mergeable state, which GitHub does on the first read. It is false, with the
+// reason in st, when the head changed in the meantime.
+func (v *service) settle(ctx context.Context, r prRef, pr *ghPR, st *fixloop.State) (*ghPR, bool, error) {
+	if pr.Mergeable != nil && pr.MergeableState != "unknown" {
+		return pr, true, nil
+	}
+	if err := v.sleep(ctx, mergeableWait); err != nil {
+		return pr, false, err
+	}
+	latest, err := v.getPR(ctx, r)
+	if err != nil {
+		return pr, false, err
+	}
+	if !strings.EqualFold(latest.Head.SHA, st.HeadSHA) {
+		// The checks passed on st.HeadSHA only. A merge of the new head
+		// would merge code that no check tested.
+		st.Reason = "the head of the pull request changed after the check. A push changed it."
+		return latest, false, nil
+	}
+	return latest, true, nil
 }
 
 // mergeError turns an error of the merge call into a result. A retry of a
@@ -902,6 +978,9 @@ func (v *service) createRevertBranch(ctx context.Context, r prRef, orig *ghPR, c
 // date and the message, of a commit of the pull request. A commit of the base
 // branch that has all of these of a commit of the pull request is refused too.
 // That refusal is safe: a person then reverts by hand.
+//
+// No test on a live GitHub has confirmed that a rebase merge keeps the author
+// date. So a second check that does not use it follows: parentInPull.
 func (v *service) checkSquash(ctx context.Context, r prRef, orig *ghPR, parent *gitCommit) error {
 	if orig.Commits > maxPRCommits {
 		return fmt.Errorf("the merge commit has one parent and the pull request has %d commits. GitHub lists at most "+
@@ -925,16 +1004,58 @@ func (v *service) checkSquash(ctx context.Context, r prRef, orig *ghPR, parent *
 		}
 		for _, c := range list {
 			if c.SHA == parent.SHA || sameChange(c.Commit.Author, c.Commit.Message, parent) {
-				return fmt.Errorf("the merge commit has one parent, and that parent is a commit of the pull request. "+
-					"This is a rebase merge of %d commits. A revert of the merge commit undoes only the last commit, "+
-					"so revert by hand", orig.Commits)
+				return rebaseError(orig.Commits)
 			}
 		}
 		if len(list) < 100 {
 			break
 		}
 	}
+	return v.parentInPull(ctx, r, orig, parent.SHA)
+}
+
+// parentInPull refuses the revert when GitHub lists the pull request as a pull
+// request of the parent of the merge commit. The page
+// https://docs.github.com/en/rest/commits/commits#list-pull-requests-associated-with-a-commit
+// says: "Lists the merged pull request that introduced the commit to the
+// repository." For a commit that is not in the default branch, it lists the
+// merged and open pull requests of the commit.
+//   - After a rebase merge, the parent is a rebased commit of the pull request.
+//     The pull request introduced it, so GitHub lists the pull request.
+//   - After a squash merge, the parent is the tip of the base branch before the
+//     merge. Another pull request or a push introduced it.
+//
+// A failed call, or a full page that does not hold the pull request, refuses
+// the revert, because the tool then cannot tell the two merges apart.
+func (v *service) parentInPull(ctx context.Context, r prRef, orig *ghPR, parent string) error {
+	var list []struct {
+		Number int `json:"number"`
+	}
+	err := v.client.Do(ctx, kit.Request{
+		Method: http.MethodGet, Path: repoPath(r, "commits", parent, "pulls"),
+		Query: url.Values{"per_page": {"100"}},
+	}, &list)
+	if err != nil {
+		return fmt.Errorf("list the pull requests of the parent of the merge commit. The tool cannot tell a squash "+
+			"merge from a rebase merge, so revert by hand: %w", err)
+	}
+	for _, p := range list {
+		if p.Number == r.number {
+			return rebaseError(orig.Commits)
+		}
+	}
+	if len(list) >= 100 {
+		return errors.New("the parent of the merge commit has 100 pull requests or more, so the tool cannot tell " +
+			"a squash merge from a rebase merge. Revert by hand")
+	}
 	return nil
+}
+
+// rebaseError is the refusal of a revert of a rebase merge of n commits.
+func rebaseError(n int) error {
+	return fmt.Errorf("the merge commit has one parent, and that parent is a commit of the pull request. "+
+		"This is a rebase merge of %d commits. A revert of the merge commit undoes only the last commit, "+
+		"so revert by hand", n)
 }
 
 // sameChange is true when a commit has the author, the author date and the
