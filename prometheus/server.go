@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/zeroroot-ai/connectors/internal/fixloop"
 	"github.com/zeroroot-ai/connectors/internal/kit"
 )
 
@@ -48,6 +51,7 @@ func build(env *kit.Env, log *slog.Logger) (func(*mcp.Server), error) {
 	pass := env.OptionalSecret("PROMETHEUS_PASSWORD")
 	orgID := env.Optional("PROMETHEUS_ORG_ID", "")
 	timeout := env.Duration("PROMETHEUS_TIMEOUT", 30*time.Second)
+	rawHealth := env.Optional("PROMETHEUS_HEALTH_QUERIES", "")
 	if token != "" && (user != "" || pass != "") {
 		return nil, errors.New("set PROMETHEUS_BEARER_TOKEN or PROMETHEUS_USERNAME with PROMETHEUS_PASSWORD, not both")
 	}
@@ -56,6 +60,10 @@ func build(env *kit.Env, log *slog.Logger) (func(*mcp.Server), error) {
 	}
 	if err := env.Err(); err != nil {
 		return nil, fmt.Errorf("read configuration: %w", err)
+	}
+	health, err := parseHealthQueries(rawHealth)
+	if err != nil {
+		return nil, err
 	}
 	var auth kit.Authenticator
 	switch {
@@ -75,13 +83,16 @@ func build(env *kit.Env, log *slog.Logger) (func(*mcp.Server), error) {
 			return nil
 		}
 	}
-	svc := &service{client: kit.NewClient(base, kit.ClientOptions{Auth: auth, Logger: log, Timeout: timeout}), now: time.Now}
+	svc := &service{client: kit.NewClient(base, kit.ClientOptions{Auth: auth, Logger: log, Timeout: timeout}), now: time.Now, health: health}
 	return func(s *mcp.Server) { svc.register(s, log) }, nil
 }
 
 type service struct {
 	client *kit.Client
 	now    func() time.Time
+	// health maps the key of an application to the PromQL query that the
+	// tenant states as the health of that application.
+	health map[string]string
 }
 
 func (v *service) register(s *mcp.Server, log *slog.Logger) {
@@ -103,6 +114,17 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 			"An alert is an event, not a finding.",
 		Annotations: kit.ReadOnly("Prometheus alerts"),
 	}, v.listAlerts)
+	kit.AddTool(s, log, &mcp.Tool{
+		Name: "health_signal",
+		Description: "Read the health signal of one application over a hold time. The tenant states one PromQL query for each " +
+			"application in PROMETHEUS_HEALTH_QUERIES. The query is healthy while it returns a value other than 0, for example " +
+			"a comparison with the bool modifier. The tool runs the query over the hold time that starts at since. " +
+			"It returns known false when the tenant stated no query for the application. It returns done false while the hold " +
+			"time still runs and the query never failed. It returns done true and held false when the value was 0 or NaN at one time, " +
+			"or when the query returned no data or had gaps. It returns done true and held true when the query held " +
+			"for the whole time. The result holds the value and the time of the last or the failed point. Read only.",
+		Annotations: kit.ReadOnly("Prometheus health signal"),
+	}, v.healthSignal)
 }
 
 // ---- query_instant ----
@@ -330,4 +352,183 @@ func parseStep(s string) (time.Duration, error) {
 	mult := map[string]time.Duration{"ms": time.Millisecond, "s": time.Second, "m": time.Minute,
 		"h": time.Hour, "d": 24 * time.Hour, "w": 7 * 24 * time.Hour}[unit]
 	return time.Duration(f * float64(mult)), nil
+}
+
+// ---- health_signal ----
+
+// The tool follows the range query of the Prometheus HTTP API:
+// https://prometheus.io/docs/prometheus/latest/querying/api/#range-queries
+// The input and the result follow internal/engine/fixloop/connector.go of
+// zeroroot-ai/gibson (ToolHealthSignal).
+
+const (
+	maxHoldSeconds = 7 * 24 * 3600
+	minHealthStep  = 15 * time.Second
+	maxHealthSteps = 1000
+	maxApplication = 256
+)
+
+// parseHealthQueries reads the JSON object of PROMETHEUS_HEALTH_QUERIES.
+func parseHealthQueries(raw string) (map[string]string, error) {
+	out := map[string]string{}
+	if strings.TrimSpace(raw) == "" {
+		return out, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, errors.New("PROMETHEUS_HEALTH_QUERIES must be a JSON object that maps an application to a query")
+	}
+	for app, q := range out {
+		if kit.CheckString("application", app, maxApplication, nil) != nil || kit.CheckString("query", q, maxQueryLen, nil) != nil {
+			return nil, errors.New("PROMETHEUS_HEALTH_QUERIES holds an empty or a too long application or query")
+		}
+	}
+	return out, nil
+}
+
+type healthInput struct {
+	Application string `json:"application" jsonschema:"the application key that deployment_state returned"`
+	Since       string `json:"since" jsonschema:"start of the hold time, RFC 3339"`
+	HoldSeconds int    `json:"hold_seconds" jsonschema:"how long the signal must hold, 0 to 604800 seconds"`
+}
+
+type healthOutput struct {
+	Known  bool   `json:"known"`
+	Done   bool   `json:"done"`
+	Held   bool   `json:"held"`
+	At     string `json:"at,omitempty"`
+	Value  string `json:"value,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+type matrixResponse struct {
+	Status    string `json:"status"`
+	ErrorType string `json:"errorType"`
+	Error     string `json:"error"`
+	Data      struct {
+		Result []struct {
+			Values [][]any `json:"values"`
+		} `json:"result"`
+	} `json:"data"`
+}
+
+func (v *service) healthSignal(ctx context.Context, _ *mcp.CallToolRequest, in healthInput) (*mcp.CallToolResult, healthOutput, error) {
+	var out healthOutput
+	if err := kit.CheckString("application", in.Application, maxApplication, nil); err != nil {
+		return nil, out, err
+	}
+	if err := kit.CheckString("since", in.Since, 40, timeFormat); err != nil {
+		return nil, out, err
+	}
+	since, err := time.Parse(time.RFC3339Nano, in.Since)
+	if err != nil {
+		return nil, out, fmt.Errorf("%w: since must be an RFC 3339 time", kit.ErrInvalidInput)
+	}
+	if err := kit.CheckRange("hold_seconds", in.HoldSeconds, 0, maxHoldSeconds); err != nil {
+		return nil, out, err
+	}
+	query, ok := v.health[in.Application]
+	if !ok {
+		out.Reason = "the tenant stated no health query for this application"
+		return nil, out, nil
+	}
+	out.Known = true
+	hold := time.Duration(in.HoldSeconds) * time.Second
+	end, now := since.Add(hold), v.now()
+	if now.Before(since) {
+		out.At, out.Reason = fixloop.Time(now), "the hold time has not started"
+		return nil, out, nil
+	}
+	evalEnd := end
+	if now.Before(end) {
+		evalEnd = now
+	}
+	step := max(minHealthStep, (hold/maxHealthSteps).Round(time.Second)+time.Second)
+	series, err := v.readSeries(ctx, query, since, evalEnd, step)
+	if err != nil {
+		return nil, out, err
+	}
+	return nil, judgeHealth(out, series, hold, step, now.Before(end), evalEnd), nil
+}
+
+type point struct {
+	at    time.Time
+	value float64
+	text  string
+}
+
+func (v *service) readSeries(ctx context.Context, query string, start, end time.Time, step time.Duration) ([][]point, error) {
+	form := url.Values{"query": {query}, "start": {start.UTC().Format(time.RFC3339Nano)}, "end": {end.UTC().Format(time.RFC3339Nano)},
+		"step": {strconv.Itoa(int(step / time.Second))}}
+	var resp matrixResponse
+	// A query is a read, so a retry of the POST is safe.
+	err := v.client.Do(ctx, kit.Request{Method: http.MethodPost, Path: "/api/v1/query_range", Form: form, Retry: true}, &resp)
+	if err != nil {
+		return nil, queryError(err)
+	}
+	if resp.Status != "success" {
+		return nil, fmt.Errorf("prometheus query failed: %s: %s", resp.ErrorType, resp.Error)
+	}
+	var all [][]point
+	for _, s := range resp.Data.Result {
+		var pts []point
+		for _, raw := range s.Values {
+			if len(raw) != 2 {
+				continue
+			}
+			ts, ok1 := raw[0].(float64)
+			text, ok2 := raw[1].(string)
+			val, err := strconv.ParseFloat(text, 64)
+			if !ok1 || !ok2 || err != nil {
+				return nil, errors.New("prometheus answered a sample that the tool cannot read")
+			}
+			pts = append(pts, point{at: time.Unix(int64(ts), int64((ts-math.Floor(ts))*1e9)), value: val, text: text})
+		}
+		all = append(all, pts)
+	}
+	return all, nil
+}
+
+// judgeHealth decides the result. A value of 0 or NaN is a failure, and the
+// first failure ends the hold time at once. A hold time that ran to its end
+// holds only when each series has samples for most of it.
+func judgeHealth(out healthOutput, series [][]point, hold, step time.Duration, running bool, evalEnd time.Time) healthOutput {
+	var last *point
+	for _, pts := range series {
+		for i := range pts {
+			p := &pts[i]
+			if p.value == 0 || math.IsNaN(p.value) {
+				out.Done, out.Held, out.At, out.Value = true, false, fixloop.Time(p.at), p.text
+				out.Reason = "the value of the health query was " + p.text
+				return out
+			}
+			if last == nil || p.at.After(last.at) {
+				last = p
+			}
+		}
+	}
+	if last != nil {
+		out.At, out.Value = fixloop.Time(last.at), last.text
+	}
+	if running {
+		out.Reason = "the hold time still runs"
+		if last == nil {
+			out.At = fixloop.Time(evalEnd)
+		}
+		return out
+	}
+	out.Done = true
+	out.At = fixloop.Time(evalEnd)
+	if len(series) == 0 {
+		out.Reason = "the health query returned no data for the hold time"
+		return out
+	}
+	expected := int(hold/step) + 1
+	for _, pts := range series {
+		if len(pts)*10 < expected*9 {
+			out.Reason = "the health query had gaps in the hold time"
+			return out
+		}
+	}
+	out.Held = true
+	return out
 }

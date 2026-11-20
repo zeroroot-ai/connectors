@@ -4,8 +4,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/zeroroot-ai/connectors/internal/kit"
 	"github.com/zeroroot-ai/connectors/internal/kit/kittest"
@@ -182,8 +186,8 @@ func TestAllToolsReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	tools := kittest.Tools(t, kittest.Connect(t, register))
-	if len(tools) != 3 {
-		t.Fatalf("tools = %d, want 3", len(tools))
+	if len(tools) != 4 {
+		t.Fatalf("tools = %d, want 4", len(tools))
 	}
 	for name, tool := range tools {
 		if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
@@ -203,5 +207,254 @@ func TestConfigErrors(t *testing.T) {
 		if _, err := build(kit.NewEnvFrom(cfg), slog.New(slog.DiscardHandler)); err == nil {
 			t.Errorf("%s: want error", name)
 		}
+	}
+}
+
+// ---- health_signal ----
+//
+// The mock follows the range query of
+// https://prometheus.io/docs/prometheus/latest/querying/api/#range-queries.
+
+const healthSince = "2026-11-20T10:00:00Z"
+
+// series builds the matrix result for one series: n samples, one every step
+// seconds from the start, all with the value v. A sample index in zeros has
+// the value 0.
+func series(start, step, n int, v string, zeros ...int) string {
+	var b strings.Builder
+	b.WriteString(`{"metric":{"service":"api"},"values":[`)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		val := v
+		for _, z := range zeros {
+			if z == i {
+				val = "0"
+			}
+		}
+		b.WriteString(`[` + strconv.Itoa(start+i*step) + `,"` + val + `"]`)
+	}
+	b.WriteString(`]}`)
+	return b.String()
+}
+
+func matrix(parts ...string) string {
+	return `{"status":"success","data":{"resultType":"matrix","result":[` + strings.Join(parts, ",") + `]}}`
+}
+
+func healthSetup(t *testing.T, now string, queries map[string]string, body string) (*int, func(map[string]any) (bool, string, map[string]any)) {
+	t.Helper()
+	calls := new(int)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*calls++
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api/v1/query_range" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(ts.Close)
+	base, err := kit.ParseBaseURL(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nowT, err := time.Parse(time.RFC3339, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &service{client: kit.NewClient(base, kit.ClientOptions{}), now: func() time.Time { return nowT }, health: queries}
+	cs := kittest.Connect(t, func(s *mcp.Server) { svc.register(s, slog.New(slog.DiscardHandler)) })
+	return calls, func(args map[string]any) (bool, string, map[string]any) {
+		res := kittest.Call(t, cs, "health_signal", args)
+		var out map[string]any
+		if !res.IsError {
+			kittest.Structured(t, res, &out)
+		}
+		return res.IsError, kittest.Text(t, res), out
+	}
+}
+
+var healthQueries = map[string]string{"acme/shop": `(sum(rate(errors[1m])) / sum(rate(requests[1m])) < bool 0.01)`}
+
+func healthArgs(app string, hold int) map[string]any {
+	return map[string]any{"application": app, "since": healthSince, "hold_seconds": hold}
+}
+
+func TestHealthSignalHeld(t *testing.T) {
+	// A hold time of 10 minutes at a 15 second step is 41 samples.
+	start := int(time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC).Unix())
+	_, call := healthSetup(t, "2026-11-20T10:30:00Z", healthQueries, matrix(series(start, 15, 41, "1")))
+	isErr, text, out := call(healthArgs("acme/shop", 600))
+	if isErr {
+		t.Fatal(text)
+	}
+	if out["known"] != true || out["done"] != true || out["held"] != true || out["at"] != "2026-11-20T10:10:00Z" || out["value"] != "1" {
+		t.Errorf("out = %v", out)
+	}
+}
+
+func TestHealthSignalSendsTheTenantQuery(t *testing.T) {
+	start := int(time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC).Unix())
+	body := matrix(series(start, 15, 41, "1"))
+	var seen map[string]string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		seen = map[string]string{}
+		for k := range r.PostForm {
+			seen[k] = r.PostForm.Get(k)
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer ts.Close()
+	base, _ := kit.ParseBaseURL(ts.URL)
+	now, _ := time.Parse(time.RFC3339, "2026-11-20T10:30:00Z")
+	svc := &service{client: kit.NewClient(base, kit.ClientOptions{}), now: func() time.Time { return now }, health: healthQueries}
+	cs := kittest.Connect(t, func(s *mcp.Server) { svc.register(s, slog.New(slog.DiscardHandler)) })
+	kittest.Call(t, cs, "health_signal", healthArgs("acme/shop", 600))
+	if seen["query"] != healthQueries["acme/shop"] || seen["start"] != "2026-11-20T10:00:00Z" ||
+		seen["end"] != "2026-11-20T10:10:00Z" || seen["step"] != "15" {
+		t.Errorf("form = %v", seen)
+	}
+}
+
+func TestHealthSignalFailedAtOnce(t *testing.T) {
+	start := int(time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC).Unix())
+	// The hold time still runs at 10:05, and one sample at 10:02:30 is 0.
+	_, call := healthSetup(t, "2026-11-20T10:05:00Z", healthQueries, matrix(series(start, 15, 21, "1", 10)))
+	_, _, out := call(healthArgs("acme/shop", 600))
+	if out["known"] != true || out["done"] != true || out["held"] != false || out["at"] != "2026-11-20T10:02:30Z" || out["value"] != "0" {
+		t.Errorf("out = %v", out)
+	}
+}
+
+func TestHealthSignalNaNFails(t *testing.T) {
+	start := int(time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC).Unix())
+	body := matrix(`{"metric":{},"values":[[` + strconv.Itoa(start) + `,"1"],[` + strconv.Itoa(start+15) + `,"NaN"]]}`)
+	_, call := healthSetup(t, "2026-11-20T10:05:00Z", healthQueries, body)
+	_, _, out := call(healthArgs("acme/shop", 600))
+	if out["done"] != true || out["held"] != false || out["value"] != "NaN" {
+		t.Errorf("out = %v", out)
+	}
+}
+
+func TestHealthSignalStillRunning(t *testing.T) {
+	start := int(time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC).Unix())
+	_, call := healthSetup(t, "2026-11-20T10:05:00Z", healthQueries, matrix(series(start, 15, 21, "1")))
+	_, _, out := call(healthArgs("acme/shop", 600))
+	if out["known"] != true || out["done"] != false || out["held"] != false || out["at"] != "2026-11-20T10:05:00Z" {
+		t.Errorf("out = %v", out)
+	}
+}
+
+func TestHealthSignalNoData(t *testing.T) {
+	_, call := healthSetup(t, "2026-11-20T10:30:00Z", healthQueries, matrix())
+	_, _, out := call(healthArgs("acme/shop", 600))
+	if out["done"] != true || out["held"] != false || !strings.Contains(out["reason"].(string), "no data") {
+		t.Errorf("out = %v", out)
+	}
+	// No data while the hold time runs is not a failure yet.
+	_, call = healthSetup(t, "2026-11-20T10:05:00Z", healthQueries, matrix())
+	_, _, out = call(healthArgs("acme/shop", 600))
+	if out["done"] != false {
+		t.Errorf("running: %v", out)
+	}
+}
+
+func TestHealthSignalGaps(t *testing.T) {
+	start := int(time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC).Unix())
+	// 30 of 41 samples: the service stopped to report for a part of the time.
+	_, call := healthSetup(t, "2026-11-20T10:30:00Z", healthQueries, matrix(series(start, 15, 30, "1")))
+	_, _, out := call(healthArgs("acme/shop", 600))
+	if out["done"] != true || out["held"] != false || !strings.Contains(out["reason"].(string), "gaps") {
+		t.Errorf("out = %v", out)
+	}
+}
+
+func TestHealthSignalEverySeriesMustHold(t *testing.T) {
+	start := int(time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC).Unix())
+	_, call := healthSetup(t, "2026-11-20T10:30:00Z", healthQueries, matrix(series(start, 15, 41, "1"), series(start, 15, 41, "1", 40)))
+	_, _, out := call(healthArgs("acme/shop", 600))
+	if out["held"] != false || out["value"] != "0" {
+		t.Errorf("out = %v", out)
+	}
+}
+
+func TestHealthSignalUnknownApplication(t *testing.T) {
+	calls, call := healthSetup(t, "2026-11-20T10:30:00Z", healthQueries, matrix())
+	_, _, out := call(healthArgs("other/app", 600))
+	if out["known"] != false || out["done"] != false || out["held"] != false {
+		t.Errorf("out = %v", out)
+	}
+	if *calls != 0 {
+		t.Errorf("a query ran for an unknown application")
+	}
+	_, call = healthSetup(t, "2026-11-20T10:30:00Z", nil, matrix())
+	_, _, out = call(healthArgs("acme/shop", 600))
+	if out["known"] != false {
+		t.Errorf("no queries set: %v", out)
+	}
+}
+
+func TestHealthSignalBeforeTheHoldTimeStarts(t *testing.T) {
+	_, call := healthSetup(t, "2026-11-20T09:59:00Z", healthQueries, matrix())
+	_, _, out := call(healthArgs("acme/shop", 600))
+	if out["known"] != true || out["done"] != false || out["held"] != false {
+		t.Errorf("out = %v", out)
+	}
+}
+
+func TestHealthSignalZeroHold(t *testing.T) {
+	start := int(time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC).Unix())
+	_, call := healthSetup(t, "2026-11-20T10:30:00Z", healthQueries, matrix(series(start, 15, 1, "1")))
+	_, _, out := call(healthArgs("acme/shop", 0))
+	if out["done"] != true || out["held"] != true {
+		t.Errorf("out = %v", out)
+	}
+}
+
+func TestHealthSignalInputValidation(t *testing.T) {
+	calls, call := healthSetup(t, "2026-11-20T10:30:00Z", healthQueries, matrix())
+	for name, args := range map[string]map[string]any{
+		"empty application": {"application": "", "since": healthSince, "hold_seconds": 60},
+		"bad since":         {"application": "acme/shop", "since": "yesterday", "hold_seconds": 60},
+		"negative hold":     {"application": "acme/shop", "since": healthSince, "hold_seconds": -1},
+		"huge hold":         {"application": "acme/shop", "since": healthSince, "hold_seconds": 99999999},
+		"control char":      {"application": "acme\x00", "since": healthSince, "hold_seconds": 60},
+	} {
+		if isErr, _, _ := call(args); !isErr {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	if *calls != 0 {
+		t.Errorf("reached Prometheus")
+	}
+}
+
+func TestHealthSignalVendorError(t *testing.T) {
+	_, call := healthSetup(t, "2026-11-20T10:30:00Z", healthQueries, `{"status":"error","errorType":"bad_data","error":"parse error"}`)
+	isErr, text, _ := call(healthArgs("acme/shop", 600))
+	if !isErr || !strings.Contains(text, "bad_data") {
+		t.Errorf("isErr=%v text=%s", isErr, text)
+	}
+}
+
+func TestHealthQueriesConfig(t *testing.T) {
+	ts := httptest.NewServer(http.NotFoundHandler())
+	defer ts.Close()
+	for name, raw := range map[string]string{
+		"not json":    `acme=up`,
+		"not object":  `["up"]`,
+		"empty query": `{"acme/shop":""}`,
+		"empty app":   `{"":"up"}`,
+	} {
+		_, err := build(kit.NewEnvFrom(map[string]string{"PROMETHEUS_BASE_URL": ts.URL, "PROMETHEUS_HEALTH_QUERIES": raw}), slog.New(slog.DiscardHandler))
+		if err == nil {
+			t.Errorf("%s: no error", name)
+		}
+	}
+	if _, err := build(kit.NewEnvFrom(map[string]string{"PROMETHEUS_BASE_URL": ts.URL, "PROMETHEUS_HEALTH_QUERIES": `{"a":"up"}`}), slog.New(slog.DiscardHandler)); err != nil {
+		t.Errorf("good config: %v", err)
 	}
 }
