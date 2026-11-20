@@ -814,20 +814,40 @@ func TestDeploymentNotYet(t *testing.T) {
 	}
 }
 
-func TestDeploymentQuery(t *testing.T) {
-	var queries []string
-	routes := deployRoutes(`[]`, `[]`, nil)
-	routes["GET "+repo+"/deployments"] = func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
-		queries = append(queries, r.URL.RawQuery)
-		_, _ = w.Write([]byte(`[]`))
+// TestDeploymentRequests asserts each request that deployment_state sends:
+// the two lists of deployments, the compare call for a later commit, and the
+// statuses of the deployment that holds the merge commit.
+func TestDeploymentRequests(t *testing.T) {
+	const later = "1111111111111111111111111111111111111111"
+	var got []string
+	record := func(h handler) handler {
+		return func(w http.ResponseWriter, r *http.Request, body map[string]any) {
+			got = append(got, r.Method+" "+r.URL.EscapedPath()+"?"+r.URL.Query().Encode())
+			if body != nil {
+				t.Errorf("%s %s has a body: %v", r.Method, r.URL.Path, body)
+			}
+			h(w, r, body)
+		}
+	}
+	routes := deployRoutes(`[]`, `[{"id":42,"sha":"`+later+`","created_at":"2026-11-20T09:10:00Z"}]`,
+		map[string]string{"42": `[{"state":"success","created_at":"2026-11-20T09:12:00Z"}]`})
+	for _, k := range []string{"GET " + repo + "/deployments", "GET " + repo + "/compare/" + mergeSHA + "..." + later,
+		"GET " + repo + "/deployments/42/statuses"} {
+		routes[k] = record(routes[k])
 	}
 	_, call := setup(t, routes)
-	call("deployment_state", map[string]any{"merge_request": ref})
-	joined := strings.Join(queries, " ")
-	for _, want := range []string{"environment=production", "sha=" + mergeSHA} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("queries %q lack %s", joined, want)
-		}
+	_, _, out := call("deployment_state", map[string]any{"merge_request": ref})
+	if out["deployed"] != true {
+		t.Fatalf("out = %v", out)
+	}
+	want := []string{
+		"GET " + repo + "/deployments?environment=production&per_page=50&sha=" + mergeSHA,
+		"GET " + repo + "/deployments?environment=production&per_page=50",
+		"GET " + repo + "/compare/" + mergeSHA + "..." + later + "?per_page=1",
+		"GET " + repo + "/deployments/42/statuses?per_page=30",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("requests:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 

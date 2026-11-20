@@ -552,12 +552,26 @@ func TestDeploymentExactCommit(t *testing.T) {
 }
 
 func TestDeploymentOfALaterCommit(t *testing.T) {
-	_, call := setup(t, deployments(`[`+
-		`{"id":40,"sha":"2222222222222222222222222222222222222222","status":"success","updated_at":"2026-11-20T09:01:00Z"},`+
-		`{"id":42,"sha":"1111111111111111111111111111111111111111","status":"success","updated_at":"2026-11-20T09:10:00Z"}]`))
+	routes := deployments(`[` +
+		`{"id":40,"sha":"2222222222222222222222222222222222222222","status":"success","updated_at":"2026-11-20T09:01:00Z"},` +
+		`{"id":42,"sha":"1111111111111111111111111111111111111111","status":"success","updated_at":"2026-11-20T09:10:00Z"}]`)
+	var bases []string
+	mergeBase := routes["GET "+api+"/repository/merge_base"]
+	routes["GET "+api+"/repository/merge_base"] = func(w http.ResponseWriter, r *http.Request, body map[string]any) {
+		bases = append(bases, r.Method+" "+strings.Join(r.URL.Query()["refs[]"], ","))
+		mergeBase(w, r, body)
+	}
+	_, call := setup(t, routes)
 	_, _, out := call("deployment_state", map[string]any{"merge_request": ref})
 	if out["deployed"] != true || out["deployment"] != "acme/shop/deployments/42" || out["at"] != "2026-11-20T09:10:00Z" {
 		t.Errorf("out = %v", out)
+	}
+	want := []string{
+		"GET " + mergeSHA + ",2222222222222222222222222222222222222222",
+		"GET " + mergeSHA + ",1111111111111111111111111111111111111111",
+	}
+	if strings.Join(bases, " ") != strings.Join(want, " ") {
+		t.Errorf("merge base requests = %v, want %v", bases, want)
 	}
 }
 

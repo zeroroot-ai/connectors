@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -61,15 +62,19 @@ const sampleXML = `<?xml version="1.0" encoding="UTF-8" ?>
 </HOST_LIST_VM_DETECTION_OUTPUT>`
 
 type mock struct {
-	query url.Values
-	user  string
-	pass  string
-	xrw   string
-	path  string
+	method string
+	body   string
+	query  url.Values
+	user   string
+	pass   string
+	xrw    string
+	path   string
 }
 
 func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m.query, m.path, m.xrw = r.URL.Query(), r.URL.Path, r.Header.Get("X-Requested-With")
+	b, _ := io.ReadAll(r.Body)
+	m.method, m.body = r.Method, string(b)
 	m.user, m.pass, _ = r.BasicAuth()
 	w.Header().Set("Content-Type", "text/xml")
 	if m.xrw == "" {
@@ -109,9 +114,12 @@ func TestGetHostDetectionsByHostID(t *testing.T) {
 	if isErr {
 		t.Fatalf("tool error: %s", text)
 	}
-	if m.path != "/api/2.0/fo/asset/host/vm/detection/" || m.query.Get("action") != "list" || m.query.Get("ids") != "524323" ||
-		m.query.Get("status") != "New,Active" || m.query.Get("severities") != "2-5" || m.query.Get("show_results") != "0" {
-		t.Errorf("path=%q query=%v", m.path, m.query)
+	want := url.Values{
+		"action": {"list"}, "output_format": {"XML"}, "truncation_limit": {"10"}, "ids": {"524323"},
+		"status": {"New,Active"}, "severities": {"2-5"}, "show_results": {"0"},
+	}
+	if m.method != http.MethodGet || m.path != "/api/2.0/fo/asset/host/vm/detection/" || m.query.Encode() != want.Encode() || m.body != "" {
+		t.Errorf("request = %s %s?%s body %q, want GET ?%s", m.method, m.path, m.query.Encode(), m.body, want.Encode())
 	}
 	if m.user != "reader1" || m.xrw == "" {
 		t.Errorf("user=%q xrw=%q", m.user, m.xrw)
@@ -133,8 +141,9 @@ func TestGetHostDetectionsByIPWithResultsAndLimit(t *testing.T) {
 	if isErr {
 		t.Fatalf("tool error: %s", text)
 	}
-	if m.query.Get("ips") != "10.10.10.9" || m.query.Has("show_results") {
-		t.Errorf("query=%v", m.query)
+	want := url.Values{"action": {"list"}, "output_format": {"XML"}, "truncation_limit": {"10"}, "ips": {"10.10.10.9"}}
+	if m.method != http.MethodGet || m.query.Encode() != want.Encode() {
+		t.Errorf("request = %s ?%s, want GET ?%s", m.method, m.query.Encode(), want.Encode())
 	}
 	if !strings.Contains(text, "Tested on port 2222.") || !strings.Contains(text, `"truncated":true`) ||
 		!strings.Contains(text, `"total_detections":2`) || strings.Contains(text, "370613") {

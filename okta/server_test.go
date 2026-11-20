@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -24,12 +25,15 @@ const uid = "00ub0oNGTSWTBKOLGLNR"
 // unknown user gets 404 with the error code E0000007.
 type mock struct {
 	calls  []string
+	bodies []string
 	auth   string
 	status string // the status of the user: ACTIVE or SUSPENDED
 }
 
 func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m.calls = append(m.calls, r.Method+" "+r.URL.RequestURI())
+	b, _ := io.ReadAll(r.Body)
+	m.bodies = append(m.bodies, string(b))
 	m.auth = r.Header.Get("Authorization")
 	w.Header().Set("Content-Type", "application/json")
 	if !strings.Contains(r.URL.Path, uid) {
@@ -89,8 +93,21 @@ func TestRevokeSessions(t *testing.T) {
 		t.Errorf("calls=%v auth=%q", m.calls, m.auth)
 	}
 	call("revoke_user_sessions", map[string]any{"user_id": uid, "revoke_oauth_tokens": true})
-	if m.calls[1] != "DELETE /api/v1/users/"+uid+"/sessions?oauthTokens=true" {
-		t.Errorf("calls=%v", m.calls)
+	want := []string{"DELETE /api/v1/users/" + uid + "/sessions", "DELETE /api/v1/users/" + uid + "/sessions?oauthTokens=true"}
+	if strings.Join(m.calls, " ") != strings.Join(want, " ") {
+		t.Errorf("calls=%v, want %v", m.calls, want)
+	}
+	assertNoBody(t, m)
+}
+
+// assertNoBody fails the test when a request had a body. The Okta calls of
+// the server take the user id in the path and no body.
+func assertNoBody(t *testing.T, m *mock) {
+	t.Helper()
+	for i, b := range m.bodies {
+		if b != "" {
+			t.Errorf("%s has the body %q", m.calls[i], b)
+		}
 	}
 }
 
@@ -106,9 +123,15 @@ func TestSuspendAndUnsuspend(t *testing.T) {
 	if isErr, text := call("unsuspend_user", map[string]any{"user_id": uid}); isErr || m.status != "ACTIVE" {
 		t.Fatalf("unsuspend: %v %s %s", isErr, text, m.status)
 	}
-	if m.calls[0] != "POST /api/v1/users/"+uid+"/lifecycle/suspend" {
-		t.Errorf("calls=%v", m.calls)
+	want := []string{
+		"POST /api/v1/users/" + uid + "/lifecycle/suspend",
+		"POST /api/v1/users/" + uid + "/lifecycle/suspend",
+		"POST /api/v1/users/" + uid + "/lifecycle/unsuspend",
 	}
+	if strings.Join(m.calls, " ") != strings.Join(want, " ") || m.auth != "SSWS tok" {
+		t.Errorf("calls=%v auth=%q, want %v", m.calls, m.auth, want)
+	}
+	assertNoBody(t, m)
 }
 
 func TestUnknownUser(t *testing.T) {
