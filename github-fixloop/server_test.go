@@ -221,6 +221,31 @@ func TestPipelineReadsEveryPage(t *testing.T) {
 	}
 }
 
+// TestPipelineRefusesMoreRunsThanItReads asserts that a commit with more check
+// runs than the tool reads is not green. Each page holds 100 green runs, and
+// the runs after page 10 are never read.
+func TestPipelineRefusesMoreRunsThanItReads(t *testing.T) {
+	var pages []string
+	routes := checks(greenRun, "success", 1)
+	routes["GET "+repo+"/commits/"+headSHA+"/check-runs"] = func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+		pages = append(pages, r.URL.Query().Get("page")+"/"+r.URL.Query().Get("per_page"))
+		_, _ = w.Write([]byte(`{"total_count":1001,"check_runs":[` + strings.TrimSuffix(strings.Repeat(greenRun+",", 100), ",") + `]}`))
+	}
+	routes["GET "+pr7] = reply(200, openPR("clean"))
+	routes["PUT "+pr7+"/merge"] = reply(200, `{"merged":true}`)
+	m, call := setup(t, routes)
+	isErr, text, _ := call("merge_merge_request", map[string]any{"merge_request": ref})
+	if !isErr || !strings.Contains(text, "1001 check runs") {
+		t.Errorf("isErr=%v %s", isErr, text)
+	}
+	if m.called("PUT "+pr7+"/merge") != 0 {
+		t.Error("merged with check runs that the tool did not read")
+	}
+	if len(pages) != 10 || pages[0] != "1/100" || pages[9] != "10/100" {
+		t.Errorf("pages = %v", pages)
+	}
+}
+
 func TestStateMergedAndClosed(t *testing.T) {
 	routes := checks(greenRun, "pending", 0)
 	routes["GET "+pr7] = reply(200, mergedPR)

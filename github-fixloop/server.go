@@ -241,7 +241,7 @@ type checkRuns struct {
 // pipeline reads the checks of a commit: the check runs and the combined
 // commit status. The status is success only when every one passed.
 func (v *service) pipeline(ctx context.Context, r prRef, sha string) (string, error) {
-	failed, pending, seen := false, false, 0
+	failed, pending, seen, total := false, false, 0, 0
 	for page := 1; page <= maxCheckPage; page++ {
 		var cr checkRuns
 		err := v.client.Do(ctx, kit.Request{
@@ -260,9 +260,15 @@ func (v *service) pipeline(ctx context.Context, r prRef, sha string) (string, er
 				failed = true
 			}
 		}
+		total = cr.Total
 		if len(cr.Runs) == 0 || seen >= cr.Total {
 			break
 		}
+	}
+	if seen < total {
+		// A run that the tool did not read can be red. The commit is not green.
+		return "", fmt.Errorf("the commit has %d check runs, and the tool reads at most %d of them. "+
+			"It does not count the checks as passed", total, maxCheckPage*100)
 	}
 	var cs struct {
 		State string `json:"state"`

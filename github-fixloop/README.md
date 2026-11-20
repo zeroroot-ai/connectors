@@ -35,7 +35,7 @@ The input and the result follow `fixloop/connector.go`. Where GitHub differs, th
 |---|---|
 | `state` = `open`, `merged`, `closed` | `state` is `open`. `state` is `closed` and `merged` is true. `state` is `closed` and `merged` is false. |
 | `state` = `refused` | GitHub has no such state. See the next section. |
-| `pipeline_green` | Every check run of the head commit is complete with the conclusion `success`, `neutral` or `skipped`. The combined commit status is `success`, or the commit has no status. The commit has at least one check run or one status. |
+| `pipeline_green` | Every check run of the head commit is complete with the conclusion `success`, `neutral` or `skipped`. The combined commit status is `success`, or the commit has no status. The commit has at least one check run or one status. The tool reads at most 1000 check runs (10 pages of 100). A commit with more check runs gets a tool error, never `pipeline_green`. |
 | `pipeline_status` | `success`, `pending`, `failed` or `none`. |
 | `at` | `merged_at`, `closed_at` or `updated_at`. |
 | `merge_commit` | `merge_commit_sha` of the pull request. |
