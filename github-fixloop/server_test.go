@@ -371,6 +371,31 @@ func TestMergeReadsAgainWhenMergeableIsNull(t *testing.T) {
 	}
 }
 
+func TestMergeRefusesAHeadThatMovedDuringTheWait(t *testing.T) {
+	const moved = "dddddddddddddddddddddddddddddddddddddddd"
+	reads := 0
+	routes := checks(greenRun, "success", 1)
+	routes["GET "+pr7] = func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+		reads++
+		if reads == 1 {
+			_, _ = w.Write([]byte(pullJSON("open", false, "null", "unknown", headSHA)))
+			return
+		}
+		// A push moved the head while GitHub computed the merge status.
+		_, _ = w.Write([]byte(pullJSON("open", false, "true", "clean", moved)))
+	}
+	routes["PUT "+pr7+"/merge"] = reply(200, `{"merged":true}`)
+	m, call := setup(t, routes)
+	isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref})
+	reason, _ := out["reason"].(string)
+	if isErr || out["merged"] != false || out["head_sha"] != headSHA || !strings.Contains(reason, "head") {
+		t.Errorf("isErr=%v out=%v %s", isErr, out, text)
+	}
+	if n := m.called("PUT " + pr7 + "/merge"); n != 0 {
+		t.Errorf("the tool sent %d merge requests for a head that it did not check", n)
+	}
+}
+
 func TestRefusalShowsInStateUntilTheHeadChanges(t *testing.T) {
 	pr := openPR("blocked")
 	routes := checks(greenRun, "success", 1)

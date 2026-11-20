@@ -386,6 +386,12 @@ func (v *service) tryMerge(ctx context.Context, r prRef, pr *ghPR, wantSHA, meth
 		if pr, err = v.getPR(ctx, r); err != nil {
 			return st, false, err
 		}
+		if !strings.EqualFold(pr.Head.SHA, st.HeadSHA) {
+			// The checks passed on st.HeadSHA only. A merge of the new head
+			// would merge code that no check tested.
+			st.Reason = "the head of the pull request changed after the check. A push changed it."
+			return st, false, nil
+		}
 	}
 	switch pr.MergeableState {
 	case "clean", "has_hooks":
@@ -397,7 +403,7 @@ func (v *service) tryMerge(ctx context.Context, r prRef, pr *ghPR, wantSHA, meth
 		// draft, a branch that is behind. The fix waits on a person.
 		return v.refuse(st, pr.Head.SHA, "GitHub does not allow the merge: "+pr.MergeableState), false, nil
 	}
-	body := map[string]any{"sha": pr.Head.SHA}
+	body := map[string]any{"sha": st.HeadSHA}
 	if method != "" {
 		body["merge_method"] = method
 	}
