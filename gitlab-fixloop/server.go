@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -31,14 +32,23 @@ import (
 //     https://docs.gitlab.com/api/repositories/#merge-base
 //   - list the deployments of a project:
 //     https://docs.gitlab.com/api/deployments/
+//   - the merge method of a project (merge, rebase_merge or ff):
+//     https://docs.gitlab.com/api/projects/
+//   - the external status checks of a merge request (passed, pending, failed):
+//     https://docs.gitlab.com/api/status_checks/
+//   - get one commit (parent_ids):
+//     https://docs.gitlab.com/api/commits/#get-a-single-commit
 //
 // The input and the result of each tool follow internal/engine/fixloop/connector.go
 // of zeroroot-ai/gibson. The mapping of the GitLab fields to the fields of the daemon:
 //   - state: opened and locked are "open". merged is "merged". closed is "closed".
 //     "refused" is an open merge request whose head pipeline succeeded and whose
-//     detailed_merge_status shows a rule that blocks the merge now. The tool reads it
-//     from GitLab on each call.
+//     detailed_merge_status shows a rule that blocks the merge now, or a project
+//     that merges by fast-forward with no squash. The tool reads it from GitLab on
+//     each call.
 //   - pipeline_green: true when head_pipeline.status is "success" and head_pipeline.sha is the head sha.
+//     When detailed_merge_status is status_checks_must_pass, the external status checks
+//     count too: a failed one makes the pipeline "failed", a pending one "pending".
 //   - at: merged_at, closed_at or updated_at of the merge request.
 //   - deployment_state.application: the path of the project. restart is always off.
 
@@ -94,9 +104,11 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 		Name: "merge_request_state",
 		Description: "Read the state of one GitLab merge request: open, merged, closed or refused, the status of its head " +
 			"pipeline, the merge commit and the time of the merge. Read only. " +
+			"An external status check that has not passed makes the pipeline pending or failed. " +
 			"The state is refused when the head pipeline succeeded and a rule of the project blocks the merge now: an " +
-			"approval, a thread, a draft, a conflict. The reason is \"GitLab does not allow the merge: \" and the " +
-			"detailed_merge_status of GitLab. The tool reads this from GitLab on each call and keeps no memory of it.",
+			"approval, a thread, a draft, a conflict, or a fast-forward merge with no squash, which leaves no commit to " +
+			"revert. The reason starts with \"GitLab does not allow the merge: \". The tool reads this from GitLab on " +
+			"each call and keeps no memory of it.",
 		Annotations: kit.ReadOnly("GitLab merge request state"),
 	}, v.mergeRequestState)
 	kit.AddTool(s, log, &mcp.Tool{
@@ -115,6 +127,7 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 			"revert merge request. When a person closed the revert merge request without a merge, the next call opens a new " +
 			"one on a new branch. After " + strconv.Itoa(fixloop.RevertTries) + " closed revert merge requests, " +
 			"the tool returns an error, and a person reverts by hand. " +
+			"It refuses a revert branch that a person made, when its commit does not revert the merge commit. " +
 			"Undo: call revert_merge_request with the revert_merge_request value of the result.",
 		Annotations: kit.Reversible("Revert GitLab merge request", true),
 	}, v.revertMergeRequest)
@@ -151,7 +164,26 @@ type glMR struct {
 	MergeStatus         string      `json:"merge_status"`
 	DetailedMergeStatus string      `json:"detailed_merge_status"`
 	HeadPipeline        *glPipeline `json:"head_pipeline"`
+	Squash              bool        `json:"squash"`
+	SquashOnMerge       *bool       `json:"squash_on_merge"`
 }
+
+// squashes is true when GitLab squashes the merge request on merge. GitLab
+// recommends squash_on_merge, which holds the project settings. Older GitLab
+// has squash only.
+func (mr *glMR) squashes() bool {
+	if mr.SquashOnMerge != nil {
+		return *mr.SquashOnMerge
+	}
+	return mr.Squash
+}
+
+// reasonFastForward is the refusal of a project that merges by fast-forward
+// without a squash. Such a merge leaves no merge commit and no squash commit,
+// so revert_merge_request cannot undo it. The reason does not change between
+// calls.
+const reasonFastForward = "GitLab does not allow the merge: the project merges by fast-forward and this merge request " +
+	"does not squash, so the merge leaves no commit that the revert tool can revert"
 
 // parseRef reads the project path and the number from the URL of a merge
 // request on this host, or from its short reference group/project!12.
@@ -211,7 +243,7 @@ func pipelineStatus(mr *glMR) (string, bool) {
 }
 
 // stateOf maps a GitLab merge request to the state of the daemon.
-func stateOf(key string, mr *glMR) fixloop.State {
+func (v *service) stateOf(ctx context.Context, project, key string, mr *glMR) (fixloop.State, error) {
 	status, green := pipelineStatus(mr)
 	st := fixloop.State{MergeRequest: key, PipelineStatus: status, PipelineGreen: green, HeadSHA: mr.SHA}
 	switch mr.State {
@@ -223,19 +255,78 @@ func stateOf(key string, mr *glMR) fixloop.State {
 		}
 		st.MergedAt = fixloop.Time(fixloop.ParseTime(mr.MergedAt))
 		st.At = st.MergedAt
+		return st, nil
 	case "closed":
 		st.State = fixloop.Closed
 		st.At = fixloop.Time(fixloop.ParseTime(mr.ClosedAt))
-	default:
-		st.State = fixloop.Open
-		st.At = fixloop.Time(fixloop.ParseTime(mr.UpdatedAt))
-		if status := mergeStatus(mr); green && status != "mergeable" && !transientStatus[status] {
-			// A rule of the project blocks the merge: an approval, a thread, a
-			// draft, a conflict. The fix waits on a person.
-			st.State, st.Reason = fixloop.Refused, "GitLab does not allow the merge: "+status
+		return st, nil
+	}
+	st.State = fixloop.Open
+	st.At = fixloop.Time(fixloop.ParseTime(mr.UpdatedAt))
+	status = mergeStatus(mr)
+	if green && statusCheckStatus[status] {
+		checks, err := v.statusChecks(ctx, project, mr.IID)
+		if err != nil {
+			return st, err
+		}
+		if checks != fixloop.PipelineSuccess {
+			// An external status check is a check of the merge request. While
+			// it runs or after it failed, the checks are not green.
+			st.PipelineStatus, st.PipelineGreen = checks, false
+			return st, nil
 		}
 	}
-	return st
+	if !st.PipelineGreen || status == "mergeable" || transientStatus[status] {
+		if st.PipelineGreen {
+			return v.fastForwardRefusal(ctx, project, mr, st)
+		}
+		return st, nil
+	}
+	// A rule of the project blocks the merge: an approval, a thread, a draft,
+	// a conflict. The fix waits on a person.
+	st.State, st.Reason = fixloop.Refused, "GitLab does not allow the merge: "+status
+	return st, nil
+}
+
+// fastForwardRefusal marks the state refused when the project merges by
+// fast-forward and the merge request does not squash.
+func (v *service) fastForwardRefusal(ctx context.Context, project string, mr *glMR, st fixloop.State) (fixloop.State, error) {
+	if mr.squashes() {
+		return st, nil
+	}
+	var p struct {
+		MergeMethod string `json:"merge_method"`
+	}
+	if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: kit.Path("projects", project)}, &p); err != nil {
+		return st, fmt.Errorf("read the merge method of the project: %w", err)
+	}
+	if p.MergeMethod == "ff" {
+		st.State, st.Reason = fixloop.Refused, reasonFastForward
+	}
+	return st, nil
+}
+
+// statusChecks reads the external status checks of a merge request. Any
+// failed check is "failed". Else any check that has not passed is "pending".
+func (v *service) statusChecks(ctx context.Context, project string, iid int) (string, error) {
+	var list []struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+	}
+	if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: mrPath(project, iid, "status_checks")}, &list); err != nil {
+		return "", fmt.Errorf("read the external status checks: %w", err)
+	}
+	result := fixloop.PipelineSuccess
+	for _, c := range list {
+		switch c.Status {
+		case "passed":
+		case "failed":
+			return fixloop.PipelineFailed, nil
+		default:
+			result = fixloop.PipelinePending
+		}
+	}
+	return result, nil
 }
 
 // mergeStatus returns the detailed_merge_status of the merge request. GitLab
@@ -261,7 +352,8 @@ func (v *service) mergeRequestState(ctx context.Context, _ *mcp.CallToolRequest,
 	if err != nil {
 		return nil, fixloop.State{}, err
 	}
-	return nil, stateOf(refKey(project, iid), mr), nil
+	st, err := v.stateOf(ctx, project, refKey(project, iid), mr)
+	return nil, st, err
 }
 
 // ---- merge_merge_request ----
@@ -291,25 +383,35 @@ func (v *service) mergeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest,
 
 // Classes of detailed_merge_status that are not "mergeable".
 // https://docs.gitlab.com/api/merge_requests/#merge-status
+// merge_time is "May not be merged until after the specified time". The time
+// passes with no person, so it is not a refusal.
 var transientStatus = map[string]bool{"checking": true, "unchecked": true, "preparing": true, "approvals_syncing": true,
-	"ci_still_running": true, "ci_must_pass": true}
+	"ci_still_running": true, "ci_must_pass": true, "merge_time": true}
+
+// statusCheckStatus holds the detailed_merge_status of external status checks
+// that have not all passed. The page names it status_checks_must_pass. Some
+// GitLab versions answer external_status_checks.
+var statusCheckStatus = map[string]bool{"status_checks_must_pass": true, "external_status_checks": true}
 
 // tryMerge merges the merge request when its head pipeline succeeded and
 // GitLab reports it as mergeable. It sends the head sha of its check, so a push
 // after the check cannot be merged.
 func (v *service) tryMerge(ctx context.Context, project string, iid int, mr *glMR, wantSHA string) (fixloop.State, bool, error) {
 	key := refKey(project, iid)
-	st := stateOf(key, mr)
+	st, err := v.stateOf(ctx, project, key, mr)
+	if err != nil {
+		return st, false, err
+	}
 	switch {
 	case mr.State == "merged":
 		return st, true, nil
 	case mr.State == "closed":
 		st.Reason = "the merge request is closed"
 		return st, false, nil
-	case st.State == fixloop.Refused:
-		return st, false, nil
 	case wantSHA != "" && !strings.EqualFold(wantSHA, mr.SHA):
 		st.Reason = "the head of the merge request is not the sha that was tested. A push changed it."
+		return st, false, nil
+	case st.State == fixloop.Refused:
 		return st, false, nil
 	case !st.PipelineGreen:
 		st.Reason = "the head pipeline has not succeeded: " + st.PipelineStatus
@@ -320,7 +422,7 @@ func (v *service) tryMerge(ctx context.Context, project string, iid int, mr *glM
 		return st, false, nil
 	}
 	var merged glMR
-	err := v.client.Do(ctx, kit.Request{
+	err = v.client.Do(ctx, kit.Request{
 		Method: http.MethodPut, Path: mrPath(project, iid, "merge"),
 		JSON: map[string]any{"sha": mr.SHA},
 	}, &merged)
@@ -332,14 +434,17 @@ func (v *service) tryMerge(ctx context.Context, project string, iid int, mr *glM
 			}
 			merged = *latest
 		}
-		return stateOf(key, &merged), merged.State == "merged", nil
+		st, err := v.stateOf(ctx, project, key, &merged)
+		return st, merged.State == "merged", err
 	}
 	return v.mergeError(ctx, project, iid, st, err)
 }
 
 // mergeError turns an error of the merge call into a result. A retry of a
 // merge that GitLab already did answers with a refusal, so the tool reads the
-// merge request again before it reports one.
+// merge request again before it reports one. A refusal fails closed: the state
+// is refused, and the reason holds the HTTP status and the message of GitLab,
+// which do not change while the cause stays.
 func (v *service) mergeError(ctx context.Context, project string, iid int, st fixloop.State, err error) (fixloop.State, bool, error) {
 	var ae *kit.APIError
 	if !errors.As(err, &ae) {
@@ -353,9 +458,10 @@ func (v *service) mergeError(ctx context.Context, project string, iid int, st fi
 		key := refKey(project, iid)
 		latest, rerr := v.getMR(ctx, project, iid)
 		if rerr == nil && latest.State == "merged" {
-			return stateOf(key, latest), true, nil
+			merged, serr := v.stateOf(ctx, project, key, latest)
+			return merged, serr == nil, serr
 		}
-		st.State, st.Reason = fixloop.Refused, "GitLab refused the merge: "+briefBody(ae)
+		st.State, st.Reason = fixloop.Refused, fmt.Sprintf("GitLab refused the merge (HTTP %d): %s", ae.Status, briefBody(ae))
 		return st, false, nil
 	}
 	return st, false, fmt.Errorf("merge merge request: %w", err)
@@ -375,7 +481,7 @@ func briefBody(ae *kit.APIError) string {
 			return b.Error
 		}
 	}
-	return fmt.Sprintf("HTTP %d", ae.Status)
+	return "no message"
 }
 
 // ---- revert_merge_request ----
@@ -473,7 +579,8 @@ func (v *service) openRevert(ctx context.Context, project string, orig *glMR, co
 }
 
 // ensureRevertBranch makes the branch from the target branch and puts the
-// revert commit on it. A branch that holds the revert commit already is kept.
+// revert commit on it. A branch that exists already is kept only when its one
+// commit after the target branch reverts the merge commit.
 func (v *service) ensureRevertBranch(ctx context.Context, project, target, branch, commit string) error {
 	err := v.client.Do(ctx, kit.Request{
 		Method: http.MethodPost, Path: kit.Path("projects", project, "repository", "branches"),
@@ -491,8 +598,14 @@ func (v *service) ensureRevertBranch(ctx context.Context, project, target, branc
 		if cerr != nil {
 			return fmt.Errorf("compare the revert branch: %w", cerr)
 		}
-		if len(cmp.Commits) > 0 {
-			return nil // an earlier call did the revert commit
+		switch len(cmp.Commits) {
+		case 0: // an earlier call made the branch and failed before the revert
+		case 1:
+			// An earlier call did the revert commit, or a person made the branch.
+			return v.checkRevertCommit(ctx, project, branch, commit, cmp.Commits[0].ID)
+		default:
+			return fmt.Errorf("the branch %s exists and has %d commits that the target branch does not have. "+
+				"A person made the branch. Revert by hand, or delete the branch", branch, len(cmp.Commits))
 		}
 	default:
 		return fmt.Errorf("create the revert branch: %w", err)
@@ -505,6 +618,101 @@ func (v *service) ensureRevertBranch(ctx context.Context, project, target, branc
 		return fmt.Errorf("revert the merge commit: %w", err)
 	}
 	return nil
+}
+
+type glCommit struct {
+	ID        string   `json:"id"`
+	ParentIDs []string `json:"parent_ids"`
+}
+
+func (v *service) getCommit(ctx context.Context, project, sha string) (*glCommit, error) {
+	var c glCommit
+	if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: kit.Path("projects", project, "repository", "commits", sha)}, &c); err != nil {
+		return nil, fmt.Errorf("read commit: %w", err)
+	}
+	return &c, nil
+}
+
+// checkRevertCommit accepts the commit of an existing revert branch only when
+// it is the commit that the revert call of GitLab makes: one parent, which
+// holds the merge commit, and a change that is the change of the merge commit
+// back to its first parent. The tool compares the added and removed lines of
+// each file. The line numbers and the context lines can differ, because the
+// target branch can have moved on before the revert.
+func (v *service) checkRevertCommit(ctx context.Context, project, branch, commit, revert string) error {
+	refuse := fmt.Errorf("the branch %s exists, and its commit does not revert the merge commit %s. "+
+		"A person made the branch. Revert by hand, or delete the branch", branch, commit)
+	rc, err := v.getCommit(ctx, project, revert)
+	if err != nil {
+		return err
+	}
+	mc, err := v.getCommit(ctx, project, commit)
+	if err != nil {
+		return err
+	}
+	if len(rc.ParentIDs) != 1 || len(mc.ParentIDs) == 0 || !v.holds(ctx, project, commit, rc.ParentIDs[0]) {
+		return refuse
+	}
+	want, err := v.change(ctx, project, commit, mc.ParentIDs[0])
+	if err != nil {
+		return err
+	}
+	got, err := v.change(ctx, project, rc.ParentIDs[0], revert)
+	if err != nil {
+		return err
+	}
+	if want == "" || want != got {
+		return refuse
+	}
+	return nil
+}
+
+// change returns the change from one commit to another as text: for each file,
+// the paths, the kind of change, and the added and removed lines. It returns
+// an error when GitLab cuts the diff, because a cut diff proves nothing.
+func (v *service) change(ctx context.Context, project, from, to string) (string, error) {
+	var cmp struct {
+		CompareTimeout bool `json:"compare_timeout"`
+		Diffs          []struct {
+			OldPath     string `json:"old_path"`
+			NewPath     string `json:"new_path"`
+			Diff        string `json:"diff"`
+			NewFile     bool   `json:"new_file"`
+			RenamedFile bool   `json:"renamed_file"`
+			DeletedFile bool   `json:"deleted_file"`
+			TooLarge    bool   `json:"too_large"`
+			Collapsed   bool   `json:"collapsed"`
+		} `json:"diffs"`
+	}
+	err := v.client.Do(ctx, kit.Request{
+		Method: http.MethodGet, Path: kit.Path("projects", project, "repository", "compare"),
+		Query: url.Values{"from": {from}, "to": {to}, "straight": {"true"}},
+	}, &cmp)
+	if err != nil {
+		return "", fmt.Errorf("compare two commits: %w", err)
+	}
+	if cmp.CompareTimeout {
+		return "", errors.New("GitLab cut the compare of two commits, so the tool cannot check the revert branch. " +
+			"Revert by hand, or delete the branch")
+	}
+	files := make([]string, 0, len(cmp.Diffs))
+	for _, d := range cmp.Diffs {
+		if d.TooLarge || d.Collapsed {
+			return "", errors.New("GitLab cut a diff of two commits, so the tool cannot check the revert branch. " +
+				"Revert by hand, or delete the branch")
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s\x00%s\x00%t%t%t\n", d.OldPath, d.NewPath, d.NewFile, d.RenamedFile, d.DeletedFile)
+		for _, line := range strings.Split(d.Diff, "\n") {
+			if strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") {
+				b.WriteString(line)
+				b.WriteByte('\n')
+			}
+		}
+		files = append(files, b.String())
+	}
+	sort.Strings(files)
+	return strings.Join(files, "\x01"), nil
 }
 
 // ---- deployment_state ----

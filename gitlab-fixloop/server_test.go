@@ -19,8 +19,9 @@ import (
 // The mock follows the GitLab REST API v4. A route is "METHOD escaped-path".
 // The pages are https://docs.gitlab.com/api/merge_requests/,
 // https://docs.gitlab.com/api/commits/#revert-a-commit,
-// https://docs.gitlab.com/api/branches/, https://docs.gitlab.com/api/repositories/
-// and https://docs.gitlab.com/api/deployments/.
+// https://docs.gitlab.com/api/branches/, https://docs.gitlab.com/api/repositories/,
+// https://docs.gitlab.com/api/deployments/, https://docs.gitlab.com/api/projects/
+// and https://docs.gitlab.com/api/status_checks/.
 type mock struct {
 	mu     sync.Mutex
 	routes map[string]func(w http.ResponseWriter, r *http.Request, body map[string]any)
@@ -96,6 +97,12 @@ const mergedMR = `{"iid":7,"title":"Fix SQL injection","state":"merged","web_url
 
 func setup(t *testing.T, routes map[string]func(http.ResponseWriter, *http.Request, map[string]any)) (srv *mock, call func(string, map[string]any) (isErr bool, text string, out map[string]any)) {
 	t.Helper()
+	if routes == nil {
+		routes = map[string]func(http.ResponseWriter, *http.Request, map[string]any){}
+	}
+	if _, ok := routes["GET "+api]; !ok {
+		routes["GET "+api] = reply(200, projectMerge)
+	}
 	m := &mock{routes: routes}
 	ts := httptest.NewServer(m)
 	t.Cleanup(ts.Close)
@@ -115,6 +122,9 @@ func setup(t *testing.T, routes map[string]func(http.ResponseWriter, *http.Reque
 		return res.IsError, kittest.Text(t, res), out
 	}
 }
+
+// projectMerge is a project that merges with a merge commit.
+const projectMerge = `{"id":3,"path_with_namespace":"acme/shop","merge_method":"merge","squash_option":"default_off"}`
 
 // The reference of the project on the mock host is the short form, because
 // the mock listens on a random address.
@@ -479,10 +489,58 @@ func TestRevertStopsAfterThreeClosedReverts(t *testing.T) {
 	}
 }
 
+const (
+	revertSHA   = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	firstParent = "cccccccccccccccccccccccccccccccccccccccc"
+	laterTarget = "dddddddddddddddddddddddddddddddddddddddd"
+	// mergeChange is the compare of the merge commit to its first parent: the
+	// change that a revert makes.
+	mergeChange  = "@@ -10,3 +10,3 @@ func query() {\n ctx := context()\n-db.Query(sql, args...)\n+db.Query(raw)\n }\n"
+	revertChange = "@@ -14,3 +14,3 @@ func query() {\n log := logger()\n-db.Query(sql, args...)\n+db.Query(raw)\n }\n"
+)
+
+// existingBranch answers the routes of a revert branch that exists already:
+// one commit after the target branch, its parent, and the two compares that
+// the tool reads. revertDiff is the change of the commit on the branch.
+func existingBranch(routes map[string]func(http.ResponseWriter, *http.Request, map[string]any), branchCommits, revertParent, revertDiff string) {
+	routes["POST "+api+"/repository/branches"] = reply(400, `{"message":"Branch already exists"}`)
+	routes["GET "+api+"/repository/commits/"+revertSHA] = reply(200, `{"id":"`+revertSHA+`","parent_ids":["`+revertParent+`"]}`)
+	routes["GET "+api+"/repository/commits/"+mergeSHA] = reply(200, `{"id":"`+mergeSHA+`","parent_ids":["`+firstParent+`","ffff"]}`)
+	routes["GET "+api+"/repository/merge_base"] = func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+		refs := r.URL.Query()["refs[]"]
+		if len(refs) == 2 && refs[0] == mergeSHA && refs[1] == laterTarget {
+			_, _ = w.Write([]byte(`{"id":"` + mergeSHA + `"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"0000"}`))
+	}
+	routes["GET "+api+"/repository/compare"] = func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+		q := r.URL.Query()
+		switch {
+		case q.Get("from") == "main" && q.Get("to") == "zeroroot/revert-mr7-bbbbbbbb" && q.Get("straight") == "":
+			_, _ = w.Write([]byte(`{"commits":` + branchCommits + `}`))
+		case q.Get("from") == mergeSHA && q.Get("to") == firstParent && q.Get("straight") == "true":
+			_, _ = w.Write([]byte(`{"diffs":[{"old_path":"db.go","new_path":"db.go","diff":` + jsonString(mergeChange) + `}]}`))
+		case q.Get("from") == revertParent && q.Get("to") == revertSHA && q.Get("straight") == "true":
+			_, _ = w.Write([]byte(`{"diffs":[{"old_path":"db.go","new_path":"db.go","diff":` + jsonString(revertDiff) + `}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"404 Not Found"}`))
+		}
+	}
+}
+
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+// TestRevertKeepsABranchThatHoldsTheRevert asserts that the tool keeps a
+// branch from an earlier call. The target branch moved on before the revert,
+// so the line numbers and the context lines differ from the merge commit.
 func TestRevertKeepsABranchThatHoldsTheRevert(t *testing.T) {
 	routes := revertRoutes(`[]`, revertMRJSON)
-	routes["POST "+api+"/repository/branches"] = reply(400, `{"message":"Branch already exists"}`)
-	routes["GET "+api+"/repository/compare"] = reply(200, `{"commits":[{"id":"eeee"}]}`)
+	existingBranch(routes, `[{"id":"`+revertSHA+`"}]`, laterTarget, revertChange)
 	m, call := setup(t, routes)
 	isErr, text, out := call("revert_merge_request", map[string]any{"merge_request": ref})
 	if isErr || out["merged"] != true {
@@ -490,6 +548,37 @@ func TestRevertKeepsABranchThatHoldsTheRevert(t *testing.T) {
 	}
 	if m.called("POST "+api+"/repository/commits/"+mergeSHA+"/revert") != 0 {
 		t.Error("reverted a second time")
+	}
+	if m.called("GET "+api+"/repository/commits/"+revertSHA) != 1 || m.called("GET "+api+"/repository/compare") != 3 {
+		t.Errorf("the tool kept the branch without a check of its commit: %v", m.calls)
+	}
+}
+
+// TestRevertRefusesABranchThatAPersonMade asserts that a branch with the name
+// of the revert branch is refused when its commit is not the revert.
+func TestRevertRefusesABranchThatAPersonMade(t *testing.T) {
+	cases := []struct {
+		name, commits, parent, diff, want string
+	}{
+		{"other change", `[{"id":"` + revertSHA + `"}]`, laterTarget,
+			"@@ -14,3 +14,3 @@\n-db.Query(sql, args...)\n+db.Exec(raw)\n", "does not revert the merge commit"},
+		{"parent without the merge", `[{"id":"` + revertSHA + `"}]`, "9999999999999999999999999999999999999999",
+			revertChange, "does not revert the merge commit"},
+		{"two commits", `[{"id":"` + revertSHA + `"},{"id":"1234"}]`, laterTarget, revertChange, "has 2 commits"},
+	}
+	for _, c := range cases {
+		routes := revertRoutes(`[]`, revertMRJSON)
+		existingBranch(routes, c.commits, c.parent, c.diff)
+		m, call := setup(t, routes)
+		isErr, text, _ := call("revert_merge_request", map[string]any{"merge_request": ref})
+		if !isErr || !strings.Contains(text, c.want) {
+			t.Errorf("%s: isErr=%v %s", c.name, isErr, text)
+		}
+		for _, k := range []string{"POST " + api + "/repository/commits/" + mergeSHA + "/revert", "POST " + api + "/merge_requests"} {
+			if m.called(k) != 0 {
+				t.Errorf("%s: called %s", c.name, k)
+			}
+		}
 	}
 }
 
@@ -689,3 +778,115 @@ func TestConfigErrors(t *testing.T) {
 }
 
 var _ = fixloop.Open
+
+// TestExternalStatusChecks asserts the map of status_checks_must_pass: the
+// tool reads the status checks, and a pending check is a pending pipeline, not
+// a refusal. A failed check is a failed pipeline.
+func TestExternalStatusChecks(t *testing.T) {
+	cases := []struct {
+		detailed, checks, wantStatus, wantState string
+		green                                   bool
+	}{
+		{"status_checks_must_pass", `[{"id":1,"name":"scan","status":"pending"},{"id":2,"name":"sbom","status":"passed"}]`,
+			"pending", "open", false},
+		{"external_status_checks", `[{"id":1,"name":"scan","status":"pending"}]`, "pending", "open", false},
+		{"status_checks_must_pass", `[{"id":1,"name":"scan","status":"failed"},{"id":2,"name":"sbom","status":"pending"}]`,
+			"failed", "open", false},
+		{"status_checks_must_pass", `[{"id":1,"name":"scan","status":"passed"}]`, "success", "refused", true},
+	}
+	for _, c := range cases {
+		m, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
+			"GET " + api + mr7:                    reply(200, openMR("success", c.detailed)),
+			"GET " + api + mr7 + "/status_checks": reply(200, c.checks),
+		})
+		_, _, out := call("merge_request_state", map[string]any{"merge_request": ref})
+		if out["state"] != c.wantState || out["pipeline_status"] != c.wantStatus || out["pipeline_green"] != c.green {
+			t.Errorf("%s %s: out = %v", c.detailed, c.checks, out)
+		}
+		if m.called("GET "+api+mr7+"/status_checks") != 1 {
+			t.Errorf("%s: calls = %v", c.detailed, m.calls)
+		}
+	}
+}
+
+// TestMergeTimeIsNotARefusal asserts that merge_time, "May not be merged
+// until after the specified time", waits and is not a refusal.
+func TestMergeTimeIsNotARefusal(t *testing.T) {
+	m, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
+		"GET " + api + mr7: reply(200, openMR("success", "merge_time")),
+	})
+	_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref})
+	reason, _ := out["reason"].(string)
+	if out["state"] != "open" || !strings.Contains(reason, "has not settled the merge status: merge_time") {
+		t.Errorf("out = %v", out)
+	}
+	if m.called("PUT "+api+mr7+"/merge") != 0 {
+		t.Error("the tool called merge before the merge time")
+	}
+}
+
+// TestFastForwardWithoutSquashIsRefused asserts that a project that merges by
+// fast-forward is refused unless the merge request squashes, because such a
+// merge leaves no commit that the revert tool can revert.
+func TestFastForwardWithoutSquashIsRefused(t *testing.T) {
+	const ff = `{"id":3,"merge_method":"ff"}`
+	squash := strings.Replace(openMR("success", "mergeable"), `"sha":`, `"squash_on_merge":true,"sha":`, 1)
+	cases := []struct {
+		name, project, mr string
+		merge             bool
+	}{
+		{"ff without squash", ff, openMR("success", "mergeable"), false},
+		{"ff with squash", ff, squash, true},
+		{"merge commit", projectMerge, openMR("success", "mergeable"), true},
+		{"rebase_merge", `{"id":3,"merge_method":"rebase_merge"}`, openMR("success", "mergeable"), true},
+	}
+	for _, c := range cases {
+		m, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
+			"GET " + api:                  reply(200, c.project),
+			"GET " + api + mr7:            reply(200, c.mr),
+			"PUT " + api + mr7 + "/merge": reply(200, mergedMR),
+		})
+		_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref})
+		if c.merge {
+			if out["merged"] != true || m.called("PUT "+api+mr7+"/merge") != 1 {
+				t.Errorf("%s: out = %v", c.name, out)
+			}
+			continue
+		}
+		if out["state"] != "refused" || out["reason"] != reasonFastForward || m.called("PUT "+api+mr7+"/merge") != 0 {
+			t.Errorf("%s: out = %v calls = %v", c.name, out, m.calls)
+		}
+		_, _, out = call("merge_request_state", map[string]any{"merge_request": ref})
+		if out["state"] != "refused" || out["reason"] != reasonFastForward {
+			t.Errorf("%s: state = %v", c.name, out)
+		}
+	}
+}
+
+// TestMergeChecksTheHeadBeforeTheRefusal asserts that a moved head is the
+// reason, also when GitLab blocks the merge.
+func TestMergeChecksTheHeadBeforeTheRefusal(t *testing.T) {
+	_, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
+		"GET " + api + mr7: reply(200, openMR("success", "not_approved")),
+	})
+	_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref, "sha": "cccccccccccccccccccccccccccccccccccccccc"})
+	reason, _ := out["reason"].(string)
+	if !strings.Contains(reason, "A push changed it") {
+		t.Errorf("out = %v", out)
+	}
+}
+
+// TestMergeRefusalReasonIsStable asserts that a refusal of the merge call
+// gives the same reason on each call: the HTTP status and the message.
+func TestMergeRefusalReasonIsStable(t *testing.T) {
+	_, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
+		"GET " + api + mr7:            reply(200, openMR("success", "mergeable")),
+		"PUT " + api + mr7 + "/merge": reply(422, `{"message":"Branch cannot be merged"}`),
+	})
+	for range 2 {
+		_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref})
+		if out["state"] != "refused" || out["reason"] != "GitLab refused the merge (HTTP 422): Branch cannot be merged" {
+			t.Errorf("out = %v", out)
+		}
+	}
+}
