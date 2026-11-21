@@ -61,6 +61,8 @@ import (
 //     reason names each such check.
 //   - at: merged_at, closed_at or updated_at of the pull request.
 //   - source_branch and created_at: head.ref and created_at of the pull request.
+//     source_branch is empty when head.repo.full_name is not base.repo.full_name,
+//     or when head.repo is null (a deleted fork). source_branch_reason then says why.
 //   - deployment_state.application: owner/repo. restart is always off.
 
 const (
@@ -217,13 +219,28 @@ type ghPR struct {
 	MergeableState string `json:"mergeable_state"`
 	Commits        int    `json:"commits"`
 	Head           struct {
-		SHA string `json:"sha"`
-		Ref string `json:"ref"`
+		SHA  string  `json:"sha"`
+		Ref  string  `json:"ref"`
+		Repo *ghRepo `json:"repo"`
 	} `json:"head"`
 	Base struct {
-		Ref string `json:"ref"`
-		SHA string `json:"sha"`
+		Ref  string  `json:"ref"`
+		SHA  string  `json:"sha"`
+		Repo *ghRepo `json:"repo"`
 	} `json:"base"`
+}
+
+// ghRepo is the repository of the head or the base of a pull request. GitHub
+// gives a null head repository when a person deleted the fork.
+type ghRepo struct {
+	FullName string `json:"full_name"`
+}
+
+// fromFork is true when the head of the pull request is not in the base
+// repository. A deleted fork has no head repository, so it counts as a fork.
+func (pr *ghPR) fromFork() bool {
+	h, b := pr.Head.Repo, pr.Base.Repo
+	return h == nil || b == nil || h.FullName == "" || !strings.EqualFold(h.FullName, b.FullName)
 }
 
 type prRef struct {
@@ -424,6 +441,9 @@ func (v *service) stateOf(ctx context.Context, r prRef, pr *ghPR) (fixloop.State
 	st := fixloop.State{
 		MergeRequest: r.key(), HeadSHA: pr.Head.SHA,
 		SourceBranch: pr.Head.Ref, CreatedAt: fixloop.Time(fixloop.ParseTime(pr.CreatedAt)),
+	}
+	if pr.fromFork() {
+		st.SourceBranch, st.SourceBranchReason = "", fixloop.ForkReason
 	}
 	var required []string
 	if pr.State != "closed" {

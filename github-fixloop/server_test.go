@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/zeroroot-ai/connectors/internal/fixloop"
 	"github.com/zeroroot-ai/connectors/internal/kit"
 	"github.com/zeroroot-ai/connectors/internal/kit/kittest"
 )
@@ -94,7 +95,8 @@ func pullJSON(state string, merged bool, mergeable, ms, head string) string {
 		`"closed_at":` + nullable(state == "closed", "2026-11-20T07:00:00Z") + `,"updated_at":"2026-11-20T08:00:00Z",` +
 		`"created_at":"2026-11-20T06:30:00Z",` +
 		`"merge_commit_sha":` + nullable(merged, mergeSHA) + `,"mergeable":` + mergeable + `,"mergeable_state":"` + ms + `",` +
-		`"commits":3,"head":{"sha":"` + head + `","ref":"fix"},"base":{"ref":"main","sha":"` + baseSHA + `"}}`
+		`"commits":3,"head":{"sha":"` + head + `","ref":"fix","repo":{"full_name":"acme/shop"}},` +
+		`"base":{"ref":"main","sha":"` + baseSHA + `","repo":{"full_name":"acme/shop"}}}`
 }
 
 func boolStr(b bool) string {
@@ -237,6 +239,39 @@ func TestStateSourceBranchAndCreatedAt(t *testing.T) {
 		}
 		if c.created != "" && got != c.created {
 			t.Errorf("%s: created_at = %v, want %q", c.pr, got, c.created)
+		}
+	}
+}
+
+// A fork can hold a branch with the name of a job branch. So a pull request
+// from a fork, or from a fork that a person deleted (head.repo is null),
+// gives no source_branch, and source_branch_reason says why. The daemon then
+// refuses the link.
+func TestStateFromAForkGivesNoSourceBranch(t *testing.T) {
+	fork := strings.Replace(openPR("clean"), `"ref":"fix","repo":{"full_name":"acme/shop"}`,
+		`"ref":"job/j-1","repo":{"full_name":"mallory/shop"}`, 1)
+	deleted := strings.Replace(fork, `"repo":{"full_name":"mallory/shop"}`, `"repo":null`, 1)
+	deleted = strings.Replace(deleted, `"number":7`, `"number":8`, 1)
+	m, call := setup(t, merge(checks(greenRun, "pending", 0), map[string]handler{
+		"GET " + pr7:               reply(200, fork),
+		"GET " + repo + "/pulls/8": reply(200, deleted),
+	}))
+	for _, c := range []struct{ pr, path string }{{ref, pr7}, {"acme/shop#8", repo + "/pulls/8"}} {
+		isErr, text, out := call("merge_request_state", map[string]any{"merge_request": c.pr})
+		if isErr {
+			t.Fatalf("%s: %s", c.pr, text)
+		}
+		if m.called("GET "+c.path) != 1 {
+			t.Errorf("%s: the tool did not read %s: %v", c.pr, c.path, m.calls)
+		}
+		if b, ok := out["source_branch"]; ok {
+			t.Errorf("%s: source_branch = %v, want no field", c.pr, b)
+		}
+		if out["source_branch_reason"] != fixloop.ForkReason {
+			t.Errorf("%s: source_branch_reason = %v", c.pr, out["source_branch_reason"])
+		}
+		if out["created_at"] != "2026-11-20T06:30:00Z" || out["state"] != "open" {
+			t.Errorf("%s: out = %v", c.pr, out)
 		}
 	}
 }

@@ -51,6 +51,8 @@ import (
 //     count too: a failed one makes the pipeline "failed", a pending one "pending".
 //   - at: merged_at, closed_at or updated_at of the merge request.
 //   - source_branch and created_at: source_branch and created_at of the merge request.
+//     source_branch is empty when source_project_id is not target_project_id, or is
+//     absent (a deleted fork). source_branch_reason then says why.
 //   - deployment_state.application: the path of the project. restart is always off.
 
 const (
@@ -162,6 +164,8 @@ type glMR struct {
 	UpdatedAt           string      `json:"updated_at"`
 	CreatedAt           string      `json:"created_at"`
 	SourceBranch        string      `json:"source_branch"`
+	SourceProjectID     int         `json:"source_project_id"`
+	TargetProjectID     int         `json:"target_project_id"`
 	TargetBranch        string      `json:"target_branch"`
 	MergeStatus         string      `json:"merge_status"`
 	DetailedMergeStatus string      `json:"detailed_merge_status"`
@@ -250,6 +254,12 @@ func (v *service) stateOf(ctx context.Context, project, key string, mr *glMR) (f
 	st := fixloop.State{
 		MergeRequest: key, PipelineStatus: status, PipelineGreen: green, HeadSHA: mr.SHA,
 		SourceBranch: mr.SourceBranch, CreatedAt: fixloop.Time(fixloop.ParseTime(mr.CreatedAt)),
+	}
+	// A merge request from a fork has another source project. GitLab gives
+	// no source project id when a person deleted the fork, so zero counts as
+	// a fork too.
+	if mr.SourceProjectID == 0 || mr.SourceProjectID != mr.TargetProjectID {
+		st.SourceBranch, st.SourceBranchReason = "", fixloop.ForkReason
 	}
 	switch mr.State {
 	case "merged":

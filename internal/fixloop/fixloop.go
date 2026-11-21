@@ -51,11 +51,20 @@ type State struct {
 	MergeCommit    string `json:"merge_commit,omitempty"`
 	MergedAt       string `json:"merged_at,omitempty"`
 	At             string `json:"at,omitempty"`
-	// SourceBranch is the branch that the merge request merges.
-	SourceBranch string `json:"source_branch,omitempty"`
+	// SourceBranch is the branch that the merge request merges. It is empty
+	// when the branch is in a fork: a branch name alone does not prove that
+	// the branch is in the project. SourceBranchReason then gives the cause.
+	SourceBranch       string `json:"source_branch,omitempty"`
+	SourceBranchReason string `json:"source_branch_reason,omitempty"`
 	// CreatedAt is when the merge request was opened, in the format of Time.
 	CreatedAt string `json:"created_at,omitempty"`
 }
+
+// ForkReason is the SourceBranchReason of a merge request from a fork, or
+// from a fork that a person deleted. A fork can hold a branch with any name,
+// the name of a job branch too. So the tool gives no source branch, and the
+// daemon refuses to link the merge request to a finding.
+const ForkReason = "the source branch is in a fork, not in the project of the merge request"
 
 // MergeResult is the result of merge_merge_request.
 type MergeResult struct {
