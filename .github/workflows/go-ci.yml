@@ -29,7 +29,7 @@ permissions:
 jobs:
   fast:
     if: github.event_name == 'pull_request'
-    uses: zeroroot-ai/.github/.github/workflows/reusable-go-ci.yml@a88e99f641209c147aad6cbd3b6d62c2764485ca # v0.21.3
+    uses: zeroroot-ai/.github/.github/workflows/reusable-go-ci.yml@88cbc77697ff7143c98f29f3c4d80a93a666d601 # v0.23.0
     with:
       tier: fast
       go-mod-path: .
@@ -37,7 +37,7 @@ jobs:
 
   heavy:
     if: github.event_name == 'push'
-    uses: zeroroot-ai/.github/.github/workflows/reusable-go-ci.yml@a88e99f641209c147aad6cbd3b6d62c2764485ca # v0.21.3
+    uses: zeroroot-ai/.github/.github/workflows/reusable-go-ci.yml@88cbc77697ff7143c98f29f3c4d80a93a666d601 # v0.23.0
     with:
       tier: heavy
       go-mod-path: .
