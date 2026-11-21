@@ -36,7 +36,11 @@ type MergeRequestInput struct {
 }
 
 // State is the result of merge_request_state. The daemon reads state,
-// pipeline_green, reason and at. The other fields are for the agent.
+// pipeline_green, reason, at, source_branch and created_at. The other fields
+// are for the agent. The daemon links the merge request of a fix job to a
+// finding only when source_branch is the branch of the job and created_at is
+// not before the claim of the job. A Git host that gives no source branch or
+// no creation time makes the daemon refuse the link.
 type State struct {
 	MergeRequest   string `json:"merge_request"`
 	State          string `json:"state"`
@@ -47,7 +51,22 @@ type State struct {
 	MergeCommit    string `json:"merge_commit,omitempty"`
 	MergedAt       string `json:"merged_at,omitempty"`
 	At             string `json:"at,omitempty"`
+	// SourceBranch is the branch that the merge request merges. It is empty
+	// when the branch is in a fork: a branch name alone does not prove that
+	// the branch is in the project. SourceBranchReason then gives the cause.
+	SourceBranch       string `json:"source_branch,omitempty"`
+	SourceBranchReason string `json:"source_branch_reason,omitempty"`
+	// CreatedAt is when the merge request was opened, in the format of Time.
+	CreatedAt string `json:"created_at,omitempty"`
 }
+
+// ForkReason is the reason for a merge request from a fork, or from a fork
+// that a person deleted. A fork can hold a branch with any name, the name of
+// a job branch too. So merge_request_state gives it as SourceBranchReason and
+// no source branch, and the daemon refuses to link the merge request to a
+// finding. merge_merge_request and revert_merge_request give it as the Reason
+// of a Refused result and change nothing on the host.
+const ForkReason = "the source branch is in a fork, not in the project of the merge request"
 
 // MergeResult is the result of merge_merge_request.
 type MergeResult struct {

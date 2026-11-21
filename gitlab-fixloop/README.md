@@ -36,6 +36,9 @@ The input and the result follow `fixloop/connector.go`. Where GitLab differs, th
 | `state` = `refused` | GitLab has no such state. See the next section. |
 | `pipeline_green` | `head_pipeline.status` is `success`, and `head_pipeline.sha` is the head sha of the merge request. A pipeline with an empty sha does not count. The result also holds `pipeline_status`, the raw status, or `none`. When `detailed_merge_status` is `status_checks_must_pass`, the tool also reads the external status checks. A `failed` check makes `pipeline_status` `failed`. A check that has not passed makes it `pending`. |
 | `at` | `merged_at`, `closed_at` or `updated_at`. |
+| `source_branch` | `source_branch` of the merge request. The daemon links the merge request of a fix job to a finding only when this is the branch of the job. The field is absent when the branch is in a fork: `source_project_id` is not `target_project_id`, or GitLab gives no `source_project_id` (a deleted fork). A fork can hold a branch with any name, so the daemon then refuses the link. |
+| `source_branch_reason` | Set only when `source_branch` is absent for a fork: `the source branch is in a fork, not in the project of the merge request`. |
+| `created_at` | `created_at` of the merge request, in RFC 3339 in UTC. The daemon links the merge request only when it was opened at or after the claim of the job. With no value, the field is absent and the daemon refuses the link. |
 | `merge_commit` | `merge_commit_sha`, or `squash_commit_sha` for a squash merge. |
 | `deployment_state.deployed` | A deployment with status `success` to `GITLAB_ENVIRONMENT` holds the merge commit. |
 | `deployment_state.application` | The path of the project. The tenant keys its health query by this value. |
@@ -64,6 +67,8 @@ A project with `merge_method` `ff` merges by fast-forward. Without a squash, tha
 The server keeps no memory of a refusal. It reads the state from GitLab on each call. When a person removes the block, the next call returns `open`. Each replica of the server, and a server after a restart, gives the same answer.
 
 A refusal of the merge call (HTTP 403, 405, 406 or 422) returns `refused` in the result of that call. The reason is `GitLab refused the merge (HTTP <status>): <message of GitLab>`. The reason stays the same while the cause stays, so the daemon can see a repeat. GitLab does not show every cause of such a refusal in a read, so the next `merge_request_state` can return `open`.
+
+A merge request from a fork, or from a fork that a person deleted, is never merged or reverted. The tool sees a fork when `source_project_id` is not `target_project_id`, or GitLab gives no `source_project_id`. A fork can hold a branch with any name, the name of a job branch too. `merge_merge_request` and `revert_merge_request` return `refused` with the fixed reason `the source branch is in a fork, not in the project of the merge request`. They change nothing on the host. A merge request that is already merged stays `merged` in the result of `merge_merge_request`.
 
 ### Revert
 

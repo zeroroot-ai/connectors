@@ -38,6 +38,9 @@ The input and the result follow `fixloop/connector.go`. Where GitHub differs, th
 | `pipeline_green` | Every check run of the head commit is complete with the conclusion `success`, `neutral` or `skipped`. The combined commit status is `success`, or the commit has no status. The commit has at least one check run or one status. For an open pull request, each check that a rule of the base branch requires (branch protection or a ruleset) has a check run or a status with its name. A required check that has not reported makes `pipeline_status` `pending`, and `reason` names each such check: `these required checks have not reported: <name>, <name>`. The tool reads at most 1000 check runs (10 pages of 100) and 1000 statuses (10 pages of 100). A commit with more check runs or more statuses gets a tool error, never `pipeline_green`. |
 | `pipeline_status` | `success`, `pending`, `failed` or `none`. |
 | `at` | `merged_at`, `closed_at` or `updated_at`. |
+| `source_branch` | `head.ref` of the pull request. The daemon links the merge request of a fix job to a finding only when this is the branch of the job. The field is absent when the branch is in a fork: `head.repo.full_name` is not `base.repo.full_name`, or `head.repo` is null (a deleted fork). A fork can hold a branch with any name, so the daemon then refuses the link. |
+| `source_branch_reason` | Set only when `source_branch` is absent for a fork: `the source branch is in a fork, not in the project of the merge request`. |
+| `created_at` | `created_at` of the pull request, in RFC 3339 in UTC. The daemon links the merge request only when it was opened at or after the claim of the job. With no value, the field is absent and the daemon refuses the link. |
 | `merge_commit` | `merge_commit_sha` of the pull request. |
 | `deployment_state.deployed` | A deployment to `GITHUB_ENVIRONMENT` holds the merge commit and has a status `success`. Its newest status is not `failure` or `error`. |
 | `deployment_state.application` | `owner/repo`. The tenant keys its health query by this value. |
@@ -69,6 +72,8 @@ The merge methods of the repository can block a merge too. Both tools return `re
 The server keeps no memory of a refusal. It reads the state from GitHub on each call. When a person removes the block, the next call returns `open`. Each replica of the server, and a server after a restart, gives the same answer.
 
 A refusal of the merge call (HTTP 403, 405 or 422) returns `refused` in the result of that call. The reason is `GitHub refused the merge (HTTP <status>): <message of GitHub>`. The reason stays the same while the cause stays, so the daemon can see a repeat. GitHub does not show every cause of such a refusal in a read, so the next `merge_request_state` can return `open`.
+
+A pull request from a fork, or from a fork that a person deleted, is never merged or reverted. The tool sees a fork when `head.repo.full_name` is not `base.repo.full_name` (the compare ignores case), or `head.repo` is null. A fork can hold a branch with any name, the name of a job branch too. `merge_merge_request` and `revert_merge_request` return `refused` with the fixed reason `the source branch is in a fork, not in the project of the merge request`. They change nothing on the host. A pull request that is already merged stays `merged` in the result of `merge_merge_request`.
 
 ### Revert
 

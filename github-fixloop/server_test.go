@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/zeroroot-ai/connectors/internal/fixloop"
 	"github.com/zeroroot-ai/connectors/internal/kit"
 	"github.com/zeroroot-ai/connectors/internal/kit/kittest"
 )
@@ -92,8 +93,10 @@ func pullJSON(state string, merged bool, mergeable, ms, head string) string {
 	return `{"number":7,"title":"Fix SQL injection","state":"` + state + `","merged":` + boolStr(merged) + `,` +
 		`"html_url":"https://github.com/acme/shop/pull/7","merged_at":` + nullable(merged, "2026-11-20T09:00:00Z") + `,` +
 		`"closed_at":` + nullable(state == "closed", "2026-11-20T07:00:00Z") + `,"updated_at":"2026-11-20T08:00:00Z",` +
+		`"created_at":"2026-11-20T06:30:00Z",` +
 		`"merge_commit_sha":` + nullable(merged, mergeSHA) + `,"mergeable":` + mergeable + `,"mergeable_state":"` + ms + `",` +
-		`"commits":3,"head":{"sha":"` + head + `","ref":"fix"},"base":{"ref":"main","sha":"` + baseSHA + `"}}`
+		`"commits":3,"head":{"sha":"` + head + `","ref":"fix","repo":{"full_name":"acme/shop"}},` +
+		`"base":{"ref":"main","sha":"` + baseSHA + `","repo":{"full_name":"acme/shop"}}}`
 }
 
 func boolStr(b bool) string {
@@ -199,6 +202,140 @@ func TestStateOpenAndHeaders(t *testing.T) {
 	if m.headers.Get("Authorization") != "Bearer ghp_secret" || m.headers.Get("X-GitHub-Api-Version") != "2022-11-28" ||
 		m.headers.Get("Accept") != "application/vnd.github+json" {
 		t.Errorf("headers = %v", m.headers)
+	}
+}
+
+// The daemon links a pull request to a finding only when merge_request_state
+// gives the source branch (head.ref) and the time of creation (created_at),
+// in the format that the daemon parses (time.RFC3339). A pull request with no
+// created_at gives no created_at, so the daemon refuses the link.
+func TestStateSourceBranchAndCreatedAt(t *testing.T) {
+	noTime := strings.Replace(openPR("clean"), `"created_at":"2026-11-20T06:30:00Z",`, "", 1)
+	noTime = strings.Replace(noTime, `"number":7`, `"number":8`, 1)
+	m, call := setup(t, merge(checks(greenRun, "pending", 0), map[string]handler{
+		"GET " + pr7:               reply(200, openPR("clean")),
+		"GET " + repo + "/pulls/8": reply(200, noTime),
+	}))
+	cases := []struct {
+		pr, path, created string
+	}{
+		{ref, pr7, "2026-11-20T06:30:00Z"},
+		{"acme/shop#8", repo + "/pulls/8", ""},
+	}
+	for _, c := range cases {
+		isErr, text, out := call("merge_request_state", map[string]any{"merge_request": c.pr})
+		if isErr {
+			t.Fatalf("%s: %s", c.pr, text)
+		}
+		if m.called("GET "+c.path) != 1 {
+			t.Errorf("%s: the tool did not read %s: %v", c.pr, c.path, m.calls)
+		}
+		if out["source_branch"] != "fix" {
+			t.Errorf("%s: source_branch = %v, want fix", c.pr, out["source_branch"])
+		}
+		got, ok := out["created_at"]
+		if c.created == "" && ok {
+			t.Errorf("%s: created_at = %v, want no field", c.pr, got)
+		}
+		if c.created != "" && got != c.created {
+			t.Errorf("%s: created_at = %v, want %q", c.pr, got, c.created)
+		}
+	}
+}
+
+// A fork can hold a branch with the name of a job branch. So a pull request
+// from a fork, or from a fork that a person deleted (head.repo is null),
+// gives no source_branch, and source_branch_reason says why. The daemon then
+// refuses the link.
+func TestStateFromAForkGivesNoSourceBranch(t *testing.T) {
+	fork := strings.Replace(openPR("clean"), `"ref":"fix","repo":{"full_name":"acme/shop"}`,
+		`"ref":"job/j-1","repo":{"full_name":"mallory/shop"}`, 1)
+	deleted := strings.Replace(fork, `"repo":{"full_name":"mallory/shop"}`, `"repo":null`, 1)
+	deleted = strings.Replace(deleted, `"number":7`, `"number":8`, 1)
+	m, call := setup(t, merge(checks(greenRun, "pending", 0), map[string]handler{
+		"GET " + pr7:               reply(200, fork),
+		"GET " + repo + "/pulls/8": reply(200, deleted),
+	}))
+	for _, c := range []struct{ pr, path string }{{ref, pr7}, {"acme/shop#8", repo + "/pulls/8"}} {
+		isErr, text, out := call("merge_request_state", map[string]any{"merge_request": c.pr})
+		if isErr {
+			t.Fatalf("%s: %s", c.pr, text)
+		}
+		if m.called("GET "+c.path) != 1 {
+			t.Errorf("%s: the tool did not read %s: %v", c.pr, c.path, m.calls)
+		}
+		if b, ok := out["source_branch"]; ok {
+			t.Errorf("%s: source_branch = %v, want no field", c.pr, b)
+		}
+		if out["source_branch_reason"] != fixloop.ForkReason {
+			t.Errorf("%s: source_branch_reason = %v", c.pr, out["source_branch_reason"])
+		}
+		if out["created_at"] != "2026-11-20T06:30:00Z" || out["state"] != "open" {
+			t.Errorf("%s: out = %v", c.pr, out)
+		}
+	}
+}
+
+// GitHub compares owner and repository names with no regard to case. So a
+// head repository that differs from the base only in case is not a fork.
+func TestStateRepoNameCaseIsNotAFork(t *testing.T) {
+	pr := strings.Replace(openPR("clean"), `"ref":"fix","repo":{"full_name":"acme/shop"}`,
+		`"ref":"fix","repo":{"full_name":"Acme/Shop"}`, 1)
+	m, call := setup(t, merge(checks(greenRun, "pending", 0), map[string]handler{"GET " + pr7: reply(200, pr)}))
+	isErr, text, out := call("merge_request_state", map[string]any{"merge_request": ref})
+	if isErr {
+		t.Fatal(text)
+	}
+	if m.called("GET "+pr7) != 1 {
+		t.Errorf("the tool did not read the pull request: %v", m.calls)
+	}
+	if out["source_branch"] != "fix" || out["source_branch_reason"] != nil {
+		t.Errorf("out = %v", out)
+	}
+}
+
+// merge_merge_request refuses a pull request from a fork, or from a deleted
+// fork, even when its checks passed. It never calls the merge API.
+func TestMergeRefusesAFork(t *testing.T) {
+	fork := strings.Replace(openPR("clean"), `"ref":"fix","repo":{"full_name":"acme/shop"}`,
+		`"ref":"fix","repo":{"full_name":"mallory/shop"}`, 1)
+	deleted := strings.Replace(fork, `"repo":{"full_name":"mallory/shop"}`, `"repo":null`, 1)
+	for name, body := range map[string]string{"fork": fork, "deleted fork": deleted} {
+		m, call := setup(t, merge(checks(greenRun, "pending", 0), map[string]handler{
+			"GET " + pr7:            reply(200, body),
+			"PUT " + pr7 + "/merge": reply(200, `{"merged":true}`),
+		}))
+		isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "sha": headSHA})
+		if isErr {
+			t.Fatalf("%s: %s", name, text)
+		}
+		if m.called("GET "+pr7) == 0 {
+			t.Errorf("%s: the tool did not read the pull request: %v", name, m.calls)
+		}
+		if out["merged"] != false || out["state"] != fixloop.Refused || out["reason"] != fixloop.ForkReason {
+			t.Errorf("%s: out = %v", name, out)
+		}
+		if m.called("PUT "+pr7+"/merge") != 0 {
+			t.Errorf("%s: the tool merged a pull request from a fork", name)
+		}
+	}
+}
+
+// revert_merge_request refuses a merged pull request from a fork. It makes
+// no commit, no branch and no revert pull request.
+func TestRevertRefusesAFork(t *testing.T) {
+	fork := strings.Replace(mergedPR, `"ref":"fix","repo":{"full_name":"acme/shop"}`,
+		`"ref":"fix","repo":{"full_name":"mallory/shop"}`, 1)
+	m, call := setup(t, map[string]handler{"GET " + pr7: reply(200, fork)})
+	isErr, text, out := call("revert_merge_request", map[string]any{"merge_request": ref})
+	if isErr {
+		t.Fatal(text)
+	}
+	if out["merged"] != false || out["state"] != fixloop.Refused || out["reason"] != fixloop.ForkReason {
+		t.Errorf("out = %v", out)
+	}
+	if len(m.calls) != 1 || m.called("GET "+pr7) != 1 {
+		t.Errorf("the tool made more calls than the read of the pull request: %v", m.calls)
 	}
 }
 
@@ -536,7 +673,8 @@ const revertBranch = "zeroroot/revert-pr-7-bbbbbbbb"
 func revertPR(state string, merged bool) string {
 	return `{"number":8,"title":"Revert","state":"` + state + `","merged":` + boolStr(merged) + `,"html_url":"https://github.com/acme/shop/pull/8",` +
 		`"merge_commit_sha":` + nullable(merged, "ffffffffffffffffffffffffffffffffffffffff") + `,"merged_at":` + nullable(merged, "2026-11-20T10:00:00Z") +
-		`,"mergeable":true,"mergeable_state":"clean","head":{"sha":"` + revSHA + `","ref":"` + revertBranch + `"},"base":{"ref":"main"}}`
+		`,"mergeable":true,"mergeable_state":"clean","head":{"sha":"` + revSHA + `","ref":"` + revertBranch + `",` +
+		`"repo":{"full_name":"acme/shop"}},"base":{"ref":"main","repo":{"full_name":"acme/shop"}}}`
 }
 
 func revertRoutes(found, revertChecks string) map[string]handler {

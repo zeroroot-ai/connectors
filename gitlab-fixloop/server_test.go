@@ -86,13 +86,16 @@ func openMR(pipeline, detailed string) string {
 	}
 	return `{"iid":7,"title":"Fix SQL injection","state":"opened","web_url":"https://gitlab.example.com/acme/shop/-/merge_requests/7",` +
 		`"sha":"` + headSHA + `","merge_commit_sha":null,"target_branch":"main","source_branch":"fix",` +
+		`"source_project_id":3,"target_project_id":3,` +
 		`"merge_status":"can_be_merged","detailed_merge_status":"` + detailed + `","head_pipeline":` + p + `,` +
-		`"updated_at":"2026-11-20T08:00:00.000Z"}`
+		`"created_at":"2026-11-20T07:30:00.000+00:00","updated_at":"2026-11-20T08:00:00.000Z"}`
 }
 
 const mergedMR = `{"iid":7,"title":"Fix SQL injection","state":"merged","web_url":"https://gitlab.example.com/acme/shop/-/merge_requests/7",` +
 	`"sha":"` + headSHA + `","merge_commit_sha":"` + mergeSHA + `","target_branch":"main","source_branch":"fix",` +
+	`"source_project_id":3,"target_project_id":3,` +
 	`"merged_at":"2026-11-20T09:00:00.000Z","updated_at":"2026-11-20T09:00:00.000Z",` +
+	`"created_at":"2026-11-20T07:30:00.000Z",` +
 	`"head_pipeline":{"id":1,"sha":"` + headSHA + `","status":"success"}}`
 
 func setup(t *testing.T, routes map[string]func(http.ResponseWriter, *http.Request, map[string]any)) (srv *mock, call func(string, map[string]any) (isErr bool, text string, out map[string]any)) {
@@ -164,6 +167,124 @@ func TestMergeRequestStateMergedAndClosed(t *testing.T) {
 	_, _, out = call("merge_request_state", map[string]any{"merge_request": "acme/shop!9"})
 	if out["state"] != "open" || out["pipeline_green"] != false || out["pipeline_status"] != "failed" {
 		t.Errorf("failed pipeline = %v", out)
+	}
+}
+
+// The daemon links a merge request to a finding only when merge_request_state
+// gives the source branch and the time of creation. The tool reads both from
+// the merge request API and gives the time in UTC without a fraction, the
+// format that the daemon parses (time.RFC3339). A merge request with no
+// created_at gives no created_at, so the daemon refuses the link.
+func TestMergeRequestStateSourceBranchAndCreatedAt(t *testing.T) {
+	const noCreatedAt = `{"iid":9,"state":"opened","sha":"` + headSHA + `","source_branch":"other",` +
+		`"source_project_id":3,"target_project_id":3}`
+	m, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
+		"GET " + api + mr7:                 reply(200, openMR("success", "mergeable")),
+		"GET " + api + "/merge_requests/8": reply(200, mergedMR),
+		"GET " + api + "/merge_requests/9": reply(200, noCreatedAt),
+	})
+	cases := []struct {
+		mr, path, branch, created string
+	}{
+		{ref, api + mr7, "fix", "2026-11-20T07:30:00Z"},
+		{"acme/shop!8", api + "/merge_requests/8", "fix", "2026-11-20T07:30:00Z"},
+		{"acme/shop!9", api + "/merge_requests/9", "other", ""},
+	}
+	for _, c := range cases {
+		isErr, text, out := call("merge_request_state", map[string]any{"merge_request": c.mr})
+		if isErr {
+			t.Fatalf("%s: %s", c.mr, text)
+		}
+		if m.called("GET "+c.path) != 1 {
+			t.Errorf("%s: the tool did not read %s: %v", c.mr, c.path, m.calls)
+		}
+		if out["source_branch"] != c.branch {
+			t.Errorf("%s: source_branch = %v, want %q", c.mr, out["source_branch"], c.branch)
+		}
+		got, ok := out["created_at"]
+		if c.created == "" && ok {
+			t.Errorf("%s: created_at = %v, want no field", c.mr, got)
+		}
+		if c.created != "" && got != c.created {
+			t.Errorf("%s: created_at = %v, want %q", c.mr, got, c.created)
+		}
+	}
+}
+
+// A fork can hold a branch with the name of a job branch. So a merge request
+// from a fork, or from a fork that a person deleted, gives no source_branch,
+// and source_branch_reason says why. The daemon then refuses the link.
+func TestMergeRequestFromAForkGivesNoSourceBranch(t *testing.T) {
+	fork := strings.Replace(openMR("success", "mergeable"), `"source_project_id":3`, `"source_project_id":44`, 1)
+	fork = strings.Replace(fork, `"source_branch":"fix"`, `"source_branch":"job/j-1"`, 1)
+	deleted := strings.Replace(fork, `"source_project_id":44,`, `"source_project_id":null,`, 1)
+	deleted = strings.Replace(deleted, `"iid":7`, `"iid":8`, 1)
+	m, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
+		"GET " + api + mr7:                 reply(200, fork),
+		"GET " + api + "/merge_requests/8": reply(200, deleted),
+	})
+	for _, c := range []struct{ mr, path string }{{ref, api + mr7}, {"acme/shop!8", api + "/merge_requests/8"}} {
+		isErr, text, out := call("merge_request_state", map[string]any{"merge_request": c.mr})
+		if isErr {
+			t.Fatalf("%s: %s", c.mr, text)
+		}
+		if m.called("GET "+c.path) != 1 {
+			t.Errorf("%s: the tool did not read %s: %v", c.mr, c.path, m.calls)
+		}
+		if b, ok := out["source_branch"]; ok {
+			t.Errorf("%s: source_branch = %v, want no field", c.mr, b)
+		}
+		if out["source_branch_reason"] != fixloop.ForkReason {
+			t.Errorf("%s: source_branch_reason = %v", c.mr, out["source_branch_reason"])
+		}
+		if out["created_at"] != "2026-11-20T07:30:00Z" || out["state"] != "open" {
+			t.Errorf("%s: out = %v", c.mr, out)
+		}
+	}
+}
+
+// merge_merge_request refuses a merge request from a fork, or from a deleted
+// fork, even when its pipeline is green. It never calls the merge API.
+func TestMergeRefusesAFork(t *testing.T) {
+	fork := strings.Replace(openMR("success", "mergeable"), `"source_project_id":3`, `"source_project_id":44`, 1)
+	deleted := strings.Replace(fork, `"source_project_id":44,`, ``, 1)
+	for name, body := range map[string]string{"fork": fork, "deleted fork": deleted} {
+		m, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
+			"GET " + api + mr7:            reply(200, body),
+			"PUT " + api + mr7 + "/merge": reply(200, mergedMR),
+		})
+		isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "sha": headSHA})
+		if isErr {
+			t.Fatalf("%s: %s", name, text)
+		}
+		if m.called("GET "+api+mr7) == 0 {
+			t.Errorf("%s: the tool did not read the merge request: %v", name, m.calls)
+		}
+		if out["merged"] != false || out["state"] != fixloop.Refused || out["reason"] != fixloop.ForkReason {
+			t.Errorf("%s: out = %v", name, out)
+		}
+		if m.called("PUT "+api+mr7+"/merge") != 0 {
+			t.Errorf("%s: the tool merged a merge request from a fork", name)
+		}
+	}
+}
+
+// revert_merge_request refuses a merged merge request from a fork. It opens
+// no branch and no revert merge request.
+func TestRevertRefusesAFork(t *testing.T) {
+	fork := strings.Replace(mergedMR, `"source_project_id":3`, `"source_project_id":44`, 1)
+	m, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
+		"GET " + api + mr7: reply(200, fork),
+	})
+	isErr, text, out := call("revert_merge_request", map[string]any{"merge_request": ref})
+	if isErr {
+		t.Fatal(text)
+	}
+	if out["merged"] != false || out["state"] != fixloop.Refused || out["reason"] != fixloop.ForkReason {
+		t.Errorf("out = %v", out)
+	}
+	if len(m.calls) != 1 || m.called("GET "+api+mr7) != 1 {
+		t.Errorf("the tool made more calls than the read of the merge request: %v", m.calls)
 	}
 }
 
@@ -365,6 +486,7 @@ const (
 	revertBranch = "zeroroot%2Frevert-mr7-bbbbbbbb"
 	revertMRJSON = `{"iid":8,"title":"Revert","state":"opened","web_url":"https://gitlab.example.com/acme/shop/-/merge_requests/8",` +
 		`"sha":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","target_branch":"main","detailed_merge_status":"mergeable",` +
+		`"source_project_id":3,"target_project_id":3,` +
 		`"head_pipeline":{"id":2,"sha":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","status":"success"}}`
 )
 

@@ -50,6 +50,9 @@ import (
 //     When detailed_merge_status is status_checks_must_pass, the external status checks
 //     count too: a failed one makes the pipeline "failed", a pending one "pending".
 //   - at: merged_at, closed_at or updated_at of the merge request.
+//   - source_branch and created_at: source_branch and created_at of the merge request.
+//     source_branch is empty when source_project_id is not target_project_id, or is
+//     absent (a deleted fork). source_branch_reason then says why.
 //   - deployment_state.application: the path of the project. restart is always off.
 
 const (
@@ -159,13 +162,23 @@ type glMR struct {
 	MergedAt            string      `json:"merged_at"`
 	ClosedAt            string      `json:"closed_at"`
 	UpdatedAt           string      `json:"updated_at"`
+	CreatedAt           string      `json:"created_at"`
 	SourceBranch        string      `json:"source_branch"`
+	SourceProjectID     int         `json:"source_project_id"`
+	TargetProjectID     int         `json:"target_project_id"`
 	TargetBranch        string      `json:"target_branch"`
 	MergeStatus         string      `json:"merge_status"`
 	DetailedMergeStatus string      `json:"detailed_merge_status"`
 	HeadPipeline        *glPipeline `json:"head_pipeline"`
 	Squash              bool        `json:"squash"`
 	SquashOnMerge       *bool       `json:"squash_on_merge"`
+}
+
+// fromFork is true when the merge request comes from another project. GitLab
+// gives no source project id when a person deleted the fork, so zero counts
+// as a fork too.
+func (mr *glMR) fromFork() bool {
+	return mr.SourceProjectID == 0 || mr.SourceProjectID != mr.TargetProjectID
 }
 
 // squashes is true when GitLab squashes the merge request on merge. GitLab
@@ -245,7 +258,13 @@ func pipelineStatus(mr *glMR) (string, bool) {
 // stateOf maps a GitLab merge request to the state of the daemon.
 func (v *service) stateOf(ctx context.Context, project, key string, mr *glMR) (fixloop.State, error) {
 	status, green := pipelineStatus(mr)
-	st := fixloop.State{MergeRequest: key, PipelineStatus: status, PipelineGreen: green, HeadSHA: mr.SHA}
+	st := fixloop.State{
+		MergeRequest: key, PipelineStatus: status, PipelineGreen: green, HeadSHA: mr.SHA,
+		SourceBranch: mr.SourceBranch, CreatedAt: fixloop.Time(fixloop.ParseTime(mr.CreatedAt)),
+	}
+	if mr.fromFork() {
+		st.SourceBranch, st.SourceBranchReason = "", fixloop.ForkReason
+	}
 	switch mr.State {
 	case "merged":
 		st.State = fixloop.Merged
@@ -405,6 +424,9 @@ func (v *service) tryMerge(ctx context.Context, project string, iid int, mr *glM
 	switch {
 	case mr.State == "merged":
 		return st, true, nil
+	case mr.fromFork():
+		st.State, st.Reason = fixloop.Refused, fixloop.ForkReason
+		return st, false, nil
 	case mr.State == "closed":
 		st.Reason = "the merge request is closed"
 		return st, false, nil
@@ -513,6 +535,10 @@ func (v *service) revertMergeRequest(ctx context.Context, _ *mcp.CallToolRequest
 	case commit == "":
 		return nil, out, errors.New("GitLab gives no merge commit or squash commit for this merge request. " +
 			"A fast-forward merge has neither, so revert the commits by hand")
+	}
+	if orig.fromFork() {
+		out.State, out.Reason = fixloop.Refused, fixloop.ForkReason
+		return nil, out, nil
 	}
 	branch := "zeroroot/revert-mr" + strconv.Itoa(iid) + "-" + commit[:8]
 	revertIID, err := v.findOrOpenRevert(ctx, project, orig, commit, branch)
