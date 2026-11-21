@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/zeroroot-ai/connectors/compare/v0.1.0...v0.2.0) (2026-11-21)
+
+
+### Features
+
+* **fixloop:** return the source branch and the creation time of a merge request ([#6](https://github.com/zeroroot-ai/connectors/issues/6)) ([01a4286](https://github.com/zeroroot-ai/connectors/commit/01a4286e441ab0336ef5bb0fe5e832152299413d))
+
 ## 0.1.0 (2026-11-20)
 
 
