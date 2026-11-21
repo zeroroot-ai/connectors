@@ -60,10 +60,12 @@ type State struct {
 	CreatedAt string `json:"created_at,omitempty"`
 }
 
-// ForkReason is the SourceBranchReason of a merge request from a fork, or
-// from a fork that a person deleted. A fork can hold a branch with any name,
-// the name of a job branch too. So the tool gives no source branch, and the
-// daemon refuses to link the merge request to a finding.
+// ForkReason is the reason for a merge request from a fork, or from a fork
+// that a person deleted. A fork can hold a branch with any name, the name of
+// a job branch too. So merge_request_state gives it as SourceBranchReason and
+// no source branch, and the daemon refuses to link the merge request to a
+// finding. merge_merge_request and revert_merge_request give it as the Reason
+// of a Refused result and change nothing on the host.
 const ForkReason = "the source branch is in a fork, not in the project of the merge request"
 
 // MergeResult is the result of merge_merge_request.

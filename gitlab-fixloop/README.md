@@ -68,6 +68,8 @@ The server keeps no memory of a refusal. It reads the state from GitLab on each 
 
 A refusal of the merge call (HTTP 403, 405, 406 or 422) returns `refused` in the result of that call. The reason is `GitLab refused the merge (HTTP <status>): <message of GitLab>`. The reason stays the same while the cause stays, so the daemon can see a repeat. GitLab does not show every cause of such a refusal in a read, so the next `merge_request_state` can return `open`.
 
+A merge request from a fork, or from a fork that a person deleted, is never merged or reverted. The tool sees a fork when `source_project_id` is not `target_project_id`, or GitLab gives no `source_project_id`. A fork can hold a branch with any name, the name of a job branch too. `merge_merge_request` and `revert_merge_request` return `refused` with the fixed reason `the source branch is in a fork, not in the project of the merge request`. They change nothing on the host. A merge request that is already merged stays `merged` in the result of `merge_merge_request`.
+
 ### Revert
 
 `revert_merge_request` follows these steps.

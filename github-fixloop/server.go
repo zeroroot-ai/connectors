@@ -650,6 +650,10 @@ func (v *service) tryMerge(ctx context.Context, r prRef, pr *ghPR, wantSHA, meth
 	if st.State == fixloop.Merged {
 		return st, true, nil
 	}
+	if pr.fromFork() {
+		st.State, st.Reason = fixloop.Refused, fixloop.ForkReason
+		return st, false, nil
+	}
 	if holdMerge(&st, pr, wantSHA) {
 		return st, false, nil
 	}
@@ -815,6 +819,10 @@ func (v *service) revertMergeRequest(ctx context.Context, _ *mcp.CallToolRequest
 	}
 	if !orig.Merged || orig.MergeCommitSHA == "" {
 		return nil, out, fmt.Errorf("%w: the pull request is not merged, so there is nothing to revert", kit.ErrInvalidInput)
+	}
+	if orig.fromFork() {
+		out.State, out.Reason = fixloop.Refused, fixloop.ForkReason
+		return nil, out, nil
 	}
 	branch := "zeroroot/revert-pr-" + strconv.Itoa(r.number) + "-" + orig.MergeCommitSHA[:8]
 	revert, err := v.findOrOpenRevert(ctx, r, orig, branch)

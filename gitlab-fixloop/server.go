@@ -174,6 +174,13 @@ type glMR struct {
 	SquashOnMerge       *bool       `json:"squash_on_merge"`
 }
 
+// fromFork is true when the merge request comes from another project. GitLab
+// gives no source project id when a person deleted the fork, so zero counts
+// as a fork too.
+func (mr *glMR) fromFork() bool {
+	return mr.SourceProjectID == 0 || mr.SourceProjectID != mr.TargetProjectID
+}
+
 // squashes is true when GitLab squashes the merge request on merge. GitLab
 // recommends squash_on_merge, which holds the project settings. Older GitLab
 // has squash only.
@@ -255,10 +262,7 @@ func (v *service) stateOf(ctx context.Context, project, key string, mr *glMR) (f
 		MergeRequest: key, PipelineStatus: status, PipelineGreen: green, HeadSHA: mr.SHA,
 		SourceBranch: mr.SourceBranch, CreatedAt: fixloop.Time(fixloop.ParseTime(mr.CreatedAt)),
 	}
-	// A merge request from a fork has another source project. GitLab gives
-	// no source project id when a person deleted the fork, so zero counts as
-	// a fork too.
-	if mr.SourceProjectID == 0 || mr.SourceProjectID != mr.TargetProjectID {
+	if mr.fromFork() {
 		st.SourceBranch, st.SourceBranchReason = "", fixloop.ForkReason
 	}
 	switch mr.State {
@@ -420,6 +424,9 @@ func (v *service) tryMerge(ctx context.Context, project string, iid int, mr *glM
 	switch {
 	case mr.State == "merged":
 		return st, true, nil
+	case mr.fromFork():
+		st.State, st.Reason = fixloop.Refused, fixloop.ForkReason
+		return st, false, nil
 	case mr.State == "closed":
 		st.Reason = "the merge request is closed"
 		return st, false, nil
@@ -528,6 +535,10 @@ func (v *service) revertMergeRequest(ctx context.Context, _ *mcp.CallToolRequest
 	case commit == "":
 		return nil, out, errors.New("GitLab gives no merge commit or squash commit for this merge request. " +
 			"A fast-forward merge has neither, so revert the commits by hand")
+	}
+	if orig.fromFork() {
+		out.State, out.Reason = fixloop.Refused, fixloop.ForkReason
+		return nil, out, nil
 	}
 	branch := "zeroroot/revert-mr" + strconv.Itoa(iid) + "-" + commit[:8]
 	revertIID, err := v.findOrOpenRevert(ctx, project, orig, commit, branch)

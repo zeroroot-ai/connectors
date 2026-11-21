@@ -276,6 +276,69 @@ func TestStateFromAForkGivesNoSourceBranch(t *testing.T) {
 	}
 }
 
+// GitHub compares owner and repository names with no regard to case. So a
+// head repository that differs from the base only in case is not a fork.
+func TestStateRepoNameCaseIsNotAFork(t *testing.T) {
+	pr := strings.Replace(openPR("clean"), `"ref":"fix","repo":{"full_name":"acme/shop"}`,
+		`"ref":"fix","repo":{"full_name":"Acme/Shop"}`, 1)
+	m, call := setup(t, merge(checks(greenRun, "pending", 0), map[string]handler{"GET " + pr7: reply(200, pr)}))
+	isErr, text, out := call("merge_request_state", map[string]any{"merge_request": ref})
+	if isErr {
+		t.Fatal(text)
+	}
+	if m.called("GET "+pr7) != 1 {
+		t.Errorf("the tool did not read the pull request: %v", m.calls)
+	}
+	if out["source_branch"] != "fix" || out["source_branch_reason"] != nil {
+		t.Errorf("out = %v", out)
+	}
+}
+
+// merge_merge_request refuses a pull request from a fork, or from a deleted
+// fork, even when its checks passed. It never calls the merge API.
+func TestMergeRefusesAFork(t *testing.T) {
+	fork := strings.Replace(openPR("clean"), `"ref":"fix","repo":{"full_name":"acme/shop"}`,
+		`"ref":"fix","repo":{"full_name":"mallory/shop"}`, 1)
+	deleted := strings.Replace(fork, `"repo":{"full_name":"mallory/shop"}`, `"repo":null`, 1)
+	for name, body := range map[string]string{"fork": fork, "deleted fork": deleted} {
+		m, call := setup(t, merge(checks(greenRun, "pending", 0), map[string]handler{
+			"GET " + pr7:            reply(200, body),
+			"PUT " + pr7 + "/merge": reply(200, `{"merged":true}`),
+		}))
+		isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "sha": headSHA})
+		if isErr {
+			t.Fatalf("%s: %s", name, text)
+		}
+		if m.called("GET "+pr7) == 0 {
+			t.Errorf("%s: the tool did not read the pull request: %v", name, m.calls)
+		}
+		if out["merged"] != false || out["state"] != fixloop.Refused || out["reason"] != fixloop.ForkReason {
+			t.Errorf("%s: out = %v", name, out)
+		}
+		if m.called("PUT "+pr7+"/merge") != 0 {
+			t.Errorf("%s: the tool merged a pull request from a fork", name)
+		}
+	}
+}
+
+// revert_merge_request refuses a merged pull request from a fork. It makes
+// no commit, no branch and no revert pull request.
+func TestRevertRefusesAFork(t *testing.T) {
+	fork := strings.Replace(mergedPR, `"ref":"fix","repo":{"full_name":"acme/shop"}`,
+		`"ref":"fix","repo":{"full_name":"mallory/shop"}`, 1)
+	m, call := setup(t, map[string]handler{"GET " + pr7: reply(200, fork)})
+	isErr, text, out := call("revert_merge_request", map[string]any{"merge_request": ref})
+	if isErr {
+		t.Fatal(text)
+	}
+	if out["merged"] != false || out["state"] != fixloop.Refused || out["reason"] != fixloop.ForkReason {
+		t.Errorf("out = %v", out)
+	}
+	if len(m.calls) != 1 || m.called("GET "+pr7) != 1 {
+		t.Errorf("the tool made more calls than the read of the pull request: %v", m.calls)
+	}
+}
+
 func TestPipelineStatus(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -610,7 +673,8 @@ const revertBranch = "zeroroot/revert-pr-7-bbbbbbbb"
 func revertPR(state string, merged bool) string {
 	return `{"number":8,"title":"Revert","state":"` + state + `","merged":` + boolStr(merged) + `,"html_url":"https://github.com/acme/shop/pull/8",` +
 		`"merge_commit_sha":` + nullable(merged, "ffffffffffffffffffffffffffffffffffffffff") + `,"merged_at":` + nullable(merged, "2026-11-20T10:00:00Z") +
-		`,"mergeable":true,"mergeable_state":"clean","head":{"sha":"` + revSHA + `","ref":"` + revertBranch + `"},"base":{"ref":"main"}}`
+		`,"mergeable":true,"mergeable_state":"clean","head":{"sha":"` + revSHA + `","ref":"` + revertBranch + `",` +
+		`"repo":{"full_name":"acme/shop"}},"base":{"ref":"main","repo":{"full_name":"acme/shop"}}}`
 }
 
 func revertRoutes(found, revertChecks string) map[string]handler {

@@ -243,6 +243,51 @@ func TestMergeRequestFromAForkGivesNoSourceBranch(t *testing.T) {
 	}
 }
 
+// merge_merge_request refuses a merge request from a fork, or from a deleted
+// fork, even when its pipeline is green. It never calls the merge API.
+func TestMergeRefusesAFork(t *testing.T) {
+	fork := strings.Replace(openMR("success", "mergeable"), `"source_project_id":3`, `"source_project_id":44`, 1)
+	deleted := strings.Replace(fork, `"source_project_id":44,`, ``, 1)
+	for name, body := range map[string]string{"fork": fork, "deleted fork": deleted} {
+		m, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
+			"GET " + api + mr7:            reply(200, body),
+			"PUT " + api + mr7 + "/merge": reply(200, mergedMR),
+		})
+		isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "sha": headSHA})
+		if isErr {
+			t.Fatalf("%s: %s", name, text)
+		}
+		if m.called("GET "+api+mr7) == 0 {
+			t.Errorf("%s: the tool did not read the merge request: %v", name, m.calls)
+		}
+		if out["merged"] != false || out["state"] != fixloop.Refused || out["reason"] != fixloop.ForkReason {
+			t.Errorf("%s: out = %v", name, out)
+		}
+		if m.called("PUT "+api+mr7+"/merge") != 0 {
+			t.Errorf("%s: the tool merged a merge request from a fork", name)
+		}
+	}
+}
+
+// revert_merge_request refuses a merged merge request from a fork. It opens
+// no branch and no revert merge request.
+func TestRevertRefusesAFork(t *testing.T) {
+	fork := strings.Replace(mergedMR, `"source_project_id":3`, `"source_project_id":44`, 1)
+	m, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
+		"GET " + api + mr7: reply(200, fork),
+	})
+	isErr, text, out := call("revert_merge_request", map[string]any{"merge_request": ref})
+	if isErr {
+		t.Fatal(text)
+	}
+	if out["merged"] != false || out["state"] != fixloop.Refused || out["reason"] != fixloop.ForkReason {
+		t.Errorf("out = %v", out)
+	}
+	if len(m.calls) != 1 || m.called("GET "+api+mr7) != 1 {
+		t.Errorf("the tool made more calls than the read of the merge request: %v", m.calls)
+	}
+}
+
 // A head pipeline counts only when it ran on the head commit. A pipeline with
 // an empty or another sha tested other code.
 func TestPipelineOfAnotherCommitIsNotGreen(t *testing.T) {
@@ -441,6 +486,7 @@ const (
 	revertBranch = "zeroroot%2Frevert-mr7-bbbbbbbb"
 	revertMRJSON = `{"iid":8,"title":"Revert","state":"opened","web_url":"https://gitlab.example.com/acme/shop/-/merge_requests/8",` +
 		`"sha":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","target_branch":"main","detailed_merge_status":"mergeable",` +
+		`"source_project_id":3,"target_project_id":3,` +
 		`"head_pipeline":{"id":2,"sha":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","status":"success"}}`
 )
 
