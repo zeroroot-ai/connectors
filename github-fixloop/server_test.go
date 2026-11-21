@@ -92,6 +92,7 @@ func pullJSON(state string, merged bool, mergeable, ms, head string) string {
 	return `{"number":7,"title":"Fix SQL injection","state":"` + state + `","merged":` + boolStr(merged) + `,` +
 		`"html_url":"https://github.com/acme/shop/pull/7","merged_at":` + nullable(merged, "2026-11-20T09:00:00Z") + `,` +
 		`"closed_at":` + nullable(state == "closed", "2026-11-20T07:00:00Z") + `,"updated_at":"2026-11-20T08:00:00Z",` +
+		`"created_at":"2026-11-20T06:30:00Z",` +
 		`"merge_commit_sha":` + nullable(merged, mergeSHA) + `,"mergeable":` + mergeable + `,"mergeable_state":"` + ms + `",` +
 		`"commits":3,"head":{"sha":"` + head + `","ref":"fix"},"base":{"ref":"main","sha":"` + baseSHA + `"}}`
 }
@@ -199,6 +200,44 @@ func TestStateOpenAndHeaders(t *testing.T) {
 	if m.headers.Get("Authorization") != "Bearer ghp_secret" || m.headers.Get("X-GitHub-Api-Version") != "2022-11-28" ||
 		m.headers.Get("Accept") != "application/vnd.github+json" {
 		t.Errorf("headers = %v", m.headers)
+	}
+}
+
+// The daemon links a pull request to a finding only when merge_request_state
+// gives the source branch (head.ref) and the time of creation (created_at),
+// in the format that the daemon parses (time.RFC3339). A pull request with no
+// created_at gives no created_at, so the daemon refuses the link.
+func TestStateSourceBranchAndCreatedAt(t *testing.T) {
+	noTime := strings.Replace(openPR("clean"), `"created_at":"2026-11-20T06:30:00Z",`, "", 1)
+	noTime = strings.Replace(noTime, `"number":7`, `"number":8`, 1)
+	m, call := setup(t, merge(checks(greenRun, "pending", 0), map[string]handler{
+		"GET " + pr7:               reply(200, openPR("clean")),
+		"GET " + repo + "/pulls/8": reply(200, noTime),
+	}))
+	cases := []struct {
+		pr, path, created string
+	}{
+		{ref, pr7, "2026-11-20T06:30:00Z"},
+		{"acme/shop#8", repo + "/pulls/8", ""},
+	}
+	for _, c := range cases {
+		isErr, text, out := call("merge_request_state", map[string]any{"merge_request": c.pr})
+		if isErr {
+			t.Fatalf("%s: %s", c.pr, text)
+		}
+		if m.called("GET "+c.path) != 1 {
+			t.Errorf("%s: the tool did not read %s: %v", c.pr, c.path, m.calls)
+		}
+		if out["source_branch"] != "fix" {
+			t.Errorf("%s: source_branch = %v, want fix", c.pr, out["source_branch"])
+		}
+		got, ok := out["created_at"]
+		if c.created == "" && ok {
+			t.Errorf("%s: created_at = %v, want no field", c.pr, got)
+		}
+		if c.created != "" && got != c.created {
+			t.Errorf("%s: created_at = %v, want %q", c.pr, got, c.created)
+		}
 	}
 }
 

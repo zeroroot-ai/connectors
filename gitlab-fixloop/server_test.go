@@ -87,12 +87,13 @@ func openMR(pipeline, detailed string) string {
 	return `{"iid":7,"title":"Fix SQL injection","state":"opened","web_url":"https://gitlab.example.com/acme/shop/-/merge_requests/7",` +
 		`"sha":"` + headSHA + `","merge_commit_sha":null,"target_branch":"main","source_branch":"fix",` +
 		`"merge_status":"can_be_merged","detailed_merge_status":"` + detailed + `","head_pipeline":` + p + `,` +
-		`"updated_at":"2026-11-20T08:00:00.000Z"}`
+		`"created_at":"2026-11-20T07:30:00.000+00:00","updated_at":"2026-11-20T08:00:00.000Z"}`
 }
 
 const mergedMR = `{"iid":7,"title":"Fix SQL injection","state":"merged","web_url":"https://gitlab.example.com/acme/shop/-/merge_requests/7",` +
 	`"sha":"` + headSHA + `","merge_commit_sha":"` + mergeSHA + `","target_branch":"main","source_branch":"fix",` +
 	`"merged_at":"2026-11-20T09:00:00.000Z","updated_at":"2026-11-20T09:00:00.000Z",` +
+	`"created_at":"2026-11-20T07:30:00.000Z",` +
 	`"head_pipeline":{"id":1,"sha":"` + headSHA + `","status":"success"}}`
 
 func setup(t *testing.T, routes map[string]func(http.ResponseWriter, *http.Request, map[string]any)) (srv *mock, call func(string, map[string]any) (isErr bool, text string, out map[string]any)) {
@@ -164,6 +165,46 @@ func TestMergeRequestStateMergedAndClosed(t *testing.T) {
 	_, _, out = call("merge_request_state", map[string]any{"merge_request": "acme/shop!9"})
 	if out["state"] != "open" || out["pipeline_green"] != false || out["pipeline_status"] != "failed" {
 		t.Errorf("failed pipeline = %v", out)
+	}
+}
+
+// The daemon links a merge request to a finding only when merge_request_state
+// gives the source branch and the time of creation. The tool reads both from
+// the merge request API and gives the time in UTC without a fraction, the
+// format that the daemon parses (time.RFC3339). A merge request with no
+// created_at gives no created_at, so the daemon refuses the link.
+func TestMergeRequestStateSourceBranchAndCreatedAt(t *testing.T) {
+	const noCreatedAt = `{"iid":9,"state":"opened","sha":"` + headSHA + `","source_branch":"other"}`
+	m, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
+		"GET " + api + mr7:                 reply(200, openMR("success", "mergeable")),
+		"GET " + api + "/merge_requests/8": reply(200, mergedMR),
+		"GET " + api + "/merge_requests/9": reply(200, noCreatedAt),
+	})
+	cases := []struct {
+		mr, path, branch, created string
+	}{
+		{ref, api + mr7, "fix", "2026-11-20T07:30:00Z"},
+		{"acme/shop!8", api + "/merge_requests/8", "fix", "2026-11-20T07:30:00Z"},
+		{"acme/shop!9", api + "/merge_requests/9", "other", ""},
+	}
+	for _, c := range cases {
+		isErr, text, out := call("merge_request_state", map[string]any{"merge_request": c.mr})
+		if isErr {
+			t.Fatalf("%s: %s", c.mr, text)
+		}
+		if m.called("GET "+c.path) != 1 {
+			t.Errorf("%s: the tool did not read %s: %v", c.mr, c.path, m.calls)
+		}
+		if out["source_branch"] != c.branch {
+			t.Errorf("%s: source_branch = %v, want %q", c.mr, out["source_branch"], c.branch)
+		}
+		got, ok := out["created_at"]
+		if c.created == "" && ok {
+			t.Errorf("%s: created_at = %v, want no field", c.mr, got)
+		}
+		if c.created != "" && got != c.created {
+			t.Errorf("%s: created_at = %v, want %q", c.mr, got, c.created)
+		}
 	}
 }
 

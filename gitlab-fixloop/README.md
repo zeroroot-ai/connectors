@@ -36,6 +36,8 @@ The input and the result follow `fixloop/connector.go`. Where GitLab differs, th
 | `state` = `refused` | GitLab has no such state. See the next section. |
 | `pipeline_green` | `head_pipeline.status` is `success`, and `head_pipeline.sha` is the head sha of the merge request. A pipeline with an empty sha does not count. The result also holds `pipeline_status`, the raw status, or `none`. When `detailed_merge_status` is `status_checks_must_pass`, the tool also reads the external status checks. A `failed` check makes `pipeline_status` `failed`. A check that has not passed makes it `pending`. |
 | `at` | `merged_at`, `closed_at` or `updated_at`. |
+| `source_branch` | `source_branch` of the merge request. The daemon links the merge request of a fix job to a finding only when this is the branch of the job. |
+| `created_at` | `created_at` of the merge request, in RFC 3339 in UTC. The daemon links the merge request only when it was opened at or after the claim of the job. With no value, the field is absent and the daemon refuses the link. |
 | `merge_commit` | `merge_commit_sha`, or `squash_commit_sha` for a squash merge. |
 | `deployment_state.deployed` | A deployment with status `success` to `GITLAB_ENVIRONMENT` holds the merge commit. |
 | `deployment_state.application` | The path of the project. The tenant keys its health query by this value. |

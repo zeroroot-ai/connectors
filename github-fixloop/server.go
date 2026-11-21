@@ -60,6 +60,7 @@ import (
 //     exist. A required check that has not started makes the checks pending, and the
 //     reason names each such check.
 //   - at: merged_at, closed_at or updated_at of the pull request.
+//   - source_branch and created_at: head.ref and created_at of the pull request.
 //   - deployment_state.application: owner/repo. restart is always off.
 
 const (
@@ -210,6 +211,7 @@ type ghPR struct {
 	MergedAt       string `json:"merged_at"`
 	ClosedAt       string `json:"closed_at"`
 	UpdatedAt      string `json:"updated_at"`
+	CreatedAt      string `json:"created_at"`
 	MergeCommitSHA string `json:"merge_commit_sha"`
 	Mergeable      *bool  `json:"mergeable"`
 	MergeableState string `json:"mergeable_state"`
@@ -419,7 +421,10 @@ func missing(required []string, runs map[string]bool, cs *combined) []string {
 
 // stateOf maps a GitHub pull request to the state of the daemon.
 func (v *service) stateOf(ctx context.Context, r prRef, pr *ghPR) (fixloop.State, error) {
-	st := fixloop.State{MergeRequest: r.key(), HeadSHA: pr.Head.SHA}
+	st := fixloop.State{
+		MergeRequest: r.key(), HeadSHA: pr.Head.SHA,
+		SourceBranch: pr.Head.Ref, CreatedAt: fixloop.Time(fixloop.ParseTime(pr.CreatedAt)),
+	}
 	var required []string
 	if pr.State != "closed" {
 		var err error

@@ -50,6 +50,7 @@ import (
 //     When detailed_merge_status is status_checks_must_pass, the external status checks
 //     count too: a failed one makes the pipeline "failed", a pending one "pending".
 //   - at: merged_at, closed_at or updated_at of the merge request.
+//   - source_branch and created_at: source_branch and created_at of the merge request.
 //   - deployment_state.application: the path of the project. restart is always off.
 
 const (
@@ -159,6 +160,7 @@ type glMR struct {
 	MergedAt            string      `json:"merged_at"`
 	ClosedAt            string      `json:"closed_at"`
 	UpdatedAt           string      `json:"updated_at"`
+	CreatedAt           string      `json:"created_at"`
 	SourceBranch        string      `json:"source_branch"`
 	TargetBranch        string      `json:"target_branch"`
 	MergeStatus         string      `json:"merge_status"`
@@ -245,7 +247,10 @@ func pipelineStatus(mr *glMR) (string, bool) {
 // stateOf maps a GitLab merge request to the state of the daemon.
 func (v *service) stateOf(ctx context.Context, project, key string, mr *glMR) (fixloop.State, error) {
 	status, green := pipelineStatus(mr)
-	st := fixloop.State{MergeRequest: key, PipelineStatus: status, PipelineGreen: green, HeadSHA: mr.SHA}
+	st := fixloop.State{
+		MergeRequest: key, PipelineStatus: status, PipelineGreen: green, HeadSHA: mr.SHA,
+		SourceBranch: mr.SourceBranch, CreatedAt: fixloop.Time(fixloop.ParseTime(mr.CreatedAt)),
+	}
 	switch mr.State {
 	case "merged":
 		st.State = fixloop.Merged

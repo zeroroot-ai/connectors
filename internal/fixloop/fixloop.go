@@ -36,7 +36,11 @@ type MergeRequestInput struct {
 }
 
 // State is the result of merge_request_state. The daemon reads state,
-// pipeline_green, reason and at. The other fields are for the agent.
+// pipeline_green, reason, at, source_branch and created_at. The other fields
+// are for the agent. The daemon links the merge request of a fix job to a
+// finding only when source_branch is the branch of the job and created_at is
+// not before the claim of the job. A Git host that gives no source branch or
+// no creation time makes the daemon refuse the link.
 type State struct {
 	MergeRequest   string `json:"merge_request"`
 	State          string `json:"state"`
@@ -47,6 +51,10 @@ type State struct {
 	MergeCommit    string `json:"merge_commit,omitempty"`
 	MergedAt       string `json:"merged_at,omitempty"`
 	At             string `json:"at,omitempty"`
+	// SourceBranch is the branch that the merge request merges.
+	SourceBranch string `json:"source_branch,omitempty"`
+	// CreatedAt is when the merge request was opened, in the format of Time.
+	CreatedAt string `json:"created_at,omitempty"`
 }
 
 // MergeResult is the result of merge_merge_request.
