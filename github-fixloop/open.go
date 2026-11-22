@@ -108,7 +108,7 @@ func (v *service) openMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 	var ae *kit.APIError
 	switch {
 	case err == nil:
-		return v.resume(ctx, r, in, out)
+		return v.resume(ctx, r, in, out, existing.Object.SHA)
 	case errors.As(err, &ae) && ae.Status == http.StatusNotFound:
 	default:
 		return nil, out, fmt.Errorf("read the source branch: %w", err)
@@ -153,13 +153,27 @@ func (v *service) openMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 	if err != nil {
 		return nil, out, fmt.Errorf("open the pull request (the branch %s stays, call the tool again): %w", in.SourceBranch, err)
 	}
-	return nil, v.openResult(r, &created, in, false), nil
+	if err := sameHead(&created, commit.SHA); err != nil {
+		return nil, out, err
+	}
+	return nil, v.openResult(r, &created, in, commit.SHA, false), nil
 }
 
-func (v *service) openResult(r prRef, pr *ghPR, in fixloop.OpenInput, existing bool) fixloop.OpenResult {
+// sameHead refuses a pull request whose head is not the commit that the tool
+// made or checked. The head_sha of the result is that commit, so a later merge
+// with expected_head_sha merges only that commit.
+func sameHead(pr *ghPR, commit string) error {
+	if !strings.EqualFold(pr.Head.SHA, commit) {
+		return fmt.Errorf("%w: the head of the pull request is %s and not %s, the commit that this tool made or checked. "+
+			"A push moved the branch. Nothing was merged", kit.ErrInvalidInput, pr.Head.SHA, commit)
+	}
+	return nil
+}
+
+func (v *service) openResult(r prRef, pr *ghPR, in fixloop.OpenInput, head string, existing bool) fixloop.OpenResult {
 	return fixloop.OpenResult{
 		MergeRequest: prRef{r.owner, r.repo, pr.Number}.key(), URL: pr.HTMLURL,
-		SourceBranch: in.SourceBranch, TargetBranch: in.TargetBranch, HeadSHA: pr.Head.SHA,
+		SourceBranch: in.SourceBranch, TargetBranch: in.TargetBranch, HeadSHA: head,
 		CreatedAt: fixloop.Time(fixloop.ParseTime(pr.CreatedAt)), Existing: existing,
 	}
 }
@@ -203,11 +217,16 @@ func (v *service) treeEntries(ctx context.Context, r prRef, changes []fixloop.Fi
 }
 
 // resume handles a source branch that exists. It checks that the branch is
-// the work of this tool, then returns its open pull request, or opens one.
-func (v *service) resume(ctx context.Context, r prRef, in fixloop.OpenInput, out fixloop.OpenResult) (*mcp.CallToolResult, fixloop.OpenResult, error) {
-	reason, err := v.foreign(ctx, r, in)
+// the work of this tool and that its head is that commit, then returns its
+// open pull request, or opens one. branchHead is the head of the branch that
+// the caller read.
+func (v *service) resume(ctx context.Context, r prRef, in fixloop.OpenInput, out fixloop.OpenResult, branchHead string) (*mcp.CallToolResult, fixloop.OpenResult, error) {
+	commit, reason, err := v.foreign(ctx, r, in)
 	if err != nil {
 		return nil, out, err
+	}
+	if reason == "" && !strings.EqualFold(commit, branchHead) {
+		reason = "has a head that is not the commit that this tool checked"
 	}
 	if reason != "" {
 		return nil, out, fmt.Errorf("%w: the branch %s exists and %s. The tool does not build on it. Use another branch name",
@@ -217,8 +236,11 @@ func (v *service) resume(ctx context.Context, r prRef, in fixloop.OpenInput, out
 	if err != nil {
 		return nil, out, err
 	}
-	if pr != nil && pr.State == "open" && pr.Base.Ref == in.TargetBranch {
-		return nil, v.openResult(r, pr, in, true), nil
+	if pr != nil && pr.State == "open" && pr.Base.Ref == in.TargetBranch && !pr.fromFork() {
+		if err := sameHead(pr, commit); err != nil {
+			return nil, out, err
+		}
+		return nil, v.openResult(r, pr, in, commit, true), nil
 	}
 	var created ghPR
 	err = v.client.Do(ctx, kit.Request{
@@ -228,14 +250,17 @@ func (v *service) resume(ctx context.Context, r prRef, in fixloop.OpenInput, out
 	if err != nil {
 		return nil, out, fmt.Errorf("open the pull request (the branch %s stays, call the tool again): %w", in.SourceBranch, err)
 	}
-	return nil, v.openResult(r, &created, in, false), nil
+	if err := sameHead(&created, commit); err != nil {
+		return nil, out, err
+	}
+	return nil, v.openResult(r, &created, in, commit, false), nil
 }
 
 // foreign compares the branch with the base branch. It returns an empty reason
-// when the branch holds exactly one commit and that commit changes exactly the
-// files of the input with the blobs of the input. Otherwise it returns the
-// reason.
-func (v *service) foreign(ctx context.Context, r prRef, in fixloop.OpenInput) (string, error) {
+// and the commit when the branch holds exactly one commit and that commit
+// changes exactly the files of the input with the blobs of the input.
+// Otherwise it returns the reason.
+func (v *service) foreign(ctx context.Context, r prRef, in fixloop.OpenInput) (commit, reason string, err error) {
 	var cmp struct {
 		AheadBy int `json:"ahead_by"`
 		Commits []struct {
@@ -247,17 +272,17 @@ func (v *service) foreign(ctx context.Context, r prRef, in fixloop.OpenInput) (s
 			SHA      string `json:"sha"`
 		} `json:"files"`
 	}
-	err := v.client.Do(ctx, kit.Request{
+	err = v.client.Do(ctx, kit.Request{
 		Method: http.MethodGet, Path: repoPath(r, "compare", in.TargetBranch+"..."+in.SourceBranch),
 	}, &cmp)
 	if err != nil {
-		return "", fmt.Errorf("compare the source branch with %s: %w", in.TargetBranch, err)
+		return "", "", fmt.Errorf("compare the source branch with %s: %w", in.TargetBranch, err)
 	}
 	if cmp.AheadBy != 1 || len(cmp.Commits) != 1 {
-		return fmt.Sprintf("holds %d commits that %s does not have, and this tool makes one", cmp.AheadBy, in.TargetBranch), nil
+		return "", fmt.Sprintf("holds %d commits that %s does not have, and this tool makes one", cmp.AheadBy, in.TargetBranch), nil
 	}
 	if len(cmp.Files) != len(in.Changes) {
-		return "its commit changes other files than the input", nil
+		return "", "its commit changes other files than the input", nil
 	}
 	got := make(map[string][2]string, len(cmp.Files))
 	for _, f := range cmp.Files {
@@ -265,14 +290,16 @@ func (v *service) foreign(ctx context.Context, r prRef, in fixloop.OpenInput) (s
 	}
 	for _, c := range in.Changes {
 		g, ok := got[c.Path]
+		// A status "changed" is a change of the mode. This tool writes the mode
+		// 100644 and no other, so a branch with a change of mode is foreign.
 		switch {
 		case !ok:
-			return "its commit changes other files than the input", nil
+			return "", "its commit changes other files than the input", nil
 		case c.Delete && g[0] != "removed":
-			return "its commit does not remove " + c.Path, nil
+			return "", "its commit does not remove " + c.Path, nil
 		case !c.Delete && (g[0] != "added" && g[0] != "modified" || g[1] != fixloop.BlobSHA(*c.Content)):
-			return "its commit holds another content for " + c.Path, nil
+			return "", "its commit holds another content or another mode for " + c.Path, nil
 		}
 	}
-	return "", nil
+	return cmp.Commits[0].SHA, "", nil
 }

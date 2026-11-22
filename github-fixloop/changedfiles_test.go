@@ -35,6 +35,7 @@ func TestStateChangedFilesKinds(t *testing.T) {
 		prFile("d.go", "renamed", "4444", "old/d.go"),
 		prFile("e.go", "copied", "5555", ""),
 		prFile("f.go", "changed", "6666", ""),
+		prFile("g.go", "unchanged", "7777", ""),
 	}, ",") + "]"
 	m, call := setup(t, stateRoutes(func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
 		_, _ = w.Write([]byte(list))
@@ -44,7 +45,7 @@ func TestStateChangedFilesKinds(t *testing.T) {
 		t.Fatal(text)
 	}
 	files, _ := out["changed_files"].([]any)
-	if len(files) != 6 || out["changed_files_truncated"] != false || out["changed_files_error"] != nil {
+	if len(files) != 7 || out["changed_files_truncated"] != false || out["changed_files_error"] != nil {
 		t.Fatalf("out = %v", out)
 	}
 	want := []fixloop.ChangedFile{
@@ -53,7 +54,8 @@ func TestStateChangedFilesKinds(t *testing.T) {
 		{Path: "c.go", Change: "deleted", BlobSHA: ""},
 		{Path: "d.go", Change: "renamed", PreviousPath: "old/d.go", BlobSHA: "4444"},
 		{Path: "e.go", Change: "added", BlobSHA: "5555"},
-		{Path: "f.go", Change: "modified", BlobSHA: "6666"},
+		{Path: "f.go", Change: "mode_changed", BlobSHA: "6666"},
+		{Path: "g.go", Change: "modified", BlobSHA: "7777"},
 	}
 	for i, w := range want {
 		f := files[i].(map[string]any)

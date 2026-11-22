@@ -15,12 +15,28 @@ import (
 // https://docs.gitlab.com/api/repository_files/ (blob_id). A request with
 // per_page=1 and page=101 reads the file number 101.
 func blobOf(path string) func(http.ResponseWriter, *http.Request, map[string]any) {
-	return reply(200, `{"file_path":"`+path+`","encoding":"base64","blob_id":"blob-`+path+`","content":""}`)
+	return func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+		// The blob is read at the head sha and not at a branch name.
+		if got := r.URL.Query().Get("ref"); got != headSHA {
+			http.Error(w, `{"message":"404 File Not Found (ref `+got+`)"}`, http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"file_path":"` + path + `","encoding":"base64","blob_id":"blob-` + path + `","content":""}`))
+	}
+}
+
+// withCount sets the changes_count of the merge request of a state test.
+func withCount(mr, count string) string {
+	return strings.Replace(mr, `"changes_count":"1"`, `"changes_count":"`+count+`"`, 1)
 }
 
 func stateWith(files func(http.ResponseWriter, *http.Request, map[string]any), blobs ...string) routeMap {
+	return stateWithMR(openMR("success", "mergeable"), files, blobs...)
+}
+
+func stateWithMR(mr string, files func(http.ResponseWriter, *http.Request, map[string]any), blobs ...string) routeMap {
 	routes := routeMap{
-		"GET " + api + mr7:            reply(200, openMR("success", "mergeable")),
+		"GET " + api + mr7:            reply(200, mr),
 		"GET " + api + mr7 + "/diffs": files,
 	}
 	for _, p := range blobs {
@@ -36,7 +52,8 @@ func TestStateChangedFilesKinds(t *testing.T) {
 		diffJS("c.go", false, false, true),
 		`{"old_path":"old/d.go","new_path":"d.go","new_file":false,"renamed_file":true,"deleted_file":false}`,
 	}, ",") + "]"
-	m, call := setup(t, stateWith(func(w http.ResponseWriter, _ *http.Request, _ map[string]any) { _, _ = w.Write([]byte(list)) }, "a.go", "b.go", "d.go"))
+	m, call := setup(t, stateWithMR(withCount(openMR("success", "mergeable"), "4"),
+		func(w http.ResponseWriter, _ *http.Request, _ map[string]any) { _, _ = w.Write([]byte(list)) }, "a.go", "b.go", "d.go"))
 	isErr, text, out := call("merge_request_state", map[string]any{"merge_request": ref})
 	if isErr {
 		t.Fatal(text)
@@ -64,6 +81,8 @@ func TestStateChangedFilesKinds(t *testing.T) {
 	}
 }
 
+// changes_count says whether the list is complete: "1000+" and a number that
+// differs from the list both mean truncated.
 func TestStateChangedFilesTruncated(t *testing.T) {
 	full := make([]string, 0, fixloop.MaxChangedFiles)
 	paths := make([]string, 0, fixloop.MaxChangedFiles)
@@ -72,26 +91,68 @@ func TestStateChangedFilesTruncated(t *testing.T) {
 		paths = append(paths, p)
 		full = append(full, diffJS(p, false, false, false))
 	}
+	list := "[" + strings.Join(full, ",") + "]"
 	for name, tc := range map[string]struct {
-		more string
-		want bool
-	}{"more files": {`[` + diffJS("f100.go", true, false, false) + `]`, true}, "exactly 100": {`[]`, false}} {
+		count string
+		want  bool
+	}{"exactly 100": {"100", false}, "150 changes": {"150", true}, "capped": {"1000+", true}} {
 		var queries []string
-		_, call := setup(t, stateWith(func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+		_, call := setup(t, stateWithMR(withCount(openMR("success", "mergeable"), tc.count), func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
 			queries = append(queries, r.URL.RawQuery)
-			if r.URL.Query().Get("page") == "101" {
-				_, _ = w.Write([]byte(tc.more))
-				return
-			}
-			_, _ = w.Write([]byte("[" + strings.Join(full, ",") + "]"))
+			_, _ = w.Write([]byte(list))
 		}, paths...))
 		_, _, out := call("merge_request_state", map[string]any{"merge_request": ref})
 		files, _ := out["changed_files"].([]any)
-		if len(files) != 100 || out["changed_files_truncated"] != tc.want {
-			t.Errorf("%s: %d files, truncated %v", name, len(files), out["changed_files_truncated"])
+		if len(files) != 100 || out["changed_files_truncated"] != tc.want || out["changed_files_error"] != nil {
+			t.Errorf("%s: %d files, truncated %v, out %v", name, len(files), out["changed_files_truncated"], out)
 		}
-		if len(queries) != 2 || !strings.Contains(queries[1], "per_page=1") {
+		if len(queries) != 1 {
 			t.Errorf("%s: queries = %v", name, queries)
+		}
+	}
+}
+
+// A diff list that belongs to an earlier head is not shown, and a merge request
+// with no count yet gives no list. The state is still returned.
+func TestStateChangedFilesOfAnOtherHead(t *testing.T) {
+	one := func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+		_, _ = w.Write([]byte("[" + diffJS("a.go", false, false, false) + "]"))
+	}
+	old := "cccccccccccccccccccccccccccccccccccccccc"
+	for name, mr := range map[string]string{
+		"diff of an earlier head": strings.Replace(openMR("success", "mergeable"), `"head_sha":"`+headSHA+`"}`, `"head_sha":"`+old+`"}`, 1),
+		"no count yet":            withCount(openMR("success", "mergeable"), ""),
+		"count is no number":      withCount(openMR("success", "mergeable"), "many"),
+	} {
+		_, call := setup(t, stateWithMR(mr, one, "a.go"))
+		isErr, text, out := call("merge_request_state", map[string]any{"merge_request": ref})
+		files, _ := out["changed_files"].([]any)
+		errText, _ := out["changed_files_error"].(string)
+		if isErr || out["state"] != "open" || len(files) != 0 || errText == "" {
+			t.Errorf("%s: isErr=%v %s out=%v", name, isErr, text, out)
+		}
+	}
+}
+
+// A file of a diff is read at the head sha, with its mode.
+func TestStateChangedFilesModes(t *testing.T) {
+	list := "[" + strings.Join([]string{
+		diffModeJS("a.go", true, false, false, "", "100755"),
+		`{"old_path":"b.go","new_path":"b.go","a_mode":"100644","b_mode":"100755","new_file":false,"renamed_file":false,"deleted_file":false,"diff":""}`,
+		`{"old_path":"c.go","new_path":"c.go","a_mode":"100644","b_mode":"100755","new_file":false,"renamed_file":false,"deleted_file":false,"diff":"@@"}`,
+	}, ",") + "]"
+	_, call := setup(t, stateWithMR(withCount(openMR("success", "mergeable"), "3"),
+		func(w http.ResponseWriter, _ *http.Request, _ map[string]any) { _, _ = w.Write([]byte(list)) }, "a.go", "b.go", "c.go"))
+	_, _, out := call("merge_request_state", map[string]any{"merge_request": ref})
+	files, _ := out["changed_files"].([]any)
+	if len(files) != 3 {
+		t.Fatalf("out = %v", out)
+	}
+	want := [][2]string{{"added", "100755"}, {"mode_changed", "100755"}, {"modified", "100755"}}
+	for i, w := range want {
+		f := files[i].(map[string]any)
+		if f["change"] != w[0] || f["mode"] != w[1] {
+			t.Errorf("file %d = %v, want %v", i, f, w)
 		}
 	}
 }

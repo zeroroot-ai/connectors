@@ -88,7 +88,8 @@ func openMR(pipeline, detailed string) string {
 		`"sha":"` + headSHA + `","merge_commit_sha":null,"target_branch":"main","source_branch":"fix",` +
 		`"source_project_id":3,"target_project_id":3,` +
 		`"merge_status":"can_be_merged","detailed_merge_status":"` + detailed + `","head_pipeline":` + p + `,` +
-		`"created_at":"2026-11-20T07:30:00.000+00:00","updated_at":"2026-11-20T08:00:00.000Z"}`
+		`"created_at":"2026-11-20T07:30:00.000+00:00","updated_at":"2026-11-20T08:00:00.000Z",` +
+		`"changes_count":"1","diff_refs":{"base_sha":"` + headSHA + `","start_sha":"` + headSHA + `","head_sha":"` + headSHA + `"}}`
 }
 
 const mergedMR = `{"iid":7,"title":"Fix SQL injection","state":"merged","web_url":"https://gitlab.example.com/acme/shop/-/merge_requests/7",` +
@@ -300,7 +301,7 @@ func TestPipelineOfAnotherCommitIsNotGreen(t *testing.T) {
 		if out["pipeline_green"] != false {
 			t.Errorf("%s: state = %v", name, out)
 		}
-		_, _, out = call("merge_merge_request", map[string]any{"merge_request": ref})
+		_, _, out = call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 		if out["merged"] != false || m.called("PUT "+api+mr7+"/merge") != 0 {
 			t.Errorf("%s: merged on a pipeline of another commit: %v", name, out)
 		}
@@ -389,7 +390,7 @@ func TestMergeNotAttempted(t *testing.T) {
 		m, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
 			"GET " + api + mr7: reply(200, c.mr),
 		})
-		args := map[string]any{"merge_request": ref}
+		args := map[string]any{"merge_request": ref, "expected_head_sha": headSHA}
 		if c.sha != "" {
 			args["expected_head_sha"] = c.sha
 		}
@@ -416,7 +417,7 @@ func TestRefusalComesFromTheLiveState(t *testing.T) {
 	if out["state"] != "refused" || out["reason"] != "GitLab does not allow the merge: not_approved" {
 		t.Errorf("a blocked merge request with a green pipeline: %v", out)
 	}
-	call("merge_merge_request", map[string]any{"merge_request": ref})
+	call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 	if m.called("PUT "+api+mr7+"/merge") != 0 {
 		t.Error("the tool called merge on a blocked merge request")
 	}
@@ -461,7 +462,7 @@ func TestMergeVendorAnswers(t *testing.T) {
 			},
 			"PUT " + api + mr7 + "/merge": reply(c.status, c.body),
 		})
-		isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref})
+		isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 		if isErr != c.wantErr {
 			t.Errorf("%s: isErr=%v %s", c.name, isErr, text)
 			continue
@@ -476,7 +477,7 @@ func TestMergeAlreadyMergedIsNotAnError(t *testing.T) {
 	m, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
 		"GET " + api + mr7: reply(200, mergedMR),
 	})
-	isErr, _, out := call("merge_merge_request", map[string]any{"merge_request": ref})
+	isErr, _, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 	if isErr || out["merged"] != true || m.called("PUT "+api+mr7+"/merge") != 0 {
 		t.Errorf("isErr=%v out=%v calls=%v", isErr, out, m.calls)
 	}
@@ -853,8 +854,10 @@ func TestInputValidationNeverReachesGitLab(t *testing.T) {
 			}
 		}
 	}
-	if isErr, _, _ := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": "xyz"}); !isErr {
-		t.Error("accepted a bad sha")
+	for _, args := range []map[string]any{{"merge_request": ref, "expected_head_sha": "xyz"}, {"merge_request": ref}, {"merge_request": ref, "expected_head_sha": ""}} {
+		if isErr, _, _ := call("merge_merge_request", args); !isErr {
+			t.Errorf("accepted %v", args)
+		}
 	}
 	if len(m.calls) != 0 {
 		t.Errorf("reached GitLab: %v", m.calls)
@@ -946,7 +949,7 @@ func TestMergeTimeIsNotARefusal(t *testing.T) {
 	m, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
 		"GET " + api + mr7: reply(200, openMR("success", "merge_time")),
 	})
-	_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref})
+	_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 	reason, _ := out["reason"].(string)
 	if out["state"] != "open" || !strings.Contains(reason, "has not settled the merge status: merge_time") {
 		t.Errorf("out = %v", out)
@@ -977,7 +980,7 @@ func TestFastForwardWithoutSquashIsRefused(t *testing.T) {
 			"GET " + api + mr7:            reply(200, c.mr),
 			"PUT " + api + mr7 + "/merge": reply(200, mergedMR),
 		})
-		_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref})
+		_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 		if c.merge {
 			if out["merged"] != true || m.called("PUT "+api+mr7+"/merge") != 1 {
 				t.Errorf("%s: out = %v", c.name, out)
@@ -1015,7 +1018,7 @@ func TestMergeRefusalReasonIsStable(t *testing.T) {
 		"PUT " + api + mr7 + "/merge": reply(422, `{"message":"Branch cannot be merged"}`),
 	})
 	for range 2 {
-		_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref})
+		_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 		if out["state"] != "refused" || out["reason"] != "GitLab refused the merge (HTTP 422): Branch cannot be merged" {
 			t.Errorf("out = %v", out)
 		}

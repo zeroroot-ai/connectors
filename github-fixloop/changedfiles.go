@@ -17,7 +17,8 @@ import (
 //
 // https://docs.github.com/en/rest/pulls/pulls#list-pull-requests-files
 // Each file has filename, status (added, removed, modified, renamed, copied,
-// changed, unchanged), sha (the blob sha) and previous_filename. The list has
+// changed, unchanged), sha (the blob sha) and previous_filename. The status
+// changed is a change of the file mode, and the tool maps it to mode_changed. The list has
 // at most 3000 files. The tool reads the first 100. To tell whether more
 // exist, it reads file number 101 with per_page=1.
 func (v *service) changedFiles(ctx context.Context, r prRef) ([]fixloop.ChangedFile, bool, error) {
@@ -38,6 +39,8 @@ func (v *service) changedFiles(ctx context.Context, r prRef) ([]fixloop.ChangedF
 		switch f.Status {
 		case "added", "copied":
 			c.Change = fixloop.ChangeAdded
+		case "changed":
+			c.Change = fixloop.ChangeModeChanged
 		case "removed":
 			c.Change, c.BlobSHA = fixloop.ChangeDeleted, ""
 		case "renamed":

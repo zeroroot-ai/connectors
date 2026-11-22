@@ -75,6 +75,9 @@ const (
 	ChangeModified = "modified"
 	ChangeDeleted  = "deleted"
 	ChangeRenamed  = "renamed"
+	// ChangeModeChanged is a change of the file mode with no change of the
+	// content.
+	ChangeModeChanged = "mode_changed"
 )
 
 // MaxChangedFiles bounds the list of changed files.
@@ -88,6 +91,9 @@ type ChangedFile struct {
 	Change       string `json:"change"`
 	PreviousPath string `json:"previous_path,omitempty"`
 	BlobSHA      string `json:"blob_sha"`
+	// Mode is the file mode at the head, for example 100644. GitHub gives no
+	// mode in the list of files, so it is empty there.
+	Mode string `json:"mode,omitempty"`
 }
 
 // ForkReason is the reason for a merge request from a fork, or from a fork

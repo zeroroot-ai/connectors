@@ -624,7 +624,7 @@ func (v *service) mergeRequestState(ctx context.Context, _ *mcp.CallToolRequest,
 
 type mergeInput struct {
 	MergeRequest string `json:"merge_request" jsonschema:"URL of the pull request, or its reference owner/repo#12"`
-	SHA          string `json:"expected_head_sha,omitempty" jsonschema:"the head sha that the checks tested, from head_sha of merge_request_state or open_merge_request. The tool refuses the merge when the head is another commit, and sends this sha to GitHub."`
+	SHA          string `json:"expected_head_sha" jsonschema:"the head sha that the checks tested, from head_sha of merge_request_state or open_merge_request. The tool refuses the merge when the head is another commit, and sends this sha to GitHub."`
 	MergeMethod  string `json:"merge_method,omitempty" jsonschema:"merge or squash. The default is the first that the repository allows: merge, then squash. The revert tool does not support a rebase merge."`
 }
 
@@ -633,10 +633,8 @@ func (v *service) mergeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest,
 	if err != nil {
 		return nil, fixloop.MergeResult{}, err
 	}
-	if in.SHA != "" {
-		if err := kit.CheckString("sha", in.SHA, 40, kit.Hex40); err != nil {
-			return nil, fixloop.MergeResult{}, err
-		}
+	if err := kit.CheckString("expected_head_sha", in.SHA, 40, kit.Hex40); err != nil {
+		return nil, fixloop.MergeResult{}, fmt.Errorf("check expected_head_sha: %w", err)
 	}
 	switch in.MergeMethod {
 	case "", "merge", "squash":
@@ -712,7 +710,7 @@ func holdMerge(st *fixloop.State, pr *ghPR, wantSHA string) bool {
 	case pr.State == "closed":
 		st.Reason = "the pull request is closed"
 	case wantSHA != "" && !strings.EqualFold(wantSHA, pr.Head.SHA):
-		st.Reason = "the head of the pull request moved: expected " + wantSHA + ", now " + pr.Head.SHA + ". A push changed it."
+		st.Reason = "the head of the pull request is not expected_head_sha: expected_head_sha is " + wantSHA + ", the head is " + pr.Head.SHA + ". A push changed it."
 	case st.State == fixloop.Refused:
 	case !st.PipelineGreen:
 		reason := "the checks have not succeeded: " + st.PipelineStatus

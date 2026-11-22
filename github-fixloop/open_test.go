@@ -36,8 +36,13 @@ func openRoutes() map[string]handler {
 		"POST " + repo + "/git/trees":             reply(201, `{"sha":"`+newTreeSHA+`"}`),
 		"POST " + repo + "/git/commits":           reply(201, `{"sha":"`+newComSHA+`","tree":{"sha":"`+newTreeSHA+`"},"parents":[{"sha":"`+baseSHA+`"}]}`),
 		"POST " + repo + "/git/refs":              reply(201, `{"ref":"refs/heads/`+srcBranch+`"}`),
-		"POST " + repo + "/pulls":                 reply(201, strings.Replace(openPR("clean"), `"ref":"fix"`, `"ref":"`+srcBranch+`"`, 1)),
+		"POST " + repo + "/pulls":                 reply(201, ownPR(newComSHA)),
 	}
+}
+
+// ownPR is a pull request from the source branch whose head is head.
+func ownPR(head string) string {
+	return strings.Replace(pullJSON("open", false, "true", "clean", head), `"ref":"fix"`, `"ref":"`+srcBranch+`"`, 1)
 }
 
 func openArgs() map[string]any {
@@ -58,7 +63,7 @@ func TestOpenMergeRequest(t *testing.T) {
 		t.Fatal(text)
 	}
 	if out["merge_request"] != ref || out["url"] != "https://github.com/acme/shop/pull/7" || out["source_branch"] != srcBranch ||
-		out["created_at"] != "2026-11-20T06:30:00Z" || out["head_sha"] != headSHA || out["existing"] != nil {
+		out["created_at"] != "2026-11-20T06:30:00Z" || out["head_sha"] != newComSHA || out["existing"] != nil {
 		t.Errorf("out = %v", out)
 	}
 	checkOpenWrites(t, m)
@@ -93,10 +98,10 @@ func branchExists(routes map[string]handler) map[string]handler {
 func TestOpenReturnsTheOpenPullRequestOfAnOwnBranch(t *testing.T) {
 	routes := branchExists(openRoutes())
 	routes[compareKey] = reply(200, ownCompare())
-	routes["GET "+repo+"/pulls"] = reply(200, `[`+strings.Replace(openPR("clean"), `"ref":"fix"`, `"ref":"`+srcBranch+`"`, 1)+`]`)
+	routes["GET "+repo+"/pulls"] = reply(200, `[`+ownPR(newComSHA)+`]`)
 	m, call := setup(t, routes)
 	isErr, text, out := call("open_merge_request", openArgs())
-	if isErr || out["existing"] != true || out["merge_request"] != ref || out["head_sha"] != headSHA {
+	if isErr || out["existing"] != true || out["merge_request"] != ref || out["head_sha"] != newComSHA {
 		t.Fatalf("isErr=%v %s %v", isErr, text, out)
 	}
 	for _, c := range m.calls {
@@ -142,7 +147,7 @@ func TestOpenRefusesABranchWithAForeignCommit(t *testing.T) {
 	} {
 		routes := branchExists(openRoutes())
 		routes[compareKey] = reply(200, cmp)
-		routes["GET "+repo+"/pulls"] = reply(200, `[`+strings.Replace(openPR("clean"), `"ref":"fix"`, `"ref":"`+srcBranch+`"`, 1)+`]`)
+		routes["GET "+repo+"/pulls"] = reply(200, `[`+ownPR(newComSHA)+`]`)
 		m, call := setup(t, routes)
 		isErr, text, _ := call("open_merge_request", openArgs())
 		if !isErr || !strings.Contains(text, "does not build on it") {
@@ -328,7 +333,7 @@ func TestMergeRefusesAMovedHead(t *testing.T) {
 	}))
 	isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 	reason, _ := out["reason"].(string)
-	if isErr || out["merged"] != false || out["head_sha"] != moved || !strings.Contains(reason, "moved: expected "+headSHA+", now "+moved) {
+	if isErr || out["merged"] != false || out["head_sha"] != moved || !strings.Contains(reason, "expected_head_sha is "+headSHA+", the head is "+moved) {
 		t.Fatalf("isErr=%v out=%v %s", isErr, out, text)
 	}
 	if m.called("PUT "+pr7+"/merge") != 0 {
@@ -340,5 +345,68 @@ func TestMergeRefusesAMovedHead(t *testing.T) {
 	call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 	if got := m.bodies["PUT "+pr7+"/merge"]["sha"]; got != headSHA {
 		t.Errorf("GitHub got sha %v", got)
+	}
+}
+
+// TestOpenHeadIsTheCommitOfTheTool makes sure that head_sha is the commit that
+// the tool made or checked, and that a pull request with another head is refused.
+func TestOpenHeadIsTheCommitOfTheTool(t *testing.T) {
+	const moved = "dddddddddddddddddddddddddddddddddddddddd"
+	// Create path: GitHub shows another head than the new commit.
+	routes := openRoutes()
+	routes["POST "+repo+"/pulls"] = reply(201, ownPR(moved))
+	_, call := setup(t, routes)
+	if isErr, text, _ := call("open_merge_request", openArgs()); !isErr || !strings.Contains(text, "not "+newComSHA) {
+		t.Errorf("create: isErr=%v %s", isErr, text)
+	}
+	// Resume path, open pull request with another head.
+	routes = branchExists(openRoutes())
+	routes[compareKey] = reply(200, ownCompare())
+	routes["GET "+repo+"/pulls"] = reply(200, `[`+ownPR(moved)+`]`)
+	_, call = setup(t, routes)
+	if isErr, text, _ := call("open_merge_request", openArgs()); !isErr || !strings.Contains(text, "A push moved the branch") {
+		t.Errorf("resume: isErr=%v %s", isErr, text)
+	}
+	// Resume path, a new pull request with another head.
+	routes = branchExists(openRoutes())
+	routes[compareKey] = reply(200, ownCompare())
+	routes["GET "+repo+"/pulls"] = reply(200, `[]`)
+	routes["POST "+repo+"/pulls"] = reply(201, ownPR(moved))
+	_, call = setup(t, routes)
+	if isErr, _, _ := call("open_merge_request", openArgs()); !isErr {
+		t.Error("resume with a new pull request: the head was not checked")
+	}
+	// The branch moved after the compare: its head is not the commit that the compare showed.
+	routes = openRoutes()
+	routes["GET "+repo+"/git/ref/heads/"+srcBranch] = reply(200, `{"object":{"sha":"`+moved+`"}}`)
+	routes[compareKey] = reply(200, ownCompare())
+	routes["GET "+repo+"/pulls"] = reply(200, `[`+ownPR(newComSHA)+`]`)
+	m, call := setup(t, routes)
+	isErr, text, _ := call("open_merge_request", openArgs())
+	if !isErr || !strings.Contains(text, "head that is not the commit that this tool checked") {
+		t.Errorf("moved branch: isErr=%v %s", isErr, text)
+	}
+	for _, c := range m.calls {
+		if strings.HasPrefix(c, "POST") {
+			t.Errorf("the tool wrote: %s", c)
+		}
+	}
+}
+
+// A pull request from a fork with the same branch name is not ours.
+func TestOpenIgnoresAPullRequestFromAFork(t *testing.T) {
+	fork := strings.Replace(ownPR(newComSHA), `"head":{"sha":"`+newComSHA+`","ref":"`+srcBranch+`","repo":{"full_name":"acme/shop"}}`,
+		`"head":{"sha":"`+newComSHA+`","ref":"`+srcBranch+`","repo":{"full_name":"evil/shop"}}`, 1)
+	routes := branchExists(openRoutes())
+	routes[compareKey] = reply(200, ownCompare())
+	routes["GET "+repo+"/pulls"] = reply(200, `[`+fork+`]`)
+	routes["POST "+repo+"/pulls"] = reply(201, ownPR(newComSHA))
+	m, call := setup(t, routes)
+	isErr, text, out := call("open_merge_request", openArgs())
+	if isErr || out["existing"] != nil {
+		t.Fatalf("isErr=%v %s %v", isErr, text, out)
+	}
+	if m.called("POST "+repo+"/pulls") != 1 {
+		t.Error("the tool used the pull request of the fork")
 	}
 }

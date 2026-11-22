@@ -62,7 +62,25 @@ func TestOpenMergeRequest(t *testing.T) {
 const branchKey = "GET " + api + "/repository/branches/zeroroot%2Ffix-sqli-1"
 
 func diffJS(newPath string, newFile, renamed, deleted bool) string {
-	return `{"old_path":"` + newPath + `","new_path":"` + newPath + `","new_file":` + strconv.FormatBool(newFile) +
+	return diffModeJS(newPath, newFile, renamed, deleted, "", "")
+}
+
+// diffModeJS is a diff with the modes of the file. An empty mode is the usual
+// one: 0 for the missing side of a new or a deleted file, and 100644 else.
+func diffModeJS(newPath string, newFile, renamed, deleted bool, aMode, bMode string) string {
+	if aMode == "" {
+		aMode = "100644"
+		if newFile {
+			aMode = "0"
+		}
+	}
+	if bMode == "" {
+		bMode = "100644"
+		if deleted {
+			bMode = "0"
+		}
+	}
+	return `{"old_path":"` + newPath + `","new_path":"` + newPath + `","a_mode":"` + aMode + `","b_mode":"` + bMode + `","new_file":` + strconv.FormatBool(newFile) +
 		`,"renamed_file":` + strconv.FormatBool(renamed) + `,"deleted_file":` + strconv.FormatBool(deleted) + `,"diff":"@@"}`
 }
 
@@ -76,8 +94,17 @@ func compareJS(commits int, diffs ...string) string {
 	return `{"commits":[` + strings.Join(cs, ",") + `],"diffs":[` + strings.Join(diffs, ",") + `],"compare_timeout":false}`
 }
 
+// blobRoute answers a file only at the commit of the branch. A read at the
+// name of the branch, or at another ref, gets 404, so a test fails when the
+// tool reads there.
 func blobRoute(content string) func(http.ResponseWriter, *http.Request, map[string]any) {
-	return reply(200, `{"file_name":"x","encoding":"base64","blob_id":"`+fixloop.BlobSHA(content)+`","content":""}`)
+	return func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+		if got := r.URL.Query().Get("ref"); got != headSHA {
+			http.Error(w, `{"message":"404 File Not Found (ref `+got+`)"}`, http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"file_name":"x","encoding":"base64","blob_id":"` + fixloop.BlobSHA(content) + `","content":""}`))
+	}
 }
 
 // ownBranch answers the calls for the branch that openArgs() makes.
@@ -85,7 +112,7 @@ func ownBranch(routes routeMap, diffs ...string) routeMap {
 	if len(diffs) == 0 {
 		diffs = []string{diffJS("src/db.go", false, false, false), diffJS("src/new.go", true, false, false), diffJS("old/unused.go", false, false, true)}
 	}
-	routes[branchKey] = reply(200, `{"name":"`+srcBranch+`"}`)
+	routes[branchKey] = reply(200, `{"name":"`+srcBranch+`","commit":{"id":"`+headSHA+`"}}`)
 	routes["GET "+api+"/repository/compare"] = reply(200, compareJS(1, diffs...))
 	routes["GET "+api+"/repository/files/src%2Fdb.go"] = blobRoute("package db\n")
 	routes["GET "+api+"/repository/files/src%2Fnew.go"] = blobRoute("package db\n")
@@ -317,7 +344,7 @@ func TestMergeRefusesAMovedHead(t *testing.T) {
 	m, call := setup(t, routeMap{"GET " + api + mr7: reply(200, movedMR)})
 	isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 	reason, _ := out["reason"].(string)
-	if isErr || out["merged"] != false || !strings.Contains(reason, "moved: expected "+headSHA+", now "+moved) {
+	if isErr || out["merged"] != false || !strings.Contains(reason, "expected_head_sha is "+headSHA+", the head is "+moved) {
 		t.Fatalf("isErr=%v out=%v %s", isErr, out, text)
 	}
 	if m.called("PUT "+api+mr7+"/merge") != 0 {
@@ -330,5 +357,85 @@ func TestMergeRefusesAMovedHead(t *testing.T) {
 	call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 	if got := m.bodies["PUT "+api+mr7+"/merge"]["sha"]; got != headSHA {
 		t.Errorf("GitLab got sha %v", got)
+	}
+}
+
+// TestOpenHeadIsTheCommitOfTheTool makes sure that head_sha is the commit that
+// the tool made or checked, and that a merge request with another head is refused.
+func TestOpenHeadIsTheCommitOfTheTool(t *testing.T) {
+	const moved = "cccccccccccccccccccccccccccccccccccccccc"
+	movedMR := strings.Replace(newMR(), `"sha":"`+headSHA+`","merge_commit_sha"`, `"sha":"`+moved+`","merge_commit_sha"`, 1)
+	// Create path: GitLab shows another head than the new commit.
+	routes := openRoutes()
+	routes["POST "+api+"/merge_requests"] = reply(201, movedMR)
+	_, call := setup(t, routes)
+	if isErr, text, _ := call("open_merge_request", openArgs()); !isErr || !strings.Contains(text, "A push moved the branch") {
+		t.Errorf("create: isErr=%v %s", isErr, text)
+	}
+	// Resume path, open merge request with another head.
+	routes = ownBranch(openRoutes())
+	routes["GET "+api+"/merge_requests"] = reply(200, `[`+movedMR+`]`)
+	_, call = setup(t, routes)
+	if isErr, _, _ := call("open_merge_request", openArgs()); !isErr {
+		t.Error("resume: the head was not checked")
+	}
+	// Resume path, a new merge request with another head.
+	routes = ownBranch(openRoutes())
+	routes["POST "+api+"/merge_requests"] = reply(201, movedMR)
+	_, call = setup(t, routes)
+	if isErr, _, _ := call("open_merge_request", openArgs()); !isErr {
+		t.Error("resume with a new merge request: the head was not checked")
+	}
+	// The branch head is not the commit of the compare.
+	routes = ownBranch(openRoutes())
+	routes[branchKey] = reply(200, `{"name":"`+srcBranch+`","commit":{"id":"`+moved+`"}}`)
+	m, call := setup(t, routes)
+	isErr, text, _ := call("open_merge_request", openArgs())
+	if !isErr || !strings.Contains(text, "head that is not the commit that this tool checked") {
+		t.Errorf("moved branch: isErr=%v %s", isErr, text)
+	}
+	for _, c := range m.calls {
+		if strings.HasPrefix(c, "POST") {
+			t.Errorf("the tool wrote: %s", c)
+		}
+	}
+	// A commit with no id is an error.
+	routes = openRoutes()
+	routes["POST "+api+"/repository/commits"] = reply(201, `{}`)
+	_, call = setup(t, routes)
+	if isErr, _, _ := call("open_merge_request", openArgs()); !isErr {
+		t.Error("a commit with no id was accepted")
+	}
+}
+
+// A merge request from a fork with the same branch name is not ours.
+func TestOpenIgnoresAMergeRequestFromAFork(t *testing.T) {
+	fork := strings.Replace(newMR(), `"source_project_id":3`, `"source_project_id":9`, 1)
+	routes := ownBranch(openRoutes())
+	routes["GET "+api+"/merge_requests"] = reply(200, `[`+fork+`]`)
+	m, call := setup(t, routes)
+	isErr, text, out := call("open_merge_request", openArgs())
+	if isErr || out["existing"] != nil || m.called("POST "+api+"/merge_requests") != 1 {
+		t.Errorf("isErr=%v %s %v calls %v", isErr, text, out, m.calls)
+	}
+}
+
+// The tool refuses a branch whose commit changes a file mode that it did not change.
+func TestOpenRefusesAChangeOfMode(t *testing.T) {
+	for name, diffs := range map[string][]string{
+		"new file with mode 100755": {diffJS("src/db.go", false, false, false), diffModeJS("src/new.go", true, false, false, "", "100755"), diffJS("old/unused.go", false, false, true)},
+		"mode change of a file":     {diffModeJS("src/db.go", false, false, false, "100755", "100644"), diffJS("src/new.go", true, false, false), diffJS("old/unused.go", false, false, true)},
+	} {
+		routes := ownBranch(openRoutes(), diffs...)
+		m, call := setup(t, routes)
+		isErr, text, _ := call("open_merge_request", openArgs())
+		if !isErr || !strings.Contains(text, "file mode") {
+			t.Errorf("%s: isErr=%v %s", name, isErr, text)
+		}
+		for _, c := range m.calls {
+			if strings.HasPrefix(c, "POST") {
+				t.Errorf("%s: the tool wrote: %s", name, c)
+			}
+		}
 	}
 }
