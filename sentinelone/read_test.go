@@ -54,7 +54,7 @@ func (m *readMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func readSetup(t *testing.T, token string) (srv *readMock, call func(string, map[string]any) (bool, string, *mcp.CallToolResult), tools map[string]*mcp.Tool) {
+func readSetup(t *testing.T, token string) (*readMock, func(string, map[string]any) (bool, string, *mcp.CallToolResult), map[string]*mcp.Tool) {
 	t.Helper()
 	m := &readMock{}
 	ts := httptest.NewTLSServer(m)
