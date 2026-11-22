@@ -38,7 +38,7 @@ const incidentJS = `{"incident_id":"42","incident_name":"Incident 42","descripti
 	`"creation_time":1795168800000,"modification_time":1795172400000,"host_count":3,"alert_count":7,"assigned_user_mail":"a@example.com","hosts":["h1"]}`
 
 const alertJS = `{"alert_id":"9001","name":"Mimikatz","category":"Credential Access","severity":"high","source":"XDR Agent","action":"BLOCKED",` +
-	`"detection_timestamp":1795168900000,"endpoint_id":"` + endpointID + `","host_name":"win-1","user_name":"admin","description":"d","host_ip":["10.0.0.5"],"events":[]}`
+	`"detection_timestamp":1795168900000,"endpoint_id":"` + endpointID + `","host_name":"win-1","user_name":"admin","description":"d","host_ip":["10.0.0.5"],"mitre_tactic_id_and_name":["TA0006 - Credential Access"],"mitre_technique_id_and_name":["T1003 - OS Credential Dumping"],"events":[]}`
 
 const endpointJS = `{"endpoint_id":"` + endpointID + `","endpoint_name":"win-1","endpoint_type":"AGENT_TYPE_WORKSTATION","endpoint_status":"CONNECTED",` +
 	`"os_type":"AGENT_OS_WINDOWS","ip":["10.0.0.5"],"last_seen":1795168999000,"is_isolated":"AGENT_UNISOLATED"}`
@@ -393,5 +393,29 @@ func TestResponseActionErrors(t *testing.T) {
 	isErr, text, _ := call("unisolate_endpoint", map[string]any{"endpoint_id": endpointID})
 	if !isErr || !strings.Contains(text, "HTTP 500") || len(m.calls) != 1 {
 		t.Errorf("500: isErr=%v calls %v %s", isErr, m.calls, text)
+	}
+}
+
+func TestAlertsHoldTheMitreFields(t *testing.T) {
+	_, call, _ := setup(t)
+	_, _, res := call("list_alerts", map[string]any{})
+	var out struct {
+		Alerts []map[string]any `json:"alerts"`
+	}
+	kittest.Structured(t, res, &out)
+	a := out.Alerts[0]
+	tactic, _ := a["mitre_tactic_id_and_name"].([]any)
+	technique, _ := a["mitre_technique_id_and_name"].([]any)
+	hostIP, _ := a["host_ip"].([]any)
+	if len(tactic) != 1 || tactic[0] != "TA0006 - Credential Access" || len(technique) != 1 || technique[0] != "T1003 - OS Credential Dumping" || len(hostIP) != 1 {
+		t.Errorf("alert = %v", a)
+	}
+	_, _, res = call("get_incident", map[string]any{"incident_id": "42"})
+	var inc struct {
+		Alerts []map[string]any `json:"alerts"`
+	}
+	kittest.Structured(t, res, &inc)
+	if len(inc.Alerts) != 1 || inc.Alerts[0]["mitre_tactic_id_and_name"] == nil {
+		t.Errorf("incident alerts = %v", inc.Alerts)
 	}
 }

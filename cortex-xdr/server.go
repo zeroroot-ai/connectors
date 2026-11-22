@@ -360,6 +360,12 @@ type alertSummary struct {
 	HostName           string `json:"host_name,omitempty"`
 	UserName           string `json:"user_name,omitempty"`
 	Description        string `json:"description,omitempty"`
+	// The page gives these as lists of text. get_alerts and
+	// get_incident_extra_data can differ in the shape of host_ip, so the tool
+	// returns each as it comes.
+	HostIP         any `json:"host_ip,omitempty"`
+	MitreTactic    any `json:"mitre_tactic_id_and_name,omitempty"`
+	MitreTechnique any `json:"mitre_technique_id_and_name,omitempty"`
 }
 
 type incidentOut struct {
