@@ -76,6 +76,28 @@ The servers have no second authentication scheme, by design. The README of each 
 | `qualys` | scanner | `get_host_detections` | gibson#1541 |
 | `puppet` | patch | `start_patch_job`, `start_rollback_job`, `get_job` | gibson#1544 |
 
+## Ticket contract
+
+The servers of class `ticket` (`servicenow`, `jira`) use the same tool names, the same argument names and the same result fields. The ticket mirror of the intake agent needs one adapter shape. The types are in `internal/ticket`. A server maps the contract to its vendor API. It adds a vendor tool only when the contract has no tool for the action.
+
+| Tool | Arguments | Result | Undo |
+|---|---|---|---|
+| `create_ticket` | `title`, `description`, optional `queue`, `priority`, `labels` | `ticket_id`, `number`, `url` | None. Close the ticket with `close_ticket`. |
+| `update_ticket` | `ticket_id`, and at least one of `title`, `description`, `priority` | `ticket_id`, `action`, `status` | Call it again with the old value. |
+| `add_comment` | `ticket_id`, `body` | `ticket_id`, `action`, `status` | None. The vendor keeps the comment. |
+| `close_ticket` | `ticket_id`, `resolution` | `ticket_id`, `action`, `status` | A person reopens the ticket. No tool does. |
+| `get_ticket` | `ticket_id` | `ticket_id`, `number`, `url`, `title`, `description`, `status`, `priority`, `closed`, `created_at`, `updated_at` | Not a change. |
+| `search_tickets` | optional `queue`, `status` (`open`, `closed`, `any`), `title_contains`, `label`, `created_after`, `limit` | `tickets` (the fields of `get_ticket`), `count` | Not a change. |
+
+- `ticket_id` is the value that the tools of the server take back. It is the key on Jira and the `sys_id` on ServiceNow. `number` is the identifier that a person reads.
+- `queue` is the project key on Jira and the `sys_id` of the assignment group on ServiceNow.
+- `priority` is `low`, `medium`, `high` or `critical`. The default is `medium`.
+- Each search filter is typed. A server builds its query from the filters and never passes free text on as query syntax. Text is quoted and escaped, or refused when it holds a character that the query language cannot escape.
+- `description` and `body` are plain text. The server converts it to the format of the vendor.
+- A server adds only tools that have no contract name. Jira adds `list_transitions` and `transition_ticket`.
+
+PagerDuty is class `paging` and has its own tools: `trigger_alert`, `acknowledge_alert`, `resolve_alert` and `get_incident`.
+
 ## Not built
 
 - Trellix (gibson#1542): the API reference of Trellix did not load from the workstation of the author, and no public source gave the request and response of an isolate call.
