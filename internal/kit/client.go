@@ -101,6 +101,9 @@ type Request struct {
 	Form url.Values
 	// Retry allows a retry of a method that is not idempotent by default.
 	Retry bool
+	// ResponseHeader, when not nil, receives the headers of a 2xx answer. A
+	// caller uses it to read a page link.
+	ResponseHeader *http.Header
 }
 
 // Path joins segments into a path. Each segment is escaped, so a segment
@@ -242,6 +245,9 @@ func (c *Client) once(ctx context.Context, r Request, body []byte, contentType s
 			snippet = snippet[:errorSnippet]
 		}
 		return nil, retryAfter(resp), &APIError{Status: resp.StatusCode, Body: strings.TrimSpace(snippet)}
+	}
+	if r.ResponseHeader != nil {
+		*r.ResponseHeader = resp.Header.Clone()
 	}
 	return data, 0, nil
 }
