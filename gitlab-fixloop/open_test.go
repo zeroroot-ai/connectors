@@ -12,7 +12,7 @@ import (
 
 // The mock follows the GitLab REST API v4:
 // https://docs.gitlab.com/api/repository_files/ (HEAD answers 200 or 404),
-// https://docs.gitlab.com/api/commits/#create-a-commit-with-multiple-files-and-actions
+// https://docs.gitlab.com/api/commits/
 // (201, and 400 "A branch called 'x' already exists." for a branch that exists) and
 // https://docs.gitlab.com/api/merge_requests/ (create answers 201).
 const srcBranch = "zeroroot/fix-sqli-1"

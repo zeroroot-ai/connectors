@@ -20,7 +20,7 @@ import (
 //     (HEAD answers 200 or 404):  https://docs.gitlab.com/api/repository_files/
 //   - create a commit with actions (create, update, delete) and start_branch,
 //     which makes the new branch from the target branch in the same call:
-//     https://docs.gitlab.com/api/commits/#create-a-commit-with-multiple-files-and-actions
+//     https://docs.gitlab.com/api/commits/
 //   - list and create merge requests: https://docs.gitlab.com/api/merge_requests/
 //
 // The token needs the scope api and the role Developer of the project.

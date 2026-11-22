@@ -98,7 +98,7 @@ The tool never writes to the target branch and never merges. It refuses a source
 
 The input has these limits: 100 files, 1 MiB for one file, 8 MiB for all files, a title of 256 bytes, a branch name of plain characters, and a path with no `..`, no empty folder name and no `.git` folder.
 
-References: https://docs.gitlab.com/api/repository_files/, https://docs.gitlab.com/api/commits/#create-a-commit-with-multiple-files-and-actions and https://docs.gitlab.com/api/merge_requests/.
+References: https://docs.gitlab.com/api/repository_files/, https://docs.gitlab.com/api/commits/ and https://docs.gitlab.com/api/merge_requests/.
 
 ## Deployment requirement
 
