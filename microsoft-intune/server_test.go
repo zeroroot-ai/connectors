@@ -78,7 +78,6 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m.auth = append(m.auth, r.Header.Get("Authorization"))
 	m.queries = append(m.queries, r.URL.Query())
 	base := "/beta/admin/windows/updates/"
-	const qualityType = "#microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry"
 	switch {
 	case strings.HasPrefix(r.URL.Path, base+"catalog/entries"):
 		m.serveEntries(w, r)
@@ -501,12 +500,12 @@ func (m *mock) serveCatalog(w http.ResponseWriter, r *http.Request) {
 func (m *mock) serveEntries(w http.ResponseWriter, r *http.Request) {
 	const base = "/beta/admin/windows/updates/"
 	const qualityType = "#microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry"
-	switch {
-	case r.URL.Path == base+"catalog/entries":
+	switch r.URL.Path {
+	case base + "catalog/entries":
 		m.serveCatalog(w, r)
-	case r.URL.Path == base+"catalog/entries/"+entryID:
+	case base + "catalog/entries/" + entryID:
 		_, _ = w.Write([]byte(`{"@odata.type":"` + qualityType + `","id":"` + entryID + `","isExpeditable":` + strconv.FormatBool(!m.notExpedite) + `}`))
-	case r.URL.Path == base+"catalog/entries/c1dec151-c151-c1de-51c1-dec151c1dec1":
+	case base + "catalog/entries/c1dec151-c151-c1de-51c1-dec151c1dec1":
 		_, _ = w.Write([]byte(`{"@odata.type":"#microsoft.graph.windowsUpdates.featureUpdateCatalogEntry","id":"c1dec151-c151-c1de-51c1-dec151c1dec1"}`))
 	default:
 		w.WriteHeader(http.StatusNotFound)
@@ -522,7 +521,7 @@ func TestStartQualityNeedsTheRestartInputs(t *testing.T) {
 		return map[string]any{"entra_device_id": devID, "catalog_entry_id": entryID, "kind": "quality"}
 	}
 	for name, mutate := range map[string]func(map[string]any){
-		"no inputs":          func(a map[string]any) {},
+		"no inputs":          func(map[string]any) {},
 		"no days":            func(a map[string]any) { a["restart_allowed"] = true },
 		"no restart_allowed": func(a map[string]any) { a["days_until_forced_reboot"] = 2 },
 		"days too high":      func(a map[string]any) { a["restart_allowed"], a["days_until_forced_reboot"] = true, 8 },
