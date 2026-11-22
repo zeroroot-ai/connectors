@@ -1,6 +1,6 @@
 # okta
 
-MCP server for Okta. It reads system log events, users and sessions. It also runs response actions on users. The vendor server of Okta only reads (ADR-0180). It serves streamable HTTP on `:8080` at `/mcp` and answers `/healthz`.
+MCP server for Okta. It reads system log events and users. It also runs response actions on users. The vendor server of Okta only reads (ADR-0180). It serves streamable HTTP on `:8080` at `/mcp` and answers `/healthz`.
 
 ## Environment
 
@@ -20,14 +20,13 @@ Reference: https://developer.okta.com/docs/api/openapi/okta-management/managemen
 | `list_log_events` | `GET /api/v1/logs` | Not a change. | `readOnlyHint: true` |
 | `list_users` | `GET /api/v1/users` | Not a change. | `readOnlyHint: true` |
 | `get_user` | `GET /api/v1/users/{userId}` | Not a change. | `readOnlyHint: true` |
-| `get_session` | `GET /api/v1/sessions/{sessionId}` | Not a change. | `readOnlyHint: true` |
 | `revoke_user_sessions` | `DELETE /api/v1/users/{userId}/sessions` | None. The user signs in again. | `destructiveHint: true`, `idempotentHint: true` |
 | `suspend_user` | `POST /api/v1/users/{id}/lifecycle/suspend` | `unsuspend_user` | `destructiveHint: false`, `idempotentHint: true` |
 | `unsuspend_user` | `POST /api/v1/users/{id}/lifecycle/unsuspend` | `suspend_user` | `destructiveHint: false`, `idempotentHint: true` |
 
-The read tools return one page and never follow a page link. `list_log_events` returns at most 200 events. `list_users` returns at most 50 users. Each tool returns only the fields that a defender needs.
+The read tools return one page and never follow a page link. `list_log_events` returns at most 200 events, newest first unless `sort_order` is `ASCENDING`. When Okta has more events for the query, the result has `truncated: true` and an `after` cursor. The tool takes the cursor from the `Link` header with `rel="next"`. A caller gives it as `after` to read the next page. The log `q` input has at most 10 keywords of 40 characters each. `list_users` returns at most 50 users. Each tool returns only the fields that a defender needs.
 
-Okta has no call that lists the sessions of one user. `get_session` reads one session by its id. The id is in `authenticationContext.externalSessionId` of a sign-in log event.
+There is no tool that reads a session. Okta has no call that lists the sessions of one user. `GET /api/v1/sessions/{sessionId}` does not work with the sessions of Okta Identity Engine, and no source shows that `authenticationContext.externalSessionId` of a log event is a valid id for it. A 404 would make the agent decide wrongly that the session does not exist. To end the sessions of a user, use `revoke_user_sessions`.
 
 A response tool accepts a user id only: 20 letters and digits. It does not accept a login or an e-mail address. Okta refuses a second `suspend_user` on a suspended user with HTTP 400. The tool shows the Okta error, and the user stays as it was.
 
@@ -44,7 +43,7 @@ The server has no second authentication scheme, by design. The proxy and the Net
 
 ## Vendor permission
 
-Okta lists two forms of authorization for these operations: an API token (`apiToken`) or an OAuth 2.0 token. The scopes are `okta.users.manage` for the response tools, `okta.logs.read` for `list_log_events`, `okta.users.read` for `list_users` and `get_user`, and `okta.sessions.read` for `get_session`.
+Okta lists two forms of authorization for these operations: an API token (`apiToken`) or an OAuth 2.0 token. The scopes are `okta.users.manage` for the response tools, `okta.logs.read` for `list_log_events`, `okta.users.read` for `list_users` and `get_user`.
 
 This server uses an API token. Make the token as follows.
 

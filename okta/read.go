@@ -6,9 +6,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -19,23 +20,20 @@ import (
 // https://github.com/okta/okta-management-openapi-spec, file
 // dist/current/management-minimal.yaml, and the reference at
 // https://developer.okta.com/docs/api/openapi/okta-management/management/tag/SystemLog/,
-// .../tag/User/ and .../tag/Session/):
+// .../tag/User/):
 //   - GET /api/v1/logs                (listLogEvents, scope okta.logs.read)
 //   - GET /api/v1/users               (listUsers, scope okta.users.read)
 //   - GET /api/v1/users/{userId}      (getUser, scope okta.users.read)
-//   - GET /api/v1/sessions/{sessionId} (getSession, scope okta.sessions.read)
-// Okta has no call that lists the sessions of one user. A log event of a
-// sign-in holds the session id in authenticationContext.externalSessionId.
-
-// sessionIDFormat is the format of an Okta session id. Okta documents it as a
-// string with no fixed length, so the pattern limits the characters only.
-var sessionIDFormat = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+// There is no session read tool. See the README.
 
 const (
-	defaultLimit = 50
-	maxLogLimit  = 200
-	maxUserLimit = 50
-	maxExpr      = 400 // bytes of a filter, search or keyword input
+	defaultLimit  = 50
+	maxLogLimit   = 200
+	maxUserLimit  = 50
+	maxExpr       = 400 // bytes of a filter, search or keyword input
+	maxCursor     = 512 // bytes of a page cursor
+	maxKeywords   = 10  // keywords of the q parameter of the log
+	maxKeywordLen = 40  // characters of one keyword
 )
 
 func (v *service) registerRead(s *mcp.Server, log *slog.Logger) {
@@ -44,8 +42,9 @@ func (v *service) registerRead(s *mcp.Server, log *slog.Logger) {
 		Description: "Read system log events of the Okta org. Read only. All inputs are optional. " +
 			"since and until are RFC 3339 times, for example 2026-11-20T10:00:00Z. " +
 			"filter is an Okta SCIM filter, for example eventType eq \"user.session.start\". " +
-			"q is a list of up to 10 keywords. Okta returns one page of at most limit events, " +
-			"oldest first unless sort_order is DESCENDING.",
+			"q is a list of up to 10 keywords of at most 40 characters each. Okta returns one page of at most limit events, " +
+			"newest first unless sort_order is ASCENDING. When more events exist, the result has truncated true and " +
+			"an after cursor. Give that cursor as after to read the next page.",
 		Annotations: kit.ReadOnly("List Okta system log events"),
 	}, v.listLogEvents)
 	kit.AddTool(s, log, &mcp.Tool{
@@ -61,13 +60,6 @@ func (v *service) registerRead(s *mcp.Server, log *slog.Logger) {
 			"To act on the user, use suspend_user or revoke_user_sessions.",
 		Annotations: kit.ReadOnly("Get Okta user"),
 	}, v.getUser)
-	kit.AddTool(s, log, &mcp.Tool{
-		Name: "get_session",
-		Description: "Read one Okta session by its id: user id, login, status, creation and expiry time. " +
-			"Read only. Okta has no call that lists the sessions of a user. Get the session id from " +
-			"authenticationContext.externalSessionId of a log event.",
-		Annotations: kit.ReadOnly("Get Okta session"),
-	}, v.getSession)
 }
 
 type logInput struct {
@@ -76,7 +68,8 @@ type logInput struct {
 	Filter    string `json:"filter,omitempty" jsonschema:"Okta SCIM filter expression, at most 400 bytes"`
 	Q         string `json:"q,omitempty" jsonschema:"keywords, separated by a space. At most 10 keywords of 40 characters."`
 	Limit     int    `json:"limit,omitempty" jsonschema:"number of events, 1 to 200. The default is 50."`
-	SortOrder string `json:"sort_order,omitempty" jsonschema:"ASCENDING or DESCENDING by event time. The default is ASCENDING."`
+	SortOrder string `json:"sort_order,omitempty" jsonschema:"ASCENDING or DESCENDING by event time. The default is DESCENDING, newest first."`
+	After     string `json:"after,omitempty" jsonschema:"the after value of the previous result, to read the next page"`
 }
 
 // logActor is the actor or a target of a log event.
@@ -117,6 +110,10 @@ type logEvent struct {
 type logOutput struct {
 	Events []logEvent `json:"events"`
 	Count  int        `json:"count"`
+	// Truncated is true when Okta has more events for the same query. After
+	// is the cursor of the next page.
+	Truncated bool   `json:"truncated"`
+	After     string `json:"after,omitempty"`
 }
 
 func (v *service) listLogEvents(ctx context.Context, _ *mcp.CallToolRequest, in logInput) (*mcp.CallToolResult, logOutput, error) {
@@ -134,14 +131,23 @@ func (v *service) listLogEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 		}
 		q.Set(t.key, t.val)
 	}
-	for _, t := range []struct{ field, key, val string }{{"filter", "filter", in.Filter}, {"q", "q", in.Q}} {
-		if t.val == "" {
-			continue
-		}
-		if err := kit.CheckString(t.field, t.val, maxExpr, nil); err != nil {
+	if in.Filter != "" {
+		if err := kit.CheckString("filter", in.Filter, maxExpr, nil); err != nil {
 			return nil, out, err
 		}
-		q.Set(t.key, t.val)
+		q.Set("filter", in.Filter)
+	}
+	if in.Q != "" {
+		if err := checkKeywords(in.Q); err != nil {
+			return nil, out, err
+		}
+		q.Set("q", in.Q)
+	}
+	if in.After != "" {
+		if err := kit.CheckString("after", in.After, maxCursor, nil); err != nil {
+			return nil, out, err
+		}
+		q.Set("after", in.After)
 	}
 	limit, err := limitOf(in.Limit, maxLogLimit)
 	if err != nil {
@@ -150,16 +156,60 @@ func (v *service) listLogEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	q.Set("limit", strconv.Itoa(limit))
 	switch in.SortOrder {
 	case "":
+		q.Set("sortOrder", "DESCENDING")
 	case "ASCENDING", "DESCENDING":
 		q.Set("sortOrder", in.SortOrder)
 	default:
 		return nil, out, fmt.Errorf("%w: sort_order must be ASCENDING or DESCENDING", kit.ErrInvalidInput)
 	}
-	if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: kit.Path("api", "v1", "logs"), Query: q}, &out.Events); err != nil {
+	var hdr http.Header
+	err = v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: kit.Path("api", "v1", "logs"), Query: q, ResponseHeader: &hdr}, &out.Events)
+	if err != nil {
 		return nil, out, fmt.Errorf("list log events: %w", err)
 	}
 	out.Count = len(out.Events)
+	out.After = nextCursor(hdr)
+	out.Truncated = out.After != ""
 	return nil, out, nil
+}
+
+// checkKeywords enforces the limits of the Okta q parameter: at most 10
+// keywords, each at most 40 characters.
+func checkKeywords(q string) error {
+	if err := kit.CheckString("q", q, maxExpr, nil); err != nil {
+		return fmt.Errorf("check q: %w", err)
+	}
+	words := strings.Fields(q)
+	if len(words) > maxKeywords {
+		return fmt.Errorf("%w: q has more than %d keywords", kit.ErrInvalidInput, maxKeywords)
+	}
+	for _, w := range words {
+		if utf8.RuneCountInString(w) > maxKeywordLen {
+			return fmt.Errorf("%w: a keyword of q is longer than %d characters", kit.ErrInvalidInput, maxKeywordLen)
+		}
+	}
+	return nil
+}
+
+// nextCursor returns the after value of the Link header with rel="next", or
+// an empty string. Okta sends the self link and the next link in two Link
+// headers. The tool never follows the link. It takes the cursor only, so the
+// credential goes to the fixed base URL.
+func nextCursor(h http.Header) string {
+	for _, value := range h.Values("Link") {
+		for _, part := range strings.Split(value, ",") {
+			target, params, ok := strings.Cut(strings.TrimSpace(part), ">;")
+			if !ok || !strings.HasPrefix(target, "<") || !strings.Contains(strings.ReplaceAll(params, " ", ""), `rel="next"`) {
+				continue
+			}
+			u, err := url.Parse(target[1:])
+			if err != nil {
+				continue
+			}
+			return u.Query().Get("after")
+		}
+	}
+	return ""
 }
 
 func limitOf(n, maxN int) (int, error) {
@@ -237,33 +287,6 @@ func (v *service) getUser(ctx context.Context, _ *mcp.CallToolRequest, in userIn
 	}
 	if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: kit.Path("api", "v1", "users", in.UserID)}, &out); err != nil {
 		return nil, out, fmt.Errorf("get user: %w", err)
-	}
-	return nil, out, nil
-}
-
-type sessionInput struct {
-	SessionID string `json:"session_id" jsonschema:"Okta session id, from authenticationContext.externalSessionId of a log event"`
-}
-
-type sessionInfo struct {
-	ID                       string   `json:"id"`
-	UserID                   string   `json:"userId"`
-	Login                    string   `json:"login,omitempty"`
-	Status                   string   `json:"status"`
-	CreatedAt                string   `json:"createdAt,omitempty"`
-	ExpiresAt                string   `json:"expiresAt,omitempty"`
-	LastPasswordVerification string   `json:"lastPasswordVerification,omitempty"`
-	LastFactorVerification   string   `json:"lastFactorVerification,omitempty"`
-	Amr                      []string `json:"amr,omitempty"`
-}
-
-func (v *service) getSession(ctx context.Context, _ *mcp.CallToolRequest, in sessionInput) (*mcp.CallToolResult, sessionInfo, error) {
-	var out sessionInfo
-	if err := kit.CheckString("session_id", in.SessionID, 64, sessionIDFormat); err != nil {
-		return nil, out, err
-	}
-	if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: kit.Path("api", "v1", "sessions", in.SessionID)}, &out); err != nil {
-		return nil, out, fmt.Errorf("get session: %w", err)
 	}
 	return nil, out, nil
 }

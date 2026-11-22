@@ -243,3 +243,20 @@ func TestHandlerHealth(t *testing.T) {
 		t.Errorf("health = %d %s", rr.Code, rr.Body)
 	}
 }
+
+func TestClientReturnsResponseHeader(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Add("Link", "<https://x/a?after=1>; rel=\"self\"")
+		w.Header().Add("Link", "<https://x/a?after=2>; rel=\"next\"")
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer ts.Close()
+	u, _ := ParseBaseURL(ts.URL)
+	var h http.Header
+	if err := NewClient(u, ClientOptions{}).Do(context.Background(), Request{Method: http.MethodGet, Path: "/a", ResponseHeader: &h}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.Values("Link"); len(got) != 2 {
+		t.Errorf("Link = %v", got)
+	}
+}

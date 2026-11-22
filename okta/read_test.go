@@ -18,12 +18,12 @@ import (
 // GET /api/v1/logs answers a JSON array of LogEvent,
 // GET /api/v1/users answers a JSON array of User,
 // GET /api/v1/users/{userId} answers one User,
-// GET /api/v1/sessions/{sessionId} answers one Session.
 // An unknown id gets 404 with the error code E0000007.
 type readMock struct {
 	methods []string
 	queries []string
 	auth    string
+	link    []string // Link headers of the log answer
 }
 
 const (
@@ -38,8 +38,6 @@ const (
 	userJS = `{"id":"00ub0oNGTSWTBKOLGLNR","status":"ACTIVE","created":"2026-01-01T00:00:00.000Z",` +
 		`"lastLogin":"2026-11-20T10:00:00.000Z","passwordChanged":"2026-02-01T00:00:00.000Z",` +
 		`"credentials":{"password":{}},"profile":{"login":"a@example.com","email":"a@example.com","firstName":"A","lastName":"B","mobilePhone":"555"},"_links":{}}`
-	sessJS = `{"id":"` + sessID + `","userId":"00ub0oNGTSWTBKOLGLNR","login":"a@example.com","status":"ACTIVE",` +
-		`"createdAt":"2026-11-20T10:00:00.000Z","expiresAt":"2026-11-20T12:00:00.000Z","amr":["pwd"],"_links":{}}`
 )
 
 func (m *readMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -49,13 +47,14 @@ func (m *readMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch r.URL.Path {
 	case "/api/v1/logs":
+		for _, l := range m.link {
+			w.Header().Add("Link", l)
+		}
 		_, _ = w.Write([]byte(logsJS))
 	case "/api/v1/users":
 		_, _ = w.Write([]byte("[" + userJS + "]"))
 	case "/api/v1/users/00ub0oNGTSWTBKOLGLNR":
 		_, _ = w.Write([]byte(userJS))
-	case "/api/v1/sessions/" + sessID:
-		_, _ = w.Write([]byte(sessJS))
 	default:
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"errorCode":"E0000007","errorSummary":"Not found: Resource not found","errorId":"e1"}`))
@@ -83,7 +82,8 @@ func readSetup(t *testing.T) (srv *readMock, call func(string, map[string]any) (
 func TestListLogEvents(t *testing.T) {
 	m, call, _ := readSetup(t)
 	isErr, text, res := call("list_log_events", map[string]any{
-		"since": "2026-11-20T00:00:00Z", "filter": `eventType eq "user.session.start"`, "limit": 10, "sort_order": "DESCENDING",
+		"since": "2026-11-20T00:00:00Z", "until": "2026-11-21T00:00:00Z", "q": "alice bob",
+		"filter": `eventType eq "user.session.start"`, "limit": 10, "sort_order": "ASCENDING",
 	})
 	if isErr {
 		t.Fatal(text)
@@ -94,7 +94,8 @@ func TestListLogEvents(t *testing.T) {
 		out.Events[0].AuthenticationContext.ExternalSessionID != sessID || out.Events[0].Client.IPAddress != "203.0.113.5" {
 		t.Errorf("out = %+v", out)
 	}
-	for _, want := range []string{"limit=10", "sortOrder=DESCENDING", "since=2026-11-20T00%3A00%3A00Z", "filter=eventType+eq"} {
+	for _, want := range []string{"limit=10", "sortOrder=ASCENDING", "since=2026-11-20T00%3A00%3A00Z",
+		"until=2026-11-21T00%3A00%3A00Z", "q=alice+bob", "filter=eventType+eq"} {
 		if !strings.Contains(m.queries[0], want) {
 			t.Errorf("query %q lacks %q", m.queries[0], want)
 		}
@@ -102,9 +103,74 @@ func TestListLogEvents(t *testing.T) {
 	if m.auth != "SSWS tok" {
 		t.Errorf("auth = %q", m.auth)
 	}
-	call("list_log_events", map[string]any{})
-	if !strings.Contains(m.queries[1], "limit=50") {
-		t.Errorf("default limit missing: %s", m.queries[1])
+	if isErr, text, _ := call("list_log_events", map[string]any{}); isErr {
+		t.Fatal(text)
+	}
+	// The defaults: 50 events, newest first.
+	if !strings.Contains(m.queries[1], "limit=50") || !strings.Contains(m.queries[1], "sortOrder=DESCENDING") {
+		t.Errorf("defaults missing: %s", m.queries[1])
+	}
+}
+
+// Okta sends the self link and the next link in two Link headers. The tool
+// reads the after cursor of the next link and never follows the link.
+func TestListLogEventsPaging(t *testing.T) {
+	m, call, _ := readSetup(t)
+	m.link = []string{
+		`<https://evil.example/api/v1/logs?limit=50>; rel="self"`,
+		`<https://evil.example/api/v1/logs?after=abc123%3A0&limit=50>; rel="next"`,
+	}
+	isErr, text, res := call("list_log_events", map[string]any{})
+	if isErr {
+		t.Fatal(text)
+	}
+	var out logOutput
+	kittest.Structured(t, res, &out)
+	if !out.Truncated || out.After != "abc123:0" {
+		t.Errorf("out = truncated %v after %q", out.Truncated, out.After)
+	}
+	if isErr, text, _ := call("list_log_events", map[string]any{"after": out.After}); isErr {
+		t.Fatal(text)
+	}
+	if !strings.Contains(m.queries[1], "after=abc123%3A0") {
+		t.Errorf("the cursor did not reach Okta: %s", m.queries[1])
+	}
+	// With no next link, the answer is complete.
+	m.link = []string{`<https://org/api/v1/logs?limit=50>; rel="self"`}
+	_, _, res = call("list_log_events", map[string]any{})
+	var done logOutput
+	kittest.Structured(t, res, &done)
+	if done.Truncated || done.After != "" {
+		t.Errorf("a complete answer is marked truncated: %+v", done)
+	}
+	for _, c := range m.queries {
+		if strings.Contains(c, "evil.example") {
+			t.Errorf("the tool used the host of a link: %s", c)
+		}
+	}
+}
+
+func TestListLogEventsKeywordLimits(t *testing.T) {
+	m, call, _ := readSetup(t)
+	ok := strings.TrimSpace(strings.Repeat("k ", 10))
+	if isErr, text, _ := call("list_log_events", map[string]any{"q": ok}); isErr {
+		t.Errorf("10 keywords refused: %s", text)
+	}
+	n := len(m.queries)
+	for name, q := range map[string]string{
+		"11 keywords":  ok + " k",
+		"long keyword": strings.Repeat("a", 41),
+		"control char": "a\tb",
+	} {
+		if isErr, _, _ := call("list_log_events", map[string]any{"q": q}); !isErr {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	if isErr, _, _ := call("list_log_events", map[string]any{"q": strings.Repeat("a", 40)}); isErr {
+		t.Error("a keyword of 40 characters refused")
+	}
+	if len(m.queries) != n+1 {
+		t.Errorf("a bad keyword reached Okta: %v", m.queries)
 	}
 }
 
@@ -112,7 +178,7 @@ func TestListLogEventsRefusesBadInput(t *testing.T) {
 	m, call, _ := readSetup(t)
 	for _, in := range []map[string]any{
 		{"since": "yesterday"}, {"until": "2026-11-20"}, {"limit": 201}, {"limit": -1},
-		{"sort_order": "UP"}, {"filter": strings.Repeat("a", 401)}, {"q": "a\nb"},
+		{"sort_order": "UP"}, {"after": "a\nb"}, {"filter": strings.Repeat("a", 401)}, {"q": "a\nb"},
 	} {
 		if isErr, _, _ := call("list_log_events", in); !isErr {
 			t.Errorf("accepted %v", in)
@@ -125,7 +191,7 @@ func TestListLogEventsRefusesBadInput(t *testing.T) {
 
 func TestListUsersAndGetUser(t *testing.T) {
 	m, call, _ := readSetup(t)
-	isErr, text, res := call("list_users", map[string]any{"search": `profile.login eq "a@example.com"`})
+	isErr, text, res := call("list_users", map[string]any{"search": `profile.login eq "a@example.com"`, "q": "ali"})
 	if isErr {
 		t.Fatal(text)
 	}
@@ -137,7 +203,8 @@ func TestListUsersAndGetUser(t *testing.T) {
 	if strings.Contains(text, "mobilePhone") || strings.Contains(text, "555") {
 		t.Errorf("the output holds a profile field that the tool does not need: %s", text)
 	}
-	if !strings.Contains(m.queries[0], "search=profile.login") || !strings.Contains(m.queries[0], "limit=50") {
+	if !strings.Contains(m.queries[0], "search=profile.login") || !strings.Contains(m.queries[0], "limit=50") ||
+		!strings.Contains(m.queries[0], "q=ali") {
 		t.Errorf("query = %s", m.queries[0])
 	}
 	var u userInfo
@@ -168,27 +235,6 @@ func TestListUsersRefusesBadInput(t *testing.T) {
 	}
 }
 
-func TestGetSession(t *testing.T) {
-	m, call, _ := readSetup(t)
-	_, text, res := call("get_session", map[string]any{"session_id": sessID})
-	var s sessionInfo
-	kittest.Structured(t, res, &s)
-	if s.UserID != uid || s.Status != "ACTIVE" || s.ExpiresAt == "" {
-		t.Errorf("session = %+v %s", s, text)
-	}
-	if m.queries[0] != "/api/v1/sessions/"+sessID {
-		t.Errorf("query = %s", m.queries[0])
-	}
-	for _, bad := range []string{"", "a/b", "a?b", "..", strings.Repeat("a", 65), "a b"} {
-		if isErr, _, _ := call("get_session", map[string]any{"session_id": bad}); !isErr {
-			t.Errorf("accepted %q", bad)
-		}
-	}
-	if len(m.queries) != 1 {
-		t.Errorf("a bad input reached Okta: %v", m.queries)
-	}
-}
-
 // TestReadToolsOnlyRead makes sure each read tool is marked read only and
 // sends only GET.
 func TestReadToolsOnlyRead(t *testing.T) {
@@ -197,7 +243,6 @@ func TestReadToolsOnlyRead(t *testing.T) {
 		"list_log_events": {},
 		"list_users":      {"q": "a"},
 		"get_user":        {"user_id": uid},
-		"get_session":     {"session_id": sessID},
 	}
 	for name, args := range reads {
 		tl := tools[name]

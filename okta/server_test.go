@@ -158,7 +158,7 @@ func TestInputValidation(t *testing.T) {
 
 func TestAnnotations(t *testing.T) {
 	_, _, tools := setup(t)
-	if len(tools) != 7 {
+	if len(tools) != 6 {
 		t.Fatalf("tools = %d", len(tools))
 	}
 	kittest.AssertIrreversible(t, tools, "revoke_user_sessions")
