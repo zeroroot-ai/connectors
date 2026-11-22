@@ -78,11 +78,7 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	case r.Method == http.MethodPost && r.URL.Path == "/rest/api/3/search/jql":
-		if jql, _ := body["jql"].(string); strings.Contains(jql, "zeroroot-dedup-") && m.dedup == "" {
-			_, _ = w.Write([]byte(`{"issues":[],"isLast":true}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"issues":[` + issueJSON + `],"isLast":true}`))
+		m.serveSearch(w, body)
 	default:
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"errorMessages":["Issue does not exist or you do not have permission to see it."],"errors":{}}`))
@@ -525,4 +521,14 @@ func TestCreateIsNotRepeated(t *testing.T) {
 	if posts != 1 {
 		t.Errorf("the create call was sent %d times: %v", posts, m.calls)
 	}
+}
+
+// serveSearch answers the JQL search. A search for the dedup label finds an
+// issue only when the test set one.
+func (m *mock) serveSearch(w http.ResponseWriter, body map[string]any) {
+	if jql, _ := body["jql"].(string); strings.Contains(jql, "zeroroot-dedup-") && m.dedup == "" {
+		_, _ = w.Write([]byte(`{"issues":[],"isLast":true}`))
+		return
+	}
+	_, _ = w.Write([]byte(`{"issues":[` + issueJSON + `],"isLast":true}`))
 }
