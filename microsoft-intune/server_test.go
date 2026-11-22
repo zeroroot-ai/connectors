@@ -44,7 +44,12 @@ var requestedRe = regexp.MustCompile(`"requestedValue":"[a-z]+"`)
 
 func fixture(t *testing.T, name string) string {
 	t.Helper()
-	b, err := os.ReadFile("testdata/" + name)
+	root, err := os.OpenRoot("testdata")
+	if err != nil {
+		t.Fatalf("open testdata: %v", err)
+	}
+	defer func() { _ = root.Close() }()
+	b, err := root.ReadFile(name)
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}

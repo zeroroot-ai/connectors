@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -225,7 +226,7 @@ func (v *service) listCatalog(ctx context.Context, _ *mcp.CallToolRequest, in ca
 	// The reference documents $orderby and $top. The tool reads the newest
 	// page and keeps the entries of the kind that the caller asked for.
 	q.Set("$orderby", "releaseDateTime desc")
-	q.Set("$top", fmt.Sprint(catalogPage))
+	q.Set("$top", strconv.Itoa(catalogPage))
 	var resp struct {
 		Value []struct {
 			OdataType string `json:"@odata.type"`
