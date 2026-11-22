@@ -19,7 +19,7 @@ The server guards against a change in three ways.
 | `INTUNE_TENANT_ID` | Required. The Microsoft Entra tenant id. One server serves one tenant. |
 | `INTUNE_CLIENT_ID` | Required. Application id of the app registration. |
 | `INTUNE_CLIENT_SECRET` | Required. Client secret of the app registration. |
-| `INTUNE_GRAPH_URL` | Optional. The default is `https://graph.microsoft.com`. |
+| `INTUNE_GRAPH_URL` | Optional. The default is `https://graph.microsoft.com`. It must have no path. The server adds `/beta`. A URL with a version path, such as `/v1.0`, is refused. |
 | `INTUNE_AUTHORITY_URL` | Optional. The default is `https://login.microsoftonline.com`. |
 | `INTUNE_TIMEOUT` | Optional. Time limit of one vendor call. The default is `20s`. |
 | `LISTEN_ADDR` | Optional. The default is `:8080`. |
@@ -32,20 +32,24 @@ Reference: https://learn.microsoft.com/en-us/graph/api/resources/windowsupdates-
 
 | Tool | Vendor call | Undo | Annotations |
 |---|---|---|---|
-| `list_catalog_entries` | `GET /admin/windows/updates/catalog/entries` | Not a change. | `readOnlyHint: true` |
+| `list_catalog_entries` | `GET /admin/windows/updates/catalog/entries` with `$filter=isof(...)`, `$orderby` and `$top` | Not a change. | `readOnlyHint: true` |
 | `start_patch_deployment` | `POST /admin/windows/updates/deployments`, then `POST .../deployments/{id}/audience/updateAudienceById` | None. | `destructiveHint: true`, `idempotentHint: false` |
 | `get_patch_deployment` | `GET .../deployments/{id}`, `GET .../deployments/{id}/audience`, `GET .../deploymentAudiences/{audienceId}/members` | Not a change. | `readOnlyHint: true` |
-| `rollback_patch_deployment` | `PATCH .../deployments/{id}` with `state.requestedValue` `paused` | `resume_patch_deployment` | `destructiveHint: false`, `idempotentHint: true` |
-| `resume_patch_deployment` | `PATCH .../deployments/{id}` with `state.requestedValue` `none` | `rollback_patch_deployment` | `destructiveHint: false`, `idempotentHint: true` |
+| `pause_patch_deployment` | `PATCH .../deployments/{id}` with `state.requestedValue` `paused` | `resume_patch_deployment` | `destructiveHint: false`, `idempotentHint: true` |
+| `resume_patch_deployment` | `PATCH .../deployments/{id}` with `state.requestedValue` `none` | `pause_patch_deployment` | `destructiveHint: false`, `idempotentHint: true` |
 | `remove_patch_deployment` | `DELETE .../deployments/{id}` | None. | `destructiveHint: true`, `idempotentHint: true` |
 
 One device for each deployment. `start_patch_deployment` creates a deployment, then adds one device to its audience. An empty audience gets no offer. When the second call fails, the tool deletes the deployment. Each tool that changes or reads a deployment first checks that its audience holds exactly one device. It refuses any other deployment, so the tools never act on a group.
 
-`start_patch_deployment` is marked as an action with no undo, the same mark as a session revoke. The reason is that the rollback only stops the offer of the update. It does not uninstall an update that the device already installed, and Graph has no call that uninstalls an update. The owner decided on 2026-11-21 that an update install destroys no data, so it does not wait for approval (ADR-0180). The mark tells the caller that the install stays. `rollback_patch_deployment` and `resume_patch_deployment` stay reversible, because they only pause and resume the offer.
+`start_patch_deployment` is marked as an action with no undo, the same mark as a session revoke. The reason is that the pause only stops the offer of the update. It does not uninstall an update that the device already installed, and Graph has no call that uninstalls an update. The owner decided on 2026-11-21 that an update install destroys no data, so it does not wait for approval (ADR-0180). The mark tells the caller that the install stays. `pause_patch_deployment` and `resume_patch_deployment` stay reversible, because they only pause and resume the offer.
 
 A deployment that Intune created can fail on the audience calls. Microsoft lists this as a known issue. The tools then refuse the deployment.
 
-The list of catalog entries reads the newest 100 entries and keeps the entries of the kind that the caller asked for. The reference documents `$orderby` and `$top` for this call. It does not document a filter by type. The GET answer of the reference shows the deployment inside a `value` field. The server reads the deployment as the top-level object, as Graph does for a single entity.
+`list_catalog_entries` filters on the server with `$filter=isof('microsoft.graph.windowsUpdates.<kind>UpdateCatalogEntry')`, which the Microsoft page https://learn.microsoft.com/en-us/graph/windowsupdates-deploy-expedited-update shows for this call. It sends `$top` with the limit. When Graph answers with an `@odata.nextLink`, the tool follows it for at most 5 pages. It never uses the link as a URL. It takes the paging parameter (`$skiptoken` or `$skip`) and sends it to the fixed base URL. The result has `has_more`, which is true when more entries exist than the limit. The tool drops an entry of another type as a second defence.
+
+A quality update is deployed as an expedited update. The Microsoft page "Deploy an expedited quality update using Windows Autopatch" shows a quality deployment with `settings.expedite` (`isExpedited: true`, `isReadinessTest: false`) and shows no quality deployment without it. So `start_patch_deployment` with `kind: quality` sends that setting. An expedited update installs as fast as possible and overrides the restart settings of the device policy. Before it creates anything, the tool reads the catalog entry and refuses an entry whose type is not the kind, and a quality entry with `isExpeditable` false. A feature update has no settings.
+
+Each deployment tool that changes or reads a deployment first reads the audience, and then changes the deployment. Another person or tool can change the audience between the two calls. The check is a read followed by a change, not a lock. The member must be of the type `#microsoft.graph.windowsUpdates.azureADDevice`. A member of the type `updatableAssetGroup`, or an answer with no type, is refused, because a group counts as one member and can hold many devices. The shape check also needs `@odata.type` in the answer of a deployment, which the examples of the reference show. When Graph leaves it out, the tool stops with the shape error, which is the safe side.
 
 The server did not run against a Microsoft tenant. The tests use a mock that follows the reference.
 

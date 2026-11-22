@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"reflect"
 	"regexp"
@@ -38,6 +40,9 @@ type mock struct {
 	members      string // body of the members answer
 	failAudience bool
 	deleted      bool
+	queries      []url.Values
+	notExpedite  bool // the quality entry has isExpeditable false
+	nextPage     bool // the catalog has a second page of quality entries
 }
 
 var requestedRe = regexp.MustCompile(`"requestedValue":"[a-z]+"`)
@@ -71,12 +76,31 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m.calls = append(m.calls, r.Method+" "+r.URL.Path)
 	m.bodies = append(m.bodies, string(b))
 	m.auth = append(m.auth, r.Header.Get("Authorization"))
+	m.queries = append(m.queries, r.URL.Query())
 	base := "/beta/admin/windows/updates/"
+	const qualityType = "#microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry"
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == base+"catalog/entries":
-		_, _ = w.Write([]byte(`{"value":[` +
-			`{"@odata.type":"#microsoft.graph.windowsUpdates.featureUpdateCatalogEntry","id":"c1dec151-c151-c1de-51c1-dec151c1dec1","displayName":"Win 11","version":"24H2"},` +
-			`{"@odata.type":"#microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry","id":"` + entryID + `","displayName":"2026.11 B","catalogName":"cu","qualityUpdateClassification":"security"}]}`))
+		// The server filters by type, as Graph does with $filter=isof(...).
+		filter := r.URL.Query().Get("$filter")
+		quality := `{"@odata.type":"` + qualityType + `","id":"` + entryID + `","displayName":"2026.11 B","catalogName":"cu","qualityUpdateClassification":"security"}`
+		feature := `{"@odata.type":"#microsoft.graph.windowsUpdates.featureUpdateCatalogEntry","id":"c1dec151-c151-c1de-51c1-dec151c1dec1","displayName":"Win 11","version":"24H2"}`
+		switch {
+		case strings.Contains(filter, "qualityUpdateCatalogEntry") && r.URL.Query().Get("$skiptoken") == "tok2":
+			_, _ = w.Write([]byte(`{"value":[` + strings.Replace(quality, entryID, "0c1d2e3f-0000-4000-8000-0000000000aa", 1) + `]}`))
+		case strings.Contains(filter, "qualityUpdateCatalogEntry") && m.nextPage:
+			_, _ = w.Write([]byte(`{"value":[` + quality + `],"@odata.nextLink":"https://graph.microsoft.com/beta/admin/windows/updates/catalog/entries?$skiptoken=tok2&$top=1"}`))
+		case strings.Contains(filter, "qualityUpdateCatalogEntry"):
+			_, _ = w.Write([]byte(`{"value":[` + quality + `]}`))
+		case strings.Contains(filter, "featureUpdateCatalogEntry"):
+			_, _ = w.Write([]byte(`{"value":[` + feature + `]}`))
+		default:
+			_, _ = w.Write([]byte(`{"value":[` + feature + `,` + quality + `]}`))
+		}
+	case r.Method == http.MethodGet && r.URL.Path == base+"catalog/entries/"+entryID:
+		_, _ = w.Write([]byte(`{"@odata.type":"` + qualityType + `","id":"` + entryID + `","isExpeditable":` + fmt.Sprint(!m.notExpedite) + `}`))
+	case r.Method == http.MethodGet && r.URL.Path == base+"catalog/entries/c1dec151-c151-c1de-51c1-dec151c1dec1":
+		_, _ = w.Write([]byte(`{"@odata.type":"#microsoft.graph.windowsUpdates.featureUpdateCatalogEntry","id":"c1dec151-c151-c1de-51c1-dec151c1dec1"}`))
 	case r.Method == http.MethodPost && r.URL.Path == base+"deployments":
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(m.deployment))
@@ -159,14 +183,15 @@ func TestStartPatchDeployment(t *testing.T) {
 		t.Errorf("out = %+v", out)
 	}
 	want := []string{
+		"GET /beta/admin/windows/updates/catalog/entries/" + entryID,
 		"POST /beta/admin/windows/updates/deployments",
 		"POST /beta/admin/windows/updates/deployments/" + depID + "/audience/updateAudienceById",
 	}
 	if strings.Join(m.calls, "|") != strings.Join(want, "|") {
 		t.Fatalf("calls = %v", m.calls)
 	}
-	sameJSON(t, m.bodies[0], "create_deployment.json")
-	sameJSON(t, m.bodies[1], "update_audience.json")
+	sameJSON(t, m.bodies[1], "create_deployment.json")
+	sameJSON(t, m.bodies[2], "update_audience.json")
 	for _, a := range m.auth {
 		if a != "Bearer graph-token" {
 			t.Errorf("auth = %q", a)
@@ -201,7 +226,7 @@ func TestGetPatchDeployment(t *testing.T) {
 
 func TestRollbackAndResume(t *testing.T) {
 	m, call, _ := setup(t)
-	isErr, text, res := call("rollback_patch_deployment", map[string]any{"deployment_id": depID})
+	isErr, text, res := call("pause_patch_deployment", map[string]any{"deployment_id": depID})
 	if isErr {
 		t.Fatal(text)
 	}
@@ -231,7 +256,7 @@ func TestRemovePatchDeployment(t *testing.T) {
 func TestRefusesAudienceOfManyDevices(t *testing.T) {
 	m, call, _ := setup(t)
 	m.members = fixture(t, "members_two.json")
-	for _, tool := range []string{"rollback_patch_deployment", "resume_patch_deployment", "remove_patch_deployment", "get_patch_deployment"} {
+	for _, tool := range []string{"pause_patch_deployment", "resume_patch_deployment", "remove_patch_deployment", "get_patch_deployment"} {
 		if isErr, text, _ := call(tool, map[string]any{"deployment_id": depID}); !isErr || !strings.Contains(text, "exactly one device") {
 			t.Errorf("%s: isErr=%v %s", tool, isErr, text)
 		}
@@ -274,12 +299,23 @@ func TestPinnedToBeta(t *testing.T) {
 }
 
 func TestListCatalogEntries(t *testing.T) {
-	_, call, _ := setup(t)
-	_, text, res := call("list_catalog_entries", map[string]any{"kind": "quality"})
+	m, call, _ := setup(t)
+	_, text, res := call("list_catalog_entries", map[string]any{"kind": "quality", "limit": 5})
 	var out catalogOutput
 	kittest.Structured(t, res, &out)
-	if len(out.Entries) != 1 || out.Entries[0].ID != entryID || strings.Contains(text, "Win 11") {
+	if len(out.Entries) != 1 || out.Entries[0].ID != entryID || strings.Contains(text, "Win 11") || out.HasMore {
 		t.Errorf("out = %+v", out)
+	}
+	// Graph picks the kind with $filter, and the tool sends $top for the limit.
+	q := m.queries[0]
+	if q.Get("$filter") != "isof('microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry')" || q.Get("$top") != "5" || q.Get("$orderby") != "releaseDateTime desc" {
+		t.Errorf("query = %v", q)
+	}
+	_, _, res = call("list_catalog_entries", map[string]any{"kind": "feature"})
+	var f catalogOutput
+	kittest.Structured(t, res, &f)
+	if len(f.Entries) != 1 || f.Entries[0].Version != "24H2" || m.queries[1].Get("$filter") != "isof('microsoft.graph.windowsUpdates.featureUpdateCatalogEntry')" {
+		t.Errorf("feature = %+v query %v", f, m.queries[1])
 	}
 	for _, in := range []map[string]any{{"kind": "driver"}, {}, {"kind": "quality", "limit": 51}} {
 		if isErr, _, _ := call("list_catalog_entries", in); !isErr {
@@ -288,11 +324,127 @@ func TestListCatalogEntries(t *testing.T) {
 	}
 }
 
+// The tool follows @odata.nextLink up to a bound, takes only its paging
+// parameter, and never uses the host of the link. has_more is true when more
+// entries exist than the limit.
+func TestListCatalogEntriesPaging(t *testing.T) {
+	m, call, _ := setup(t)
+	m.nextPage = true
+	_, _, res := call("list_catalog_entries", map[string]any{"kind": "quality", "limit": 2})
+	var out catalogOutput
+	kittest.Structured(t, res, &out)
+	if len(out.Entries) != 2 || out.HasMore {
+		t.Fatalf("out = %+v", out)
+	}
+	if len(m.queries) != 2 || m.queries[1].Get("$skiptoken") != "tok2" || m.queries[1].Get("$filter") == "" {
+		t.Errorf("queries = %v", m.queries)
+	}
+	// With limit 1, the second entry is more than the limit.
+	m.queries = nil
+	_, _, res = call("list_catalog_entries", map[string]any{"kind": "quality", "limit": 1})
+	var one catalogOutput
+	kittest.Structured(t, res, &one)
+	if len(one.Entries) != 1 || !one.HasMore || len(m.queries) != 1 {
+		t.Errorf("limit 1: %+v queries %v", one, m.queries)
+	}
+	for _, c := range m.calls {
+		if strings.Contains(c, "graph.microsoft.com") {
+			t.Errorf("the tool used the host of the link: %s", c)
+		}
+	}
+	if _, err := pageParams("http://x/y?$skiptoken=a"); err == nil {
+		t.Error("a link with http was accepted")
+	}
+	if _, err := pageParams("https://x/y?other=1"); err == nil {
+		t.Error("a link with no paging parameter was accepted")
+	}
+}
+
+// A member that is a group of devices counts as one member. The tools refuse it.
+func TestRefusesAnAudienceMemberThatIsNotADevice(t *testing.T) {
+	for _, fixture := range []string{"members_group.json", "members_notype.json"} {
+		m, call, _ := setup(t)
+		m.members = fixture2(t, fixture)
+		for _, tool := range []string{"pause_patch_deployment", "resume_patch_deployment", "remove_patch_deployment", "get_patch_deployment"} {
+			if isErr, text, _ := call(tool, map[string]any{"deployment_id": depID}); !isErr || !strings.Contains(text, "may hold more than one device") {
+				t.Errorf("%s with %s: isErr=%v %s", tool, fixture, isErr, text)
+			}
+		}
+		for _, c := range m.calls {
+			if strings.HasPrefix(c, "PATCH") || strings.HasPrefix(c, "DELETE") {
+				t.Errorf("%s: a change reached Graph: %s", fixture, c)
+			}
+		}
+	}
+}
+
+func fixture2(t *testing.T, name string) string { t.Helper(); return fixture(t, name) }
+
+func TestRefusesADeploymentWithNoType(t *testing.T) {
+	m, call, _ := setup(t)
+	m.deployment = fixture(t, "deployment_no_type.json")
+	if isErr, text, _ := call("get_patch_deployment", map[string]any{"deployment_id": depID}); !isErr || !strings.Contains(text, "new shape") {
+		t.Errorf("isErr=%v %s", isErr, text)
+	}
+}
+
+func TestStartFeatureUpdateHasNoSettings(t *testing.T) {
+	m, call, _ := setup(t)
+	const featureID = "c1dec151-c151-c1de-51c1-dec151c1dec1"
+	if isErr, text, _ := call("start_patch_deployment", map[string]any{"entra_device_id": devID, "catalog_entry_id": featureID, "kind": "feature"}); isErr {
+		t.Fatal(text)
+	}
+	sameJSON(t, m.bodies[1], "create_deployment_feature.json")
+}
+
+// A quality update is an expedited deployment, and the entry must be expeditable.
+// A catalog entry of another kind than the input says is refused before any write.
+func TestStartChecksTheCatalogEntry(t *testing.T) {
+	m, call, _ := setup(t)
+	m.notExpedite = true
+	args := map[string]any{"entra_device_id": devID, "catalog_entry_id": entryID, "kind": "quality"}
+	if isErr, text, _ := call("start_patch_deployment", args); !isErr || !strings.Contains(text, "cannot be expedited") {
+		t.Errorf("not expeditable: isErr=%v %s", isErr, text)
+	}
+	m.notExpedite = false
+	if isErr, text, _ := call("start_patch_deployment", map[string]any{"entra_device_id": devID, "catalog_entry_id": entryID, "kind": "feature"}); !isErr || !strings.Contains(text, "needs") {
+		t.Errorf("wrong kind: isErr=%v %s", isErr, text)
+	}
+	for _, c := range m.calls {
+		if strings.HasPrefix(c, "POST") {
+			t.Errorf("a write reached Graph: %s", c)
+		}
+	}
+}
+
+func TestConfigRefusesAGraphURLWithAPath(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	base := map[string]string{"INTUNE_TENANT_ID": "t.onmicrosoft.com", "INTUNE_CLIENT_ID": "c", "INTUNE_CLIENT_SECRET": "s"}
+	for _, bad := range []string{"https://graph.microsoft.com/v1.0", "https://graph.microsoft.com/beta", "https://graph.microsoft.com/x/"} {
+		env := map[string]string{"INTUNE_GRAPH_URL": bad}
+		for k, v := range base {
+			env[k] = v
+		}
+		if _, err := build(kit.NewEnvFrom(env), log); err == nil {
+			t.Errorf("%s accepted", bad)
+		}
+	}
+	for _, ok := range []string{"https://graph.microsoft.com", "https://graph.microsoft.com/", "https://graph.microsoft.us"} {
+		env := map[string]string{"INTUNE_GRAPH_URL": ok}
+		for k, v := range base {
+			env[k] = v
+		}
+		if _, err := build(kit.NewEnvFrom(env), log); err != nil {
+			t.Errorf("%s refused: %v", ok, err)
+		}
+	}
+}
+
 func TestInputValidation(t *testing.T) {
 	m, call, _ := setup(t)
 	bad := []string{"", "x", depID + "/audience", "../" + depID, depID + "?a=1", depID + "x", strings.Repeat("a", 100)}
 	for _, b := range bad {
-		for _, tool := range []string{"get_patch_deployment", "rollback_patch_deployment", "resume_patch_deployment", "remove_patch_deployment"} {
+		for _, tool := range []string{"get_patch_deployment", "pause_patch_deployment", "resume_patch_deployment", "remove_patch_deployment"} {
 			if isErr, _, _ := call(tool, map[string]any{"deployment_id": b}); !isErr {
 				t.Errorf("%s accepted %q", tool, b)
 			}
@@ -318,11 +470,11 @@ func TestAnnotationsAndReadOnly(t *testing.T) {
 		t.Fatalf("tools = %d", len(tools))
 	}
 	kittest.AssertIrreversible(t, tools, "start_patch_deployment")
-	kittest.AssertReversible(t, tools, "rollback_patch_deployment", "resume_patch_deployment")
-	kittest.AssertReversible(t, tools, "resume_patch_deployment", "rollback_patch_deployment")
+	kittest.AssertReversible(t, tools, "pause_patch_deployment", "resume_patch_deployment")
+	kittest.AssertReversible(t, tools, "resume_patch_deployment", "pause_patch_deployment")
 	kittest.AssertIrreversible(t, tools, "remove_patch_deployment")
 	kittest.AssertIdempotent(t, tools, "start_patch_deployment", false)
-	kittest.AssertIdempotent(t, tools, "rollback_patch_deployment", true)
+	kittest.AssertIdempotent(t, tools, "pause_patch_deployment", true)
 	for _, name := range []string{"list_catalog_entries", "get_patch_deployment"} {
 		if tl := tools[name]; tl == nil || tl.Annotations == nil || !tl.Annotations.ReadOnlyHint {
 			t.Errorf("%s is not marked read only", name)

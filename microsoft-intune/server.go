@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -30,13 +31,10 @@ import (
 //   - GET    /admin/windows/updates/deploymentAudiences/{audienceId}/members (list members)
 // Permission: WindowsUpdates.ReadWrite.All to change, WindowsUpdates.Read.All to read.
 //
-// The version is pinned in two places. graphVersion is the path of the API.
-// The shape of each answer is checked on each call (see checkDeployment), so
-// a change of the beta API stops the tool with a clear error. The test
-// TestShapeChange and the golden files in testdata detect the same change.
-
-// catalogPage is the number of catalog entries that list_catalog_entries reads.
-const catalogPage = 100
+// graphVersion pins the path of the API. The shape of each answer is checked
+// on each call (see checkDeployment and onlyDevice), so a change of the beta
+// API stops the tool with a clear error. The test TestShapeChange and the
+// golden files in testdata detect the same change.
 
 const (
 	graphVersion        = "beta"
@@ -46,6 +44,7 @@ const (
 
 	typeDeployment     = "#microsoft.graph.windowsUpdates.deployment"
 	typeCatalogContent = "#microsoft.graph.windowsUpdates.catalogContent"
+	typeDeploySettings = "microsoft.graph.windowsUpdates.deploymentSettings"
 	typeDeployState    = "microsoft.graph.windowsUpdates.deploymentState"
 	typeAzureADDevice  = "#microsoft.graph.windowsUpdates.azureADDevice"
 )
@@ -76,8 +75,11 @@ func buildWith(env *kit.Env, log *slog.Logger, hc *http.Client) (func(*mcp.Serve
 		return nil, fmt.Errorf("configure sign-in: %w", err)
 	}
 	cc.HTTPClient = hc
+	if p := strings.Trim(graph.Path, "/"); p != "" {
+		return nil, errors.New("INTUNE_GRAPH_URL must have no path. The server adds /" + graphVersion)
+	}
 	base := *graph
-	base.Path += "/" + graphVersion
+	base.Path = "/" + graphVersion
 	svc := &service{client: kit.NewClient(&base, kit.ClientOptions{Auth: cc.Authenticator(), Logger: log, Timeout: timeout, HTTPClient: hc})}
 	return func(s *mcp.Server) { svc.register(s, log) }, nil
 }
@@ -98,7 +100,7 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 			"The audience of the deployment holds that device and no other. Windows Update offers the update to " +
 			"the device. The device installs it when it applies the offer. " +
 			"No tool undoes this action: an installed update stays installed. " +
-			"rollback_patch_deployment stops the offer before the device applies it, and it does not uninstall anything. " +
+			"pause_patch_deployment stops the offer before the device applies it, and it does not uninstall anything. " +
 			"Read the result with get_patch_deployment.",
 		Annotations: kit.Irreversible("Start Windows patch deployment for one device", false),
 	}, v.start)
@@ -109,23 +111,23 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 		Annotations: kit.ReadOnly("Get Windows patch deployment"),
 	}, v.get)
 	kit.AddTool(s, log, &mcp.Tool{
-		Name: "rollback_patch_deployment",
+		Name: "pause_patch_deployment",
 		Description: "Patch action. Pause one Windows Update deployment, so Windows Update stops the offer to its device. " +
 			"It does not uninstall an update that the device already installed. The deployment must hold exactly one device. " +
 			"Undo: call resume_patch_deployment with the same deployment_id.",
 		Annotations: kit.Reversible("Pause Windows patch deployment", true),
-	}, v.rollback)
+	}, v.pause)
 	kit.AddTool(s, log, &mcp.Tool{
 		Name: "resume_patch_deployment",
 		Description: "Patch action. Resume one paused Windows Update deployment. The deployment must hold exactly one device. " +
-			"This is the undo of rollback_patch_deployment.",
+			"This is the undo of pause_patch_deployment.",
 		Annotations: kit.Reversible("Resume Windows patch deployment", true),
 	}, v.resume)
 	kit.AddTool(s, log, &mcp.Tool{
 		Name: "remove_patch_deployment",
 		Description: "Patch action. Delete one Windows Update deployment. The offer to its device stops. The deployment must " +
 			"hold exactly one device. No tool undoes this action: Graph cannot restore a deleted deployment. " +
-			"To stop the offer and keep the deployment, call rollback_patch_deployment.",
+			"To stop the offer and keep the deployment, call pause_patch_deployment.",
 		Annotations: kit.Irreversible("Delete Windows patch deployment", true),
 	}, v.remove)
 }
@@ -157,8 +159,8 @@ var errShape = errors.New("the Graph beta answer has a new shape")
 // here, and the tool does not act on a field that it does not understand.
 func checkDeployment(d *deployment) error {
 	switch {
-	case d.OdataType != "" && d.OdataType != typeDeployment:
-		return fmt.Errorf("%w: @odata.type is %q", errShape, d.OdataType)
+	case d.OdataType != typeDeployment:
+		return fmt.Errorf("%w: @odata.type is %q, not %q", errShape, d.OdataType, typeDeployment)
 	case kit.CheckString("id", d.ID, 36, kit.UUID) != nil:
 		return fmt.Errorf("%w: id is missing or is not a GUID", errShape)
 	case d.State.RequestedValue == "":
@@ -175,6 +177,7 @@ func (d *deployment) effective() string {
 }
 
 type deviceState struct {
+	OdataType  string           `json:"@odata.type,omitempty"`
 	ID         string           `json:"id"`
 	Errors     []map[string]any `json:"errors,omitempty"`
 	Enrollment map[string]struct {
@@ -208,7 +211,11 @@ type catalogEntry struct {
 
 type catalogOutput struct {
 	Entries []catalogEntry `json:"entries"`
+	HasMore bool           `json:"has_more"`
 }
+
+// maxCatalogPages bounds the pages that list_catalog_entries follows.
+const maxCatalogPages = 5
 
 func (v *service) listCatalog(ctx context.Context, _ *mcp.CallToolRequest, in catalogInput) (*mcp.CallToolResult, catalogOutput, error) {
 	out := catalogOutput{Entries: []catalogEntry{}}
@@ -223,27 +230,77 @@ func (v *service) listCatalog(ctx context.Context, _ *mcp.CallToolRequest, in ca
 	if err := kit.CheckRange("limit", limit, 1, 50); err != nil {
 		return nil, out, fmt.Errorf("check limit: %w", err)
 	}
-	q := url.Values{}
-	// The reference documents $orderby and $top. The tool reads the newest
-	// page and keeps the entries of the kind that the caller asked for.
-	q.Set("$orderby", "releaseDateTime desc")
-	q.Set("$top", strconv.Itoa(catalogPage))
-	var resp struct {
-		Value []struct {
-			OdataType string `json:"@odata.type"`
-			catalogEntry
-		} `json:"value"`
+	// The page https://learn.microsoft.com/en-us/graph/windowsupdates-deploy-expedited-update
+	// shows $filter=isof('microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry')
+	// on this call, so Graph picks the kind.
+	q := url.Values{
+		"$filter":  {"isof('" + strings.TrimPrefix(typ, "#") + "')"},
+		"$orderby": {"releaseDateTime desc"},
+		"$top":     {strconv.Itoa(limit)},
 	}
-	err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: kit.Path("admin", "windows", "updates", "catalog", "entries"), Query: q}, &resp)
-	if err != nil {
-		return nil, out, kit.GraphError("list catalog entries", err)
-	}
-	for _, e := range resp.Value {
-		if e.OdataType == typ && len(out.Entries) < limit {
+	for page := 1; ; page++ {
+		var resp struct {
+			Value []struct {
+				OdataType string `json:"@odata.type"`
+				catalogEntry
+			} `json:"value"`
+			NextLink string `json:"@odata.nextLink"`
+		}
+		err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: kit.Path("admin", "windows", "updates", "catalog", "entries"), Query: q}, &resp)
+		if err != nil {
+			return nil, out, kit.GraphError("list catalog entries", err)
+		}
+		for _, e := range resp.Value {
+			// The server filters. An entry of another kind is dropped as a second defence.
+			if e.OdataType != typ {
+				continue
+			}
+			if len(out.Entries) == limit {
+				out.HasMore = true
+				break
+			}
 			out.Entries = append(out.Entries, e.catalogEntry)
+		}
+		if resp.NextLink != "" && len(out.Entries) == limit {
+			out.HasMore = true // the link shows more entries than the limit
+		}
+		if out.HasMore || resp.NextLink == "" {
+			break
+		}
+		if page == maxCatalogPages {
+			out.HasMore = true
+			break
+		}
+		// The tool never follows the link as a URL. It takes the paging
+		// parameters and sends them to the fixed base URL.
+		next, err := pageParams(resp.NextLink)
+		if err != nil {
+			return nil, out, err
+		}
+		for k, vals := range next {
+			q[k] = vals
 		}
 	}
 	return nil, out, nil
+}
+
+// pageParams returns the paging parameters ($skiptoken and $skip) of an
+// @odata.nextLink. It refuses a link to another host.
+func pageParams(link string) (url.Values, error) {
+	u, err := url.Parse(link)
+	if err != nil || u.Scheme != "https" {
+		return nil, fmt.Errorf("list catalog entries: %w: the next link is not a URL", errShape)
+	}
+	out := url.Values{}
+	for _, k := range []string{"$skiptoken", "$skip"} {
+		if v := u.Query().Get(k); v != "" {
+			out.Set(k, v)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("list catalog entries: %w: the next link has no paging parameter", errShape)
+	}
+	return out, nil
 }
 
 type startInput struct {
@@ -274,14 +331,26 @@ func (o *deploymentOutput) fill(d *deployment) {
 
 // createBody is the body of the create call. The audience stays empty until
 // the second call adds the one device. An empty audience gets no offer.
-func createBody(typ, entryID string) map[string]any {
-	return map[string]any{
+func createBody(kind, entryID string) map[string]any {
+	typ := entryTypes[kind]
+	body := map[string]any{
 		"@odata.type": typeDeployment,
 		"content": map[string]any{
 			"@odata.type":  typeCatalogContent,
 			"catalogEntry": map[string]any{"@odata.type": typ, "id": entryID},
 		},
 	}
+	// The Microsoft page "Deploy an expedited quality update using Windows
+	// Autopatch" shows a quality update deployment with settings.expedite. It
+	// shows no deployment of a quality update without it. So a quality update is
+	// an expedited deployment. A feature update has no settings.
+	if kind == "quality" {
+		body["settings"] = map[string]any{
+			"@odata.type": typeDeploySettings,
+			"expedite":    map[string]any{"isExpedited": true, "isReadinessTest": false},
+		}
+	}
+	return body
 }
 
 func audienceBody(deviceID string) map[string]any {
@@ -311,11 +380,14 @@ func (v *service) start(ctx context.Context, _ *mcp.CallToolRequest, in startInp
 	if err := kit.CheckString("catalog_entry_id", in.CatalogEntryID, 36, kit.UUID); err != nil {
 		return nil, out, err
 	}
+	if err := v.checkEntry(ctx, in, typ); err != nil {
+		return nil, out, err
+	}
 	var d deployment
 	// A create call is not repeated: a repeat would make a second deployment.
 	err := v.client.Do(ctx, kit.Request{
 		Method: http.MethodPost, Path: kit.Path("admin", "windows", "updates", "deployments"),
-		JSON: createBody(typ, in.CatalogEntryID),
+		JSON: createBody(in.Kind, in.CatalogEntryID),
 	}, &d)
 	if err != nil {
 		return nil, out, kit.GraphError("create deployment", err)
@@ -379,6 +451,13 @@ func (v *service) onlyDevice(ctx context.Context, id string) (*deviceState, erro
 	if m.NextLink != "" || len(m.Value) != 1 {
 		return nil, errors.New("refused: the audience of this deployment does not hold exactly one device")
 	}
+	// A group of devices counts as one member. The audience must hold one device
+	// and not a group, so the type of the member is checked. An answer with no
+	// type is refused, because the tool cannot tell a device from a group.
+	if m.Value[0].OdataType != typeAzureADDevice {
+		return nil, fmt.Errorf("refused: the audience member is of the type %q and not %q, so the audience may hold more than one device",
+			m.Value[0].OdataType, typeAzureADDevice)
+	}
 	if kit.CheckString("device id", m.Value[0].ID, 36, kit.UUID) != nil {
 		return nil, fmt.Errorf("list audience members: %w: member id is missing or is not a GUID", errShape)
 	}
@@ -403,8 +482,8 @@ func (v *service) get(ctx context.Context, _ *mcp.CallToolRequest, in deployment
 	return nil, out, nil
 }
 
-func (v *service) rollback(ctx context.Context, _ *mcp.CallToolRequest, in deploymentInput) (*mcp.CallToolResult, deploymentOutput, error) {
-	return v.setState(ctx, in, "paused", "rollback_patch_deployment")
+func (v *service) pause(ctx context.Context, _ *mcp.CallToolRequest, in deploymentInput) (*mcp.CallToolResult, deploymentOutput, error) {
+	return v.setState(ctx, in, "paused", "pause_patch_deployment")
 }
 
 func (v *service) resume(ctx context.Context, _ *mcp.CallToolRequest, in deploymentInput) (*mcp.CallToolResult, deploymentOutput, error) {
@@ -454,4 +533,30 @@ func (v *service) remove(ctx context.Context, _ *mcp.CallToolRequest, in deploym
 	}
 	out.State = "deleted"
 	return nil, out, nil
+}
+
+// checkEntry reads the catalog entry and refuses an entry of another kind than
+// the input says. A quality update is deployed as an expedited update, so it
+// must have isExpeditable true.
+func (v *service) checkEntry(ctx context.Context, in startInput, typ string) error {
+	var e struct {
+		OdataType     string `json:"@odata.type"`
+		ID            string `json:"id"`
+		IsExpeditable bool   `json:"isExpeditable"`
+	}
+	err := v.client.Do(ctx, kit.Request{
+		Method: http.MethodGet, Path: kit.Path("admin", "windows", "updates", "catalog", "entries", in.CatalogEntryID),
+	}, &e)
+	if err != nil {
+		return kit.GraphError("read the catalog entry", err)
+	}
+	switch {
+	case e.OdataType != typ:
+		return fmt.Errorf("%w: the catalog entry is of the type %q, and kind %s needs %q", kit.ErrInvalidInput, e.OdataType, in.Kind, typ)
+	case !strings.EqualFold(e.ID, in.CatalogEntryID):
+		return fmt.Errorf("read the catalog entry: %w: Graph did not return the entry", errShape)
+	case in.Kind == "quality" && !e.IsExpeditable:
+		return fmt.Errorf("%w: this quality update cannot be expedited (isExpeditable is false), and the tool deploys a quality update as an expedited update", kit.ErrInvalidInput)
+	}
+	return nil
 }
