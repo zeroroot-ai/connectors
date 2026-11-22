@@ -39,9 +39,45 @@ func (v *service) registerOpen(s *mcp.Server, log *slog.Logger) {
 			"It writes files with the mode of a regular file. It never writes to the target branch and never merges. " +
 			"It refuses a source branch that exists, unless that branch has an open pull request into the target branch. " +
 			"The tool then returns that pull request and changes nothing. " +
-			"A person undoes this action by closing the pull request. No tool of this server closes it.",
+			"Undo: call close_merge_request with the merge_request value of the result.",
 		Annotations: kit.Reversible("Open GitHub pull request", true),
 	}, v.openMergeRequest)
+	kit.AddTool(s, log, &mcp.Tool{
+		Name: "close_merge_request",
+		Description: "Close one open GitHub pull request with no merge. It does not delete the branch. " +
+			"It refuses a pull request that is merged. A pull request that is closed already is not an error. " +
+			"This is the undo of open_merge_request. A person can reopen the pull request. No tool of this server reopens it.",
+		Annotations: kit.Reversible("Close GitHub pull request", true),
+	}, v.closeMergeRequest)
+}
+
+func (v *service) closeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in fixloop.MergeRequestInput) (*mcp.CallToolResult, fixloop.CloseResult, error) {
+	out := fixloop.CloseResult{}
+	r, err := v.parseRef(in.MergeRequest)
+	if err != nil {
+		return nil, out, err
+	}
+	out.MergeRequest = r.key()
+	pr, err := v.getPR(ctx, r)
+	if err != nil {
+		return nil, out, err
+	}
+	switch {
+	case pr.Merged:
+		return nil, out, fmt.Errorf("%w: the pull request is merged, so it cannot be closed", kit.ErrInvalidInput)
+	case pr.State == "closed":
+		out.State = fixloop.Closed
+		return nil, out, nil
+	}
+	err = v.client.Do(ctx, kit.Request{
+		Method: http.MethodPatch, Path: repoPath(r, "pulls", strconv.Itoa(r.number)),
+		JSON: map[string]any{"state": "closed"}, Retry: true, // the same value twice has the same effect
+	}, nil)
+	if err != nil {
+		return nil, out, fmt.Errorf("close the pull request: %w", err)
+	}
+	out.State, out.Closed = fixloop.Closed, true
+	return nil, out, nil
 }
 
 type blobAnswer struct {

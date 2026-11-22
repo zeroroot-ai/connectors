@@ -26,8 +26,6 @@ const (
 	srcBranch  = "zeroroot/fix-sqli-1"
 )
 
-func str(s string) *string { return &s }
-
 // openRoutes answers the reads and the writes of one open_merge_request call.
 func openRoutes() map[string]handler {
 	return map[string]handler{
@@ -62,42 +60,7 @@ func TestOpenMergeRequest(t *testing.T) {
 		out["created_at"] != "2026-11-20T06:30:00Z" || out["existing"] != nil {
 		t.Errorf("out = %v", out)
 	}
-	blob := m.bodies["POST "+repo+"/git/blobs"]
-	if blob["encoding"] != "base64" || blob["content"] != base64.StdEncoding.EncodeToString([]byte("package db\n")) {
-		t.Errorf("blob = %v", blob)
-	}
-	tree := m.bodies["POST "+repo+"/git/trees"]
-	entries, _ := tree["tree"].([]any)
-	if tree["base_tree"] != baseTree || len(entries) != 2 {
-		t.Fatalf("tree = %v", tree)
-	}
-	if e := entries[0].(map[string]any); e["path"] != "src/db.go" || e["sha"] != newBlobSHA || e["mode"] != "100644" {
-		t.Errorf("entry 0 = %v", e)
-	}
-	// A null sha removes the path.
-	if e := entries[1].(map[string]any); e["path"] != "old/unused.go" || e["sha"] != nil {
-		t.Errorf("entry 1 = %v", e)
-	}
-	commit := m.bodies["POST "+repo+"/git/commits"]
-	if commit["tree"] != newTreeSHA || commit["message"] != "Fix SQL injection" || commit["parents"].([]any)[0] != baseSHA {
-		t.Errorf("commit = %v", commit)
-	}
-	if refs := m.bodies["POST "+repo+"/git/refs"]; refs["ref"] != "refs/heads/"+srcBranch || refs["sha"] != newComSHA {
-		t.Errorf("refs = %v", refs)
-	}
-	pr := m.bodies["POST "+repo+"/pulls"]
-	if pr["head"] != srcBranch || pr["base"] != "main" || pr["title"] != "Fix SQL injection" || pr["body"] != "Uses a bound parameter." {
-		t.Errorf("pull = %v", pr)
-	}
-	// The tool never writes to the target branch, and never merges.
-	for _, c := range m.calls {
-		if strings.HasPrefix(c, "PATCH") || strings.HasPrefix(c, "PUT") || strings.HasPrefix(c, "DELETE") || strings.Contains(c, "/merge") {
-			t.Errorf("unexpected call %s", c)
-		}
-	}
-	if tok := m.headers.Get("Authorization"); tok != "Bearer ghp_secret" {
-		t.Errorf("auth = %q", tok)
-	}
+	checkOpenWrites(t, m)
 }
 
 func TestOpenReturnsTheOpenPullRequestOfAnExistingBranch(t *testing.T) {
@@ -183,7 +146,100 @@ func TestOpenAnnotations(t *testing.T) {
 	if a == nil || a.ReadOnlyHint || a.DestructiveHint == nil || *a.DestructiveHint {
 		t.Fatalf("annotations = %+v", a)
 	}
-	if !strings.Contains(tl.Description, "closing the pull request") {
+	if !strings.Contains(tl.Description, "Undo: call close_merge_request") {
 		t.Errorf("description does not say how a person undoes it: %s", tl.Description)
+	}
+}
+
+func checkOpenWrites(t *testing.T, m *mock) {
+	t.Helper()
+	blob := m.bodies["POST "+repo+"/git/blobs"]
+	if blob["encoding"] != "base64" || blob["content"] != base64.StdEncoding.EncodeToString([]byte("package db\n")) {
+		t.Errorf("blob = %v", blob)
+	}
+	tree := m.bodies["POST "+repo+"/git/trees"]
+	entries, _ := tree["tree"].([]any)
+	if tree["base_tree"] != baseTree || len(entries) != 2 {
+		t.Fatalf("tree = %v", tree)
+	}
+	if e := entries[0].(map[string]any); e["path"] != "src/db.go" || e["sha"] != newBlobSHA || e["mode"] != "100644" {
+		t.Errorf("entry 0 = %v", e)
+	}
+	// A null sha removes the path.
+	if e := entries[1].(map[string]any); e["path"] != "old/unused.go" || e["sha"] != nil {
+		t.Errorf("entry 1 = %v", e)
+	}
+	commit := m.bodies["POST "+repo+"/git/commits"]
+	if commit["tree"] != newTreeSHA || commit["message"] != "Fix SQL injection" || commit["parents"].([]any)[0] != baseSHA {
+		t.Errorf("commit = %v", commit)
+	}
+	if refs := m.bodies["POST "+repo+"/git/refs"]; refs["ref"] != "refs/heads/"+srcBranch || refs["sha"] != newComSHA {
+		t.Errorf("refs = %v", refs)
+	}
+	pr := m.bodies["POST "+repo+"/pulls"]
+	if pr["head"] != srcBranch || pr["base"] != "main" || pr["title"] != "Fix SQL injection" || pr["body"] != "Uses a bound parameter." {
+		t.Errorf("pull = %v", pr)
+	}
+	// The tool never writes to the target branch, and never merges.
+	for _, c := range m.calls {
+		if strings.HasPrefix(c, "PATCH") || strings.HasPrefix(c, "PUT") || strings.HasPrefix(c, "DELETE") || strings.Contains(c, "/merge") {
+			t.Errorf("unexpected call %s", c)
+		}
+	}
+	if tok := m.headers.Get("Authorization"); tok != "Bearer ghp_secret" {
+		t.Errorf("auth = %q", tok)
+	}
+}
+
+func TestCloseMergeRequest(t *testing.T) {
+	m, call := setup(t, map[string]handler{
+		"GET " + pr7:   reply(200, openPR("clean")),
+		"PATCH " + pr7: reply(200, openPR("clean")),
+	})
+	isErr, text, out := call("close_merge_request", map[string]any{"merge_request": ref})
+	if isErr || out["closed"] != true || out["state"] != "closed" || out["merge_request"] != ref {
+		t.Fatalf("isErr=%v %s %v", isErr, text, out)
+	}
+	if body := m.bodies["PATCH "+pr7]; body["state"] != "closed" || len(body) != 1 {
+		t.Errorf("body = %v", body)
+	}
+}
+
+func TestCloseIsNotAnErrorWhenClosedAndRefusesMerged(t *testing.T) {
+	m, call := setup(t, map[string]handler{"GET " + pr7: reply(200, pullJSON("closed", false, "null", "unknown", headSHA))})
+	isErr, _, out := call("close_merge_request", map[string]any{"merge_request": ref})
+	if isErr || out["closed"] != false || out["state"] != "closed" {
+		t.Errorf("closed already: isErr=%v %v", isErr, out)
+	}
+	if m.called("PATCH "+pr7) != 0 {
+		t.Error("the tool wrote to a closed pull request")
+	}
+	m, call = setup(t, map[string]handler{"GET " + pr7: reply(200, mergedPR)})
+	if isErr, text, _ := call("close_merge_request", map[string]any{"merge_request": ref}); !isErr || !strings.Contains(text, "merged") {
+		t.Errorf("merged: isErr=%v %s", isErr, text)
+	}
+	if m.called("PATCH "+pr7) != 0 {
+		t.Error("the tool wrote to a merged pull request")
+	}
+	m, call = setup(t, nil)
+	for _, bad := range []string{"", "acme/shop", "https://evil.example/acme/shop/pull/7", "acme/shop#x"} {
+		if isErr, _, _ := call("close_merge_request", map[string]any{"merge_request": bad}); !isErr {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+	if len(m.calls) != 0 {
+		t.Errorf("reached GitHub: %v", m.calls)
+	}
+}
+
+func TestCloseAnnotations(t *testing.T) {
+	register, err := build(kit.NewEnvFrom(map[string]string{"GITHUB_TOKEN": "t", "GITHUB_ENVIRONMENT": "production"}), slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := kittest.Tools(t, kittest.Connect(t, register))
+	kittest.AssertReversible(t, tools, "open_merge_request", "close_merge_request")
+	if a := tools["close_merge_request"].Annotations; a == nil || a.ReadOnlyHint || a.DestructiveHint == nil || *a.DestructiveHint {
+		t.Errorf("close annotations = %+v", a)
 	}
 }

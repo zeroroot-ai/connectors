@@ -1131,8 +1131,8 @@ func TestAnnotations(t *testing.T) {
 		t.Fatal(err)
 	}
 	tools := kittest.Tools(t, kittest.Connect(t, register))
-	if len(tools) != 5 {
-		t.Fatalf("tools = %d, want 5", len(tools))
+	if len(tools) != 6 {
+		t.Fatalf("tools = %d, want 6", len(tools))
 	}
 	for _, name := range []string{"merge_request_state", "deployment_state"} {
 		if a := tools[name].Annotations; a == nil || !a.ReadOnlyHint {

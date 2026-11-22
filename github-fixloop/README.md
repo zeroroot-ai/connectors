@@ -25,7 +25,8 @@ The argument `merge_request` is the URL of the pull request on the host of the s
 | `merge_request_state` | `GET /repos/{o}/{r}/pulls/{n}`, check runs and combined status of the head commit. For an open pull request also `GET /repos/{o}/{r}/branches/{base}`, `GET /repos/{o}/{r}/rules/branches/{base}` and `GET /repos/{o}/{r}` | Not needed. It reads. | `readOnlyHint: true` |
 | `merge_merge_request` | the reads above, then `PUT /repos/{o}/{r}/pulls/{n}/merge` with `sha` and `merge_method` | `revert_merge_request` | `destructiveHint: false`, `idempotentHint: true` |
 | `revert_merge_request` | git data API and pull request calls, then the merge call above | `revert_merge_request` on the revert pull request | `destructiveHint: false`, `idempotentHint: true` |
-| `open_merge_request` | `GET` the source and target references and the target commit, `POST /repos/{o}/{r}/git/blobs`, `/git/trees`, `/git/commits`, `/git/refs`, then `POST /repos/{o}/{r}/pulls` | Close the pull request. No tool of this server closes it. | `destructiveHint: false`, `idempotentHint: true` |
+| `open_merge_request` | `GET` the source and target references and the target commit, `POST /repos/{o}/{r}/git/blobs`, `/git/trees`, `/git/commits`, `/git/refs`, then `POST /repos/{o}/{r}/pulls` | `close_merge_request` | `destructiveHint: false`, `idempotentHint: true` |
+| `close_merge_request` | `GET /repos/{o}/{r}/pulls/{n}`, then `PATCH /repos/{o}/{r}/pulls/{n}` with `state: closed` | A person reopens it. No tool reopens it. | `destructiveHint: false`, `idempotentHint: true` |
 | `deployment_state` | `GET` the pull request, `GET /deployments`, `GET /deployments/{id}/statuses`, `GET /compare/{base}...{head}` | Not needed. It reads. | `readOnlyHint: true` |
 
 ### Mapping to the daemon shape
@@ -99,7 +100,7 @@ Limits:
 
 The input is `repo` (`owner/repo`), `source_branch`, `target_branch`, `title`, `body` and `changes`. A change is a `path` with `content` (the new text of the file) or `delete: true`. One call makes one commit with all changes, on the new source branch, from the target branch, and opens the pull request. The result holds `merge_request` (`owner/repo#12`), `url`, `source_branch`, `target_branch` and `created_at`.
 
-The tool never writes to the target branch and never merges. It refuses a source branch that exists, unless an open pull request goes from that branch into the target branch. It then returns that pull request with `existing: true` and writes nothing. It does not compare the content of that branch with the input. A person undoes the action by closing the pull request. No tool of this server closes it.
+The tool never writes to the target branch and never merges. It refuses a source branch that exists, unless an open pull request goes from that branch into the target branch. It then returns that pull request with `existing: true` and writes nothing. It does not compare the content of that branch with the input. The undo is `close_merge_request`.
 
 Each file is written with the mode `100644`. A file that is executable in the repository loses its mode when the tool changes its content. The input has these limits: 100 files, 1 MiB for one file, 8 MiB for all files, a title of 256 bytes, a branch name of plain characters, and a path with no `..`, no empty folder name and no `.git` folder.
 

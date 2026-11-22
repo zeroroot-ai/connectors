@@ -34,9 +34,45 @@ func (v *service) registerOpen(s *mcp.Server, log *slog.Logger) {
 			"It never writes to the target branch and never merges. " +
 			"It refuses a source branch that exists, unless that branch has an open merge request into the target branch. " +
 			"The tool then returns that merge request and changes nothing. " +
-			"A person undoes this action by closing the merge request. No tool of this server closes it.",
+			"Undo: call close_merge_request with the merge_request value of the result.",
 		Annotations: kit.Reversible("Open GitLab merge request", true),
 	}, v.openMergeRequest)
+	kit.AddTool(s, log, &mcp.Tool{
+		Name: "close_merge_request",
+		Description: "Close one open GitLab merge request with no merge. It does not delete the branch. " +
+			"It refuses a merge request that is merged. A merge request that is closed already is not an error. " +
+			"This is the undo of open_merge_request. A person can reopen the merge request. No tool of this server reopens it.",
+		Annotations: kit.Reversible("Close GitLab merge request", true),
+	}, v.closeMergeRequest)
+}
+
+func (v *service) closeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in fixloop.MergeRequestInput) (*mcp.CallToolResult, fixloop.CloseResult, error) {
+	out := fixloop.CloseResult{}
+	project, iid, err := v.parseRef(in.MergeRequest)
+	if err != nil {
+		return nil, out, err
+	}
+	out.MergeRequest = refKey(project, iid)
+	mr, err := v.getMR(ctx, project, iid)
+	if err != nil {
+		return nil, out, err
+	}
+	switch mr.State {
+	case "merged":
+		return nil, out, fmt.Errorf("%w: the merge request is merged, so it cannot be closed", kit.ErrInvalidInput)
+	case "closed":
+		out.State = fixloop.Closed
+		return nil, out, nil
+	}
+	err = v.client.Do(ctx, kit.Request{
+		Method: http.MethodPut, Path: mrPath(project, iid),
+		JSON: map[string]any{"state_event": "close"}, Retry: true, // the same value twice has the same effect
+	}, nil)
+	if err != nil {
+		return nil, out, fmt.Errorf("close the merge request: %w", err)
+	}
+	out.State, out.Closed = fixloop.Closed, true
+	return nil, out, nil
 }
 
 func (v *service) openMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in fixloop.OpenInput) (*mcp.CallToolResult, fixloop.OpenResult, error) {

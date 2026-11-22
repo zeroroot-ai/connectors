@@ -128,3 +128,12 @@ func CheckOpen(in OpenInput) error {
 	}
 	return nil
 }
+
+// CloseResult is the result of close_merge_request. Closed is true when the
+// tool closed the merge request. It is false when the merge request was
+// closed already, and the tool changed nothing.
+type CloseResult struct {
+	MergeRequest string `json:"merge_request"`
+	State        string `json:"state"`
+	Closed       bool   `json:"closed"`
+}

@@ -54,37 +54,7 @@ func TestOpenMergeRequest(t *testing.T) {
 		out["source_branch"] != srcBranch || out["created_at"] != "2026-11-20T07:30:00Z" || out["existing"] != nil {
 		t.Errorf("out = %v", out)
 	}
-	commit := m.bodies["POST "+api+"/repository/commits"]
-	if commit["branch"] != srcBranch || commit["start_branch"] != "main" || commit["commit_message"] != "Fix SQL injection" {
-		t.Errorf("commit = %v", commit)
-	}
-	acts, _ := commit["actions"].([]any)
-	if len(acts) != 3 {
-		t.Fatalf("actions = %v", acts)
-	}
-	want := []struct{ action, path string }{{"update", "src/db.go"}, {"create", "src/new.go"}, {"delete", "old/unused.go"}}
-	for i, w := range want {
-		a := acts[i].(map[string]any)
-		if a["action"] != w.action || a["file_path"] != w.path {
-			t.Errorf("action %d = %v, want %v", i, a, w)
-		}
-	}
-	if acts[2].(map[string]any)["content"] != nil {
-		t.Error("a delete carries content")
-	}
-	mrBody := m.bodies["POST "+api+"/merge_requests"]
-	if mrBody["source_branch"] != srcBranch || mrBody["target_branch"] != "main" || mrBody["title"] != "Fix SQL injection" ||
-		mrBody["description"] != "Uses a bound parameter." {
-		t.Errorf("merge request = %v", mrBody)
-	}
-	if m.token != "glpat-secret" {
-		t.Errorf("token = %q", m.token)
-	}
-	for _, c := range m.calls {
-		if strings.HasPrefix(c, "PUT") || strings.HasPrefix(c, "DELETE") || strings.Contains(c, "/merge") && !strings.HasSuffix(c, "/merge_requests") {
-			t.Errorf("unexpected call %s", c)
-		}
-	}
+	checkOpenWrites(t, m)
 }
 
 func TestOpenReturnsTheOpenMergeRequestOfAnExistingBranch(t *testing.T) {
@@ -170,7 +140,98 @@ func TestOpenAnnotations(t *testing.T) {
 	if tl == nil || tl.Annotations == nil || tl.Annotations.ReadOnlyHint || tl.Annotations.DestructiveHint == nil || *tl.Annotations.DestructiveHint {
 		t.Fatalf("annotations = %+v", tl)
 	}
-	if !strings.Contains(tl.Description, "closing the merge request") {
+	if !strings.Contains(tl.Description, "Undo: call close_merge_request") {
 		t.Errorf("description does not say how a person undoes it: %s", tl.Description)
+	}
+}
+
+func checkOpenWrites(t *testing.T, m *mock) {
+	t.Helper()
+	commit := m.bodies["POST "+api+"/repository/commits"]
+	if commit["branch"] != srcBranch || commit["start_branch"] != "main" || commit["commit_message"] != "Fix SQL injection" {
+		t.Errorf("commit = %v", commit)
+	}
+	acts, _ := commit["actions"].([]any)
+	if len(acts) != 3 {
+		t.Fatalf("actions = %v", acts)
+	}
+	want := []struct{ action, path string }{{"update", "src/db.go"}, {"create", "src/new.go"}, {"delete", "old/unused.go"}}
+	for i, w := range want {
+		a := acts[i].(map[string]any)
+		if a["action"] != w.action || a["file_path"] != w.path {
+			t.Errorf("action %d = %v, want %v", i, a, w)
+		}
+	}
+	if acts[2].(map[string]any)["content"] != nil {
+		t.Error("a delete carries content")
+	}
+	mrBody := m.bodies["POST "+api+"/merge_requests"]
+	if mrBody["source_branch"] != srcBranch || mrBody["target_branch"] != "main" || mrBody["title"] != "Fix SQL injection" ||
+		mrBody["description"] != "Uses a bound parameter." {
+		t.Errorf("merge request = %v", mrBody)
+	}
+	if m.token != "glpat-secret" {
+		t.Errorf("token = %q", m.token)
+	}
+	for _, c := range m.calls {
+		if strings.HasPrefix(c, "PUT") || strings.HasPrefix(c, "DELETE") || strings.Contains(c, "/merge") && !strings.HasSuffix(c, "/merge_requests") {
+			t.Errorf("unexpected call %s", c)
+		}
+	}
+}
+
+func TestCloseMergeRequest(t *testing.T) {
+	m, call := setup(t, routeMap{
+		"GET " + api + mr7: reply(200, openMR("success", "mergeable")),
+		"PUT " + api + mr7: reply(200, openMR("success", "mergeable")),
+	})
+	isErr, text, out := call("close_merge_request", map[string]any{"merge_request": ref})
+	if isErr || out["closed"] != true || out["state"] != "closed" || out["merge_request"] != ref {
+		t.Fatalf("isErr=%v %s %v", isErr, text, out)
+	}
+	if body := m.bodies["PUT "+api+mr7]; body["state_event"] != "close" || len(body) != 1 {
+		t.Errorf("body = %v", body)
+	}
+}
+
+func TestCloseIsNotAnErrorWhenClosedAndRefusesMerged(t *testing.T) {
+	closedMR := strings.Replace(openMR("success", "mergeable"), `"state":"opened"`, `"state":"closed"`, 1)
+	m, call := setup(t, routeMap{"GET " + api + mr7: reply(200, closedMR)})
+	isErr, _, out := call("close_merge_request", map[string]any{"merge_request": ref})
+	if isErr || out["closed"] != false || out["state"] != "closed" {
+		t.Errorf("closed already: isErr=%v %v", isErr, out)
+	}
+	if m.called("PUT "+api+mr7) != 0 {
+		t.Error("the tool wrote to a closed merge request")
+	}
+	m, call = setup(t, routeMap{"GET " + api + mr7: reply(200, mergedMR)})
+	if isErr, text, _ := call("close_merge_request", map[string]any{"merge_request": ref}); !isErr || !strings.Contains(text, "merged") {
+		t.Errorf("merged: isErr=%v %s", isErr, text)
+	}
+	if m.called("PUT "+api+mr7) != 0 {
+		t.Error("the tool wrote to a merged merge request")
+	}
+	m, call = setup(t, nil)
+	for _, bad := range []string{"", "acme/shop", "https://evil.example/acme/shop/-/merge_requests/7", "acme/shop!x"} {
+		if isErr, _, _ := call("close_merge_request", map[string]any{"merge_request": bad}); !isErr {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+	if len(m.calls) != 0 {
+		t.Errorf("reached GitLab: %v", m.calls)
+	}
+}
+
+func TestCloseAnnotations(t *testing.T) {
+	register, err := build(kit.NewEnvFrom(map[string]string{
+		"GITLAB_BASE_URL": "https://gitlab.example.com", "GITLAB_TOKEN": "t", "GITLAB_ENVIRONMENT": "production",
+	}), slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := kittest.Tools(t, kittest.Connect(t, register))
+	kittest.AssertReversible(t, tools, "open_merge_request", "close_merge_request")
+	if a := tools["close_merge_request"].Annotations; a == nil || a.ReadOnlyHint || a.DestructiveHint == nil || *a.DestructiveHint {
+		t.Errorf("close annotations = %+v", a)
 	}
 }
