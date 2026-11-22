@@ -101,7 +101,7 @@ func (v *service) revoke(ctx context.Context, _ *mcp.CallToolRequest, in userInp
 	}
 	err := v.client.Do(ctx, kit.Request{Method: http.MethodPost, Path: kit.Path("users", in.UserID, "revokeSignInSessions"), Retry: true}, &resp)
 	if err != nil {
-		return nil, out, graphError("revoke sign-in sessions", err)
+		return nil, out, kit.GraphError("revoke sign-in sessions", err)
 	}
 	if !resp.Value {
 		return nil, out, errors.New("revoke sign-in sessions: Graph did not confirm the revoke")
@@ -133,25 +133,8 @@ func (v *service) setEnabled(ctx context.Context, in userInput, enabled bool) (*
 		Retry: true, // the same value twice has the same effect
 	}, nil)
 	if err != nil {
-		return nil, out, graphError(action, err)
+		return nil, out, kit.GraphError(action, err)
 	}
 	out.Done = true
 	return nil, out, nil
-}
-
-// graphError shows the Graph error code and message when the answer has them.
-func graphError(op string, err error) error {
-	var ae *kit.APIError
-	if errors.As(err, &ae) {
-		var body struct {
-			Error struct {
-				Code    string `json:"code"`
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		if kit.DecodeErrorBody(ae, &body) == nil && body.Error.Code != "" {
-			return fmt.Errorf("%s: Graph answered HTTP %d, %s: %s", op, ae.Status, body.Error.Code, body.Error.Message)
-		}
-	}
-	return fmt.Errorf("%s: %w", op, err)
 }

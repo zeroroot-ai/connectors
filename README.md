@@ -75,6 +75,7 @@ The servers have no second authentication scheme, by design. The README of each 
 | `sentinelone` | edr, response | `list_threats`, `list_agents`, `disconnect_from_network`, `reconnect_to_network` | gibson#1547, gibson#1440 |
 | `qualys` | scanner | `get_host_detections` | gibson#1541 |
 | `puppet` | patch | `start_patch_job`, `start_rollback_job`, `get_job` | gibson#1544 |
+| `microsoft-intune` | patch | `list_catalog_entries`, `start_patch_deployment`, `get_patch_deployment`, `rollback_patch_deployment`, `resume_patch_deployment`, `remove_patch_deployment` | gibson#1543, gibson#1510 |
 
 ## Git host contract
 
@@ -125,7 +126,6 @@ PagerDuty is class `paging` and has its own tools: `trigger_alert`, `acknowledge
 ## Not built
 
 - Trellix isolate and release (gibson#1561): the isolate call is documented, and the release call is not confirmed. The `trellix` server has the read tools only. See its README.
-- Microsoft Intune (gibson#1543): Microsoft Graph v1.0 has no call that starts a patch for one device, reads its result or rolls it back. The update profiles are in the beta API and they target groups.
 
 ## License
 

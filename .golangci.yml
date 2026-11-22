@@ -53,8 +53,10 @@ linters:
       # kit.ErrInvalidInput with the name of the field, and a second wrap would
       # only repeat the text. Every other error of internal/kit, for example
       # from kit.Client.Do or ClientCredentials.Token, must be wrapped at the
-      # call site.
+      # call site. kit.GraphError is the exception: it adds the name of the
+      # operation and the Graph error code itself.
       ignore-sigs:
+        - github.com/zeroroot-ai/connectors/internal/kit.GraphError(
         - .Errorf(
         - errors.New(
         - errors.Unwrap(

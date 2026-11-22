@@ -245,6 +245,18 @@ func TestHandlerHealth(t *testing.T) {
 	}
 }
 
+func TestGraphError(t *testing.T) {
+	body := `{"error":{"code":"Request_ResourceNotFound","message":"Resource 'x' does not exist."}}`
+	got := GraphError("get thing", &APIError{Status: 404, Body: body}).Error()
+	if got != "get thing: Graph answered HTTP 404, Request_ResourceNotFound: Resource 'x' does not exist." {
+		t.Errorf("got %q", got)
+	}
+	// An answer with no Graph error object falls back to the plain error.
+	if got := GraphError("get thing", &APIError{Status: 500, Body: "oops"}).Error(); !strings.Contains(got, "HTTP 500") {
+		t.Errorf("got %q", got)
+	}
+}
+
 func TestClientReturnsResponseHeader(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Add("Link", "<https://x/a?after=1>; rel=\"self\"")
