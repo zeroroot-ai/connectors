@@ -139,7 +139,7 @@ func TestInputValidation(t *testing.T) {
 
 func TestAnnotations(t *testing.T) {
 	_, _, tools := setup(t)
-	if len(tools) != 4 {
+	if len(tools) != 2 {
 		t.Fatalf("tools = %d", len(tools))
 	}
 	kittest.AssertReversible(t, tools, "disconnect_from_network", "reconnect_to_network")

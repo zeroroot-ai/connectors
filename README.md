@@ -72,7 +72,7 @@ The servers have no second authentication scheme, by design. The README of each 
 | `entra-id` | identity, response | `revoke_sign_in_sessions`, `disable_account`, `enable_account` | gibson#1549 |
 | `crowdstrike` | edr, response | `contain_host`, `lift_containment` | gibson#1545 |
 | `defender-endpoint` | edr, response | `isolate_device`, `release_device` | gibson#1546 |
-| `sentinelone` | edr, response | `list_threats`, `list_agents`, `disconnect_from_network`, `reconnect_to_network` | gibson#1547, gibson#1440 |
+| `sentinelone` | edr, response | `disconnect_from_network`, `reconnect_to_network` | gibson#1547 |
 | `qualys` | scanner | `get_host_detections` | gibson#1541 |
 | `puppet` | patch | `start_patch_job`, `start_rollback_job`, `get_job` | gibson#1544 |
 
