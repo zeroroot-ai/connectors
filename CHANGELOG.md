@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.3.0](https://github.com/zeroroot-ai/connectors/compare/v0.2.0...v0.3.0) (2026-11-22)
+
+
+### Features
+
+* **cortex-xdr:** add the server for incidents, alerts, endpoints and isolate ([#20](https://github.com/zeroroot-ai/connectors/issues/20)) ([05ee061](https://github.com/zeroroot-ai/connectors/commit/05ee061cdc4b4128794c0beaf04ac16d3c05db93))
+* **fixloop:** add open_merge_request, close_merge_request and read_file to the git-host servers ([#11](https://github.com/zeroroot-ai/connectors/issues/11)) ([93029bb](https://github.com/zeroroot-ai/connectors/commit/93029bb7ccf8678fcb311a9a6e6e430a025b2bd6))
+* **jira:** add the issue server on the Jira Cloud REST API v3 ([#15](https://github.com/zeroroot-ai/connectors/issues/15)) ([3393fa5](https://github.com/zeroroot-ai/connectors/commit/3393fa586ea5292704535259dd7fd3de7515278e))
+* **microsoft-intune:** add the patch server on the Graph beta deployment service ([#10](https://github.com/zeroroot-ai/connectors/issues/10)) ([08b19e9](https://github.com/zeroroot-ai/connectors/commit/08b19e95716ea8b2ef8cdf65a3a4b33cd81cd4c3))
+* **okta:** add read tools for log events, users and sessions ([#8](https://github.com/zeroroot-ai/connectors/issues/8)) ([e011b62](https://github.com/zeroroot-ai/connectors/commit/e011b626adb2fd3ba6252d19932886b3b20b1546))
+* **pagerduty:** add the paging server on the Events API v2 and the REST API v2 ([#16](https://github.com/zeroroot-ai/connectors/issues/16)) ([9612511](https://github.com/zeroroot-ai/connectors/commit/961251144a4a25dcaf3fb242e5894bcbad71230f))
+* **rapid7-insightidr:** add the read server for investigations and alerts ([#19](https://github.com/zeroroot-ai/connectors/issues/19)) ([8ab52bb](https://github.com/zeroroot-ai/connectors/commit/8ab52bb8fa7c99bd407265ced514f9432699fff1))
+* **rapid7-insightvm:** add the read server on the Console API v3 ([#18](https://github.com/zeroroot-ai/connectors/issues/18)) ([b30a53c](https://github.com/zeroroot-ai/connectors/commit/b30a53c7bd5939317ae4f9ba180eead668bc1a69))
+* **sentinelone:** add read tools for threats and agent state ([#23](https://github.com/zeroroot-ai/connectors/issues/23)) ([a6d07b5](https://github.com/zeroroot-ai/connectors/commit/a6d07b52456270a71bdeec6a41f3c6bfe400c088))
+* **servicenow:** add the incident server on the Table API ([#14](https://github.com/zeroroot-ai/connectors/issues/14)) ([b32816a](https://github.com/zeroroot-ai/connectors/commit/b32816a9a1a7243b73d9fa898c518f468d1e7517))
+* **ticket:** add the shared tool contract of the ticket servers ([#13](https://github.com/zeroroot-ai/connectors/issues/13)) ([49668f7](https://github.com/zeroroot-ai/connectors/commit/49668f7a6b055544cbe7d6274aae21ec3c6c19de))
+* **trellix:** add the read server for alerts and hosts ([#17](https://github.com/zeroroot-ai/connectors/issues/17)) ([417cb04](https://github.com/zeroroot-ai/connectors/commit/417cb04055d4d41fae6bedd257308dd5b051f02d))
+
+
+### Bug Fixes
+
+* **github-fixloop:** pin the changed files to the head and close the review minors ([#24](https://github.com/zeroroot-ai/connectors/issues/24)) ([310f8f2](https://github.com/zeroroot-ai/connectors/commit/310f8f2050729eb343e280cf9f9189c4d6486635))
+* **kit:** wait for X-Rate-Limit-Reset on a 429 ([#12](https://github.com/zeroroot-ai/connectors/issues/12)) ([54391d2](https://github.com/zeroroot-ai/connectors/commit/54391d2eb7c37f9b8a5a7260230df895e37e038e))
+
 ## [0.2.0](https://github.com/zeroroot-ai/connectors/compare/v0.1.0...v0.2.0) (2026-11-21)
 
 
