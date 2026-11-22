@@ -66,15 +66,37 @@ The servers have no second authentication scheme, by design. The README of each 
 | Directory | Tool class | Tools | Issue |
 |---|---|---|---|
 | `prometheus` | observability | `query_instant`, `query_range`, `list_alerts`, `health_signal` | gibson#1540 |
-| `gitlab-fixloop` | git-host | `merge_request_state`, `merge_merge_request`, `revert_merge_request`, `deployment_state` | gibson#1539 |
-| `github-fixloop` | git-host | `merge_request_state`, `merge_merge_request`, `revert_merge_request`, `deployment_state` | gibson#1539 |
-| `okta` | identity, response | `list_log_events`, `list_users`, `get_user`, `get_session`, `revoke_user_sessions`, `suspend_user`, `unsuspend_user` | gibson#1548, gibson#1436 |
+| `gitlab-fixloop` | git-host | `open_merge_request`, `close_merge_request`, `read_file`, `merge_request_state`, `merge_merge_request`, `revert_merge_request`, `deployment_state` | gibson#1539 |
+| `github-fixloop` | git-host | `open_merge_request`, `close_merge_request`, `read_file`, `merge_request_state`, `merge_merge_request`, `revert_merge_request`, `deployment_state` | gibson#1539 |
+| `okta` | identity, response | `list_log_events`, `list_users`, `get_user`, `revoke_user_sessions`, `suspend_user`, `unsuspend_user` | gibson#1548, gibson#1436 |
 | `entra-id` | identity, response | `revoke_sign_in_sessions`, `disable_account`, `enable_account` | gibson#1549 |
 | `crowdstrike` | edr, response | `contain_host`, `lift_containment` | gibson#1545 |
 | `defender-endpoint` | edr, response | `isolate_device`, `release_device` | gibson#1546 |
 | `sentinelone` | edr, response | `list_threats`, `list_agents`, `disconnect_from_network`, `reconnect_to_network` | gibson#1547, gibson#1440 |
 | `qualys` | scanner | `get_host_detections` | gibson#1541 |
 | `puppet` | patch | `start_patch_job`, `start_rollback_job`, `get_job` | gibson#1544 |
+
+## Git host contract
+
+The two servers of class `git-host` (`github-fixloop` and `gitlab-fixloop`) have the same tools, the same arguments and the same result fields. The types are in `internal/fixloop`. `merge_request` is a URL of the host, or `owner/repo#12` on GitHub and `group/project!12` on GitLab.
+
+| Tool | Arguments | Result | Undo |
+|---|---|---|---|
+| `open_merge_request` | `project`, `branch`, `base_branch`, `title`, `description`, `files` (each `path` with `content`, or `delete: true`) | `merge_request`, `url`, `source_branch`, `target_branch`, `created_at`, `head_sha`, `existing` | `close_merge_request` |
+| `close_merge_request` | `merge_request` | `merge_request`, `state`, `closed` | A person reopens it. |
+| `read_file` | `project`, `ref`, `path` | `found`, `content`, `sha` (the blob sha), `size`, `path`, `ref` | Not a change. |
+| `merge_request_state` | `merge_request` | `state`, `pipeline_green`, `pipeline_status`, `reason`, `head_sha`, `source_branch`, `created_at`, `merge_commit`, `changed_files`, `changed_files_truncated`, `changed_files_error` | Not a change. |
+| `merge_merge_request` | `merge_request`, `expected_head_sha` (required) and, on GitHub, optional `merge_method` | `merged`, `state`, `reason`, `head_sha`, `merge_commit` | `revert_merge_request` |
+| `revert_merge_request` | `merge_request` | `revert_merge_request`, `state`, `merged` | `revert_merge_request` on the revert |
+| `deployment_state` | `merge_request` | `deployed`, `application`, `at`, `restart` | Not a change. |
+
+Rules of the contract:
+
+- `open_merge_request` makes the source branch from the head of `base_branch`, and puts all files in one commit. It never writes to the base branch and never merges.
+- When the source branch exists, the tool accepts it only when its head is exactly one commit beyond the base branch, and that commit changes exactly the files of the input with the git blob sha of the input content, read at that commit, and with the file mode that the tool writes (a delete is a removed file). GitHub: the tool reads the tree of the commit and requires the mode `100644` and the type `blob` for each path. GitLab: it checks `a_mode` and `b_mode` of each diff. Then it returns the open merge request of the branch, or opens one, and makes no commit. In every other case it refuses with the reason. It never builds on a branch that holds a foreign commit.
+- `head_sha` of `open_merge_request` is the commit that the tool made, or checked on a resume. The tool refuses when the head of the merge request is another commit. `head_sha` of `merge_request_state` is the head now. A caller passes it as `expected_head_sha` to `merge_merge_request`. It is required. The tool merges nothing when the head is another commit, and the reason names `expected_head_sha` and both shas. It also sends the head sha to the host.
+- `changed_files` is a list of `{path, change, previous_path, blob_sha, mode}`. `change` is `added`, `modified`, `deleted`, `renamed` or `mode_changed`. `mode` is the file mode at the head. GitLab gives it, and GitHub does not. `previous_path` is set for a rename. `blob_sha` is the git blob sha of the file at the head, and it is empty for a deleted file. The list has at most 100 files. `changed_files_truncated` is true when the merge request has more. When the host does not give the list, `changed_files` is empty and `changed_files_error` holds the cause, so an empty list with an error means unknown. An agent computes the git blob sha of its expected content (`SHA-1` of `blob <length>`, a zero byte and the content) and compares it, so no content travels.
+- Only `merge_request_state` fills `changed_files`. The merge tools do not read it.
 
 ## Ticket contract
 
@@ -98,6 +120,7 @@ The servers of class `ticket` (`servicenow`, `jira`) use the same tool names, th
 - A server adds only tools that have no contract name. Jira adds `list_transitions` and `transition_ticket`.
 
 PagerDuty is class `paging` and has its own tools: `trigger_alert`, `acknowledge_alert`, `resolve_alert`, `get_incident` and `find_incidents`.
+
 
 ## Not built
 

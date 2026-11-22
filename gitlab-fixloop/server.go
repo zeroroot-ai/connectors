@@ -103,6 +103,8 @@ type service struct {
 }
 
 func (v *service) register(s *mcp.Server, log *slog.Logger) {
+	v.registerOpen(s, log)
+	v.registerReadFile(s, log)
 	kit.AddTool(s, log, &mcp.Tool{
 		Name: "merge_request_state",
 		Description: "Read the state of one GitLab merge request: open, merged, closed or refused, the status of its head " +
@@ -172,6 +174,12 @@ type glMR struct {
 	HeadPipeline        *glPipeline `json:"head_pipeline"`
 	Squash              bool        `json:"squash"`
 	SquashOnMerge       *bool       `json:"squash_on_merge"`
+	// ChangesCount is a string. It is "1000+" when the merge request has more
+	// changes than GitLab stores, and empty while GitLab counts.
+	ChangesCount string `json:"changes_count"`
+	DiffRefs     struct {
+		HeadSHA string `json:"head_sha"`
+	} `json:"diff_refs"`
 }
 
 // fromFork is true when the merge request comes from another project. GitLab
@@ -372,14 +380,30 @@ func (v *service) mergeRequestState(ctx context.Context, _ *mcp.CallToolRequest,
 		return nil, fixloop.State{}, err
 	}
 	st, err := v.stateOf(ctx, project, refKey(project, iid), mr)
-	return nil, st, err
+	if err != nil {
+		return nil, st, err
+	}
+	st.ChangedFiles = []fixloop.ChangedFile{}
+	files, truncated, ferr := v.changedFiles(ctx, project, iid, mr)
+	if ferr == nil {
+		// The diffs and the blobs come from later reads, so the head can have
+		// moved. The tool reads the merge request again after them, and gives
+		// the files only when sha and diff_refs.head_sha are unchanged.
+		ferr = v.sameHeadAfter(ctx, project, iid, mr)
+	}
+	if ferr != nil {
+		st.ChangedFilesError = ferr.Error()
+	} else {
+		st.ChangedFiles, st.ChangedFilesTruncated = files, truncated
+	}
+	return nil, st, nil
 }
 
 // ---- merge_merge_request ----
 
 type mergeInput struct {
 	MergeRequest string `json:"merge_request" jsonschema:"URL of the merge request, or its reference group/project!12"`
-	SHA          string `json:"sha,omitempty" jsonschema:"the head sha that the pipeline tested. The tool refuses the merge when the head is another commit."`
+	SHA          string `json:"expected_head_sha" jsonschema:"the head sha that the pipeline tested, from head_sha of merge_request_state or open_merge_request. The tool refuses the merge when the head is another commit, and sends the head sha to GitLab."`
 }
 
 func (v *service) mergeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in mergeInput) (*mcp.CallToolResult, fixloop.MergeResult, error) {
@@ -387,10 +411,8 @@ func (v *service) mergeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest,
 	if err != nil {
 		return nil, fixloop.MergeResult{}, err
 	}
-	if in.SHA != "" {
-		if err := kit.CheckString("sha", in.SHA, 40, kit.Hex40); err != nil {
-			return nil, fixloop.MergeResult{}, err
-		}
+	if err := kit.CheckString("expected_head_sha", in.SHA, 40, kit.Hex40); err != nil {
+		return nil, fixloop.MergeResult{}, fmt.Errorf("check expected_head_sha: %w", err)
 	}
 	mr, err := v.getMR(ctx, project, iid)
 	if err != nil {
@@ -431,7 +453,7 @@ func (v *service) tryMerge(ctx context.Context, project string, iid int, mr *glM
 		st.Reason = "the merge request is closed"
 		return st, false, nil
 	case wantSHA != "" && !strings.EqualFold(wantSHA, mr.SHA):
-		st.Reason = "the head of the merge request is not the sha that was tested. A push changed it."
+		st.Reason = "the head of the merge request is not expected_head_sha: expected_head_sha is " + wantSHA + ", the head is " + mr.SHA + ". A push changed it."
 		return st, false, nil
 	case st.State == fixloop.Refused:
 		return st, false, nil
@@ -850,4 +872,18 @@ func (v *service) holds(ctx context.Context, project, commit, deployed string) b
 		Query: url.Values{"refs[]": {commit, deployed}},
 	}, &base)
 	return err == nil && base.ID == commit
+}
+
+// sameHeadAfter reads the merge request again and fails when its head, or the
+// head of its diff version, is not the one that the state used.
+func (v *service) sameHeadAfter(ctx context.Context, project string, iid int, before *glMR) error {
+	again, err := v.getMR(ctx, project, iid)
+	if err != nil {
+		return fmt.Errorf("check the head after the files: %w", err)
+	}
+	if !strings.EqualFold(again.SHA, before.SHA) || !strings.EqualFold(again.DiffRefs.HeadSHA, before.DiffRefs.HeadSHA) {
+		return fmt.Errorf("the head of the merge request moved from %s to %s while the files were read, so the files may belong to another commit",
+			before.SHA, again.SHA)
+	}
+	return nil
 }

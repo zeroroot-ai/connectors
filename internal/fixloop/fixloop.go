@@ -58,6 +58,42 @@ type State struct {
 	SourceBranchReason string `json:"source_branch_reason,omitempty"`
 	// CreatedAt is when the merge request was opened, in the format of Time.
 	CreatedAt string `json:"created_at,omitempty"`
+	// ChangedFiles lists the files of the merge request. Only
+	// merge_request_state fills it. An agent computes the git blob sha of its
+	// expected content and compares it with BlobSHA, so no content travels.
+	// ChangedFilesTruncated is true when the merge request has more than
+	// MaxChangedFiles files. ChangedFilesError is not empty when the host did
+	// not give the list. The caller then does not know the files.
+	ChangedFiles          []ChangedFile `json:"changed_files"`
+	ChangedFilesTruncated bool          `json:"changed_files_truncated"`
+	ChangedFilesError     string        `json:"changed_files_error,omitempty"`
+}
+
+// The kinds of change of a file.
+const (
+	ChangeAdded    = "added"
+	ChangeModified = "modified"
+	ChangeDeleted  = "deleted"
+	ChangeRenamed  = "renamed"
+	// ChangeModeChanged is a change of the file mode with no change of the
+	// content.
+	ChangeModeChanged = "mode_changed"
+)
+
+// MaxChangedFiles bounds the list of changed files.
+const MaxChangedFiles = 100
+
+// ChangedFile is one file of a merge request. BlobSHA is the git blob sha of
+// the file at the head, and it is empty for a deleted file. PreviousPath is
+// set for a rename.
+type ChangedFile struct {
+	Path         string `json:"path"`
+	Change       string `json:"change"`
+	PreviousPath string `json:"previous_path,omitempty"`
+	BlobSHA      string `json:"blob_sha"`
+	// Mode is the file mode at the head, for example 100644. GitHub gives no
+	// mode in the list of files, so it is empty there.
+	Mode string `json:"mode,omitempty"`
 }
 
 // ForkReason is the reason for a merge request from a fork, or from a fork

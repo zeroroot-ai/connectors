@@ -158,6 +158,8 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 }
 
 func (v *service) register(s *mcp.Server, log *slog.Logger) {
+	v.registerOpen(s, log)
+	v.registerReadFile(s, log)
 	kit.AddTool(s, log, &mcp.Tool{
 		Name: "merge_request_state",
 		Description: "Read the state of one GitHub pull request: open, merged, closed or refused, the status of its checks, " +
@@ -605,14 +607,43 @@ func (v *service) mergeRequestState(ctx context.Context, _ *mcp.CallToolRequest,
 		return nil, fixloop.State{}, err
 	}
 	st, err := v.stateOf(ctx, r, pr)
-	return nil, st, err
+	if err != nil {
+		return nil, st, err
+	}
+	st.ChangedFiles = []fixloop.ChangedFile{}
+	files, truncated, ferr := v.changedFiles(ctx, r)
+	if ferr == nil {
+		// The files come from a second read, so the head can have moved between
+		// the two. The tool reads the pull request again after the files, and
+		// gives the files only when the head is the head that it returned.
+		ferr = v.sameHeadAfter(ctx, r, pr.Head.SHA)
+	}
+	if ferr != nil {
+		st.ChangedFilesError = ferr.Error()
+	} else {
+		st.ChangedFiles, st.ChangedFilesTruncated = files, truncated
+	}
+	return nil, st, nil
+}
+
+// sameHeadAfter reads the pull request again and fails when its head is not
+// the head that the state returned.
+func (v *service) sameHeadAfter(ctx context.Context, r prRef, head string) error {
+	again, err := v.getPR(ctx, r)
+	if err != nil {
+		return fmt.Errorf("check the head after the files: %w", err)
+	}
+	if !strings.EqualFold(again.Head.SHA, head) {
+		return fmt.Errorf("the head of the pull request moved from %s to %s while the files were read, so the files may belong to another commit", head, again.Head.SHA)
+	}
+	return nil
 }
 
 // ---- merge_merge_request ----
 
 type mergeInput struct {
 	MergeRequest string `json:"merge_request" jsonschema:"URL of the pull request, or its reference owner/repo#12"`
-	SHA          string `json:"sha,omitempty" jsonschema:"the head sha that the checks tested. The tool refuses the merge when the head is another commit."`
+	SHA          string `json:"expected_head_sha" jsonschema:"the head sha that the checks tested, from head_sha of merge_request_state or open_merge_request. The tool refuses the merge when the head is another commit, and sends this sha to GitHub."`
 	MergeMethod  string `json:"merge_method,omitempty" jsonschema:"merge or squash. The default is the first that the repository allows: merge, then squash. The revert tool does not support a rebase merge."`
 }
 
@@ -621,10 +652,8 @@ func (v *service) mergeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest,
 	if err != nil {
 		return nil, fixloop.MergeResult{}, err
 	}
-	if in.SHA != "" {
-		if err := kit.CheckString("sha", in.SHA, 40, kit.Hex40); err != nil {
-			return nil, fixloop.MergeResult{}, err
-		}
+	if err := kit.CheckString("expected_head_sha", in.SHA, 40, kit.Hex40); err != nil {
+		return nil, fixloop.MergeResult{}, fmt.Errorf("check expected_head_sha: %w", err)
 	}
 	switch in.MergeMethod {
 	case "", "merge", "squash":
@@ -700,7 +729,7 @@ func holdMerge(st *fixloop.State, pr *ghPR, wantSHA string) bool {
 	case pr.State == "closed":
 		st.Reason = "the pull request is closed"
 	case wantSHA != "" && !strings.EqualFold(wantSHA, pr.Head.SHA):
-		st.Reason = "the head of the pull request is not the sha that was tested. A push changed it."
+		st.Reason = "the head of the pull request is not expected_head_sha: expected_head_sha is " + wantSHA + ", the head is " + pr.Head.SHA + ". A push changed it."
 	case st.State == fixloop.Refused:
 	case !st.PipelineGreen:
 		reason := "the checks have not succeeded: " + st.PipelineStatus

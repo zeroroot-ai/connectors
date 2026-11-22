@@ -305,7 +305,7 @@ func TestMergeRefusesAFork(t *testing.T) {
 			"GET " + pr7:            reply(200, body),
 			"PUT " + pr7 + "/merge": reply(200, `{"merged":true}`),
 		}))
-		isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "sha": headSHA})
+		isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 		if isErr {
 			t.Fatalf("%s: %s", name, text)
 		}
@@ -397,7 +397,7 @@ func TestPipelineRefusesMoreRunsThanItReads(t *testing.T) {
 	routes["GET "+pr7] = reply(200, openPR("clean"))
 	routes["PUT "+pr7+"/merge"] = reply(200, `{"merged":true}`)
 	m, call := setup(t, routes)
-	isErr, text, _ := call("merge_merge_request", map[string]any{"merge_request": ref})
+	isErr, text, _ := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 	if !isErr || !strings.Contains(text, "1001 check runs") {
 		t.Errorf("isErr=%v %s", isErr, text)
 	}
@@ -487,7 +487,7 @@ func TestMergeSendsHeadSHA(t *testing.T) {
 		_, _ = w.Write([]byte(`{"sha":"` + mergeSHA + `","merged":true,"message":"Pull Request successfully merged"}`))
 	}
 	m, call := setup(t, routes)
-	isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "sha": headSHA, "merge_method": "squash"})
+	isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA, "merge_method": "squash"})
 	if isErr {
 		t.Fatal(text)
 	}
@@ -522,9 +522,9 @@ func TestMergeNotAttempted(t *testing.T) {
 	}
 	for _, c := range cases {
 		m, call := setup(t, merge(checks(c.runs, "pending", 0), map[string]handler{"GET " + pr7: reply(200, c.pr)}))
-		args := map[string]any{"merge_request": ref}
+		args := map[string]any{"merge_request": ref, "expected_head_sha": headSHA}
 		if c.sha != "" {
-			args["sha"] = c.sha
+			args["expected_head_sha"] = c.sha
 		}
 		isErr, text, out := call("merge_merge_request", args)
 		reason, _ := out["reason"].(string)
@@ -554,7 +554,7 @@ func TestMergeReadsAgainWhenMergeableIsNull(t *testing.T) {
 	}
 	routes["PUT "+pr7+"/merge"] = reply(200, `{"merged":true}`)
 	_, call := setup(t, routes)
-	isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref})
+	isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 	if isErr || out["merged"] != true {
 		t.Errorf("isErr=%v out=%v %s", isErr, out, text)
 	}
@@ -575,7 +575,7 @@ func TestMergeRefusesAHeadThatMovedDuringTheWait(t *testing.T) {
 	}
 	routes["PUT "+pr7+"/merge"] = reply(200, `{"merged":true}`)
 	m, call := setup(t, routes)
-	isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref})
+	isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 	reason, _ := out["reason"].(string)
 	if isErr || out["merged"] != false || out["head_sha"] != headSHA || !strings.Contains(reason, "head") {
 		t.Errorf("isErr=%v out=%v %s", isErr, out, text)
@@ -598,7 +598,7 @@ func TestRefusalComesFromTheLiveState(t *testing.T) {
 	if out["state"] != "refused" || out["reason"] != "GitHub does not allow the merge: blocked" {
 		t.Errorf("a blocked pull request with green checks: %v", out)
 	}
-	call("merge_merge_request", map[string]any{"merge_request": ref})
+	call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 	if m.called("PUT "+pr7+"/merge") != 0 {
 		t.Error("the tool called merge on a blocked pull request")
 	}
@@ -647,7 +647,7 @@ func TestMergeVendorAnswers(t *testing.T) {
 		}
 		routes["PUT "+pr7+"/merge"] = reply(c.status, c.body)
 		_, call := setup(t, routes)
-		isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref})
+		isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 		if isErr != c.wantErr {
 			t.Errorf("%s: isErr=%v %s", c.name, isErr, text)
 			continue
@@ -662,7 +662,7 @@ func TestMergeAlreadyMergedIsNotAnError(t *testing.T) {
 	routes := checks(greenRun, "success", 1)
 	routes["GET "+pr7] = reply(200, mergedPR)
 	m, call := setup(t, routes)
-	isErr, _, out := call("merge_merge_request", map[string]any{"merge_request": ref})
+	isErr, _, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 	if isErr || out["merged"] != true || m.called("PUT "+pr7+"/merge") != 0 {
 		t.Errorf("isErr=%v out=%v calls=%v", isErr, out, m.calls)
 	}
@@ -1113,8 +1113,10 @@ func TestInputValidationNeverReachesGitHub(t *testing.T) {
 		}
 	}
 	for _, args := range []map[string]any{
-		{"merge_request": ref, "sha": "xyz"},
-		{"merge_request": ref, "merge_method": "rebase"},
+		{"merge_request": ref, "expected_head_sha": "xyz"},
+		{"merge_request": ref, "expected_head_sha": headSHA, "merge_method": "rebase"},
+		{"merge_request": ref}, // expected_head_sha is required
+		{"merge_request": ref, "expected_head_sha": ""},
 	} {
 		if isErr, _, _ := call("merge_merge_request", args); !isErr {
 			t.Errorf("accepted %v", args)
@@ -1131,10 +1133,10 @@ func TestAnnotations(t *testing.T) {
 		t.Fatal(err)
 	}
 	tools := kittest.Tools(t, kittest.Connect(t, register))
-	if len(tools) != 4 {
-		t.Fatalf("tools = %d, want 4", len(tools))
+	if len(tools) != 7 {
+		t.Fatalf("tools = %d, want 7", len(tools))
 	}
-	for _, name := range []string{"merge_request_state", "deployment_state"} {
+	for _, name := range []string{"merge_request_state", "deployment_state", "read_file"} {
 		if a := tools[name].Annotations; a == nil || !a.ReadOnlyHint {
 			t.Errorf("%s must be read only", name)
 		}
@@ -1184,7 +1186,7 @@ func TestRequiredCheckThatHasNotStartedIsPending(t *testing.T) {
 			out["reason"] != "these required checks have not reported: security-scan" {
 			t.Errorf("%s: a required check that has not started: %v", name, out)
 		}
-		_, _, out = call("merge_merge_request", map[string]any{"merge_request": ref})
+		_, _, out = call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 		if out["reason"] != "the checks have not succeeded: pending. these required checks have not reported: security-scan" ||
 			m.called("PUT "+pr7+"/merge") != 0 {
 			t.Errorf("%s: merge: %v", name, out)
@@ -1243,7 +1245,7 @@ func TestMergeUsesAMethodThatTheRepositoryAllows(t *testing.T) {
 			_, _ = w.Write([]byte(`{"merged":true}`))
 		}
 		m, call := setup(t, routes)
-		args := map[string]any{"merge_request": ref}
+		args := map[string]any{"merge_request": ref, "expected_head_sha": headSHA}
 		if c.method != "" {
 			args["merge_method"] = c.method
 		}
@@ -1278,7 +1280,7 @@ func TestMergeChecksTheHeadBeforeTheRefusal(t *testing.T) {
 	routes := checks(greenRun, "success", 1)
 	routes["GET "+pr7] = reply(200, openPR("blocked"))
 	m, call := setup(t, routes)
-	_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref, "sha": "dddddddddddddddddddddddddddddddddddddddd"})
+	_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": "dddddddddddddddddddddddddddddddddddddddd"})
 	reason, _ := out["reason"].(string)
 	if !strings.Contains(reason, "A push changed it") || m.called("PUT "+pr7+"/merge") != 0 {
 		t.Errorf("out = %v", out)
@@ -1293,7 +1295,7 @@ func TestMergeRefusalReasonIsStable(t *testing.T) {
 	routes["PUT "+pr7+"/merge"] = reply(405, `{"message":"Repository rule violations found"}`)
 	_, call := setup(t, routes)
 	for range 2 {
-		_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref})
+		_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 		if out["state"] != "refused" || out["reason"] != "GitHub refused the merge (HTTP 405): Repository rule violations found" {
 			t.Errorf("out = %v", out)
 		}
@@ -1368,7 +1370,11 @@ func TestHiddenMergeMethodsAreAnError(t *testing.T) {
 	routes["PUT "+pr7+"/merge"] = reply(200, `{"merged":true}`)
 	m, call := setup(t, routes)
 	for _, tool := range []string{"merge_request_state", "merge_merge_request"} {
-		isErr, text, _ := call(tool, map[string]any{"merge_request": ref})
+		args := map[string]any{"merge_request": ref}
+		if tool == "merge_merge_request" {
+			args["expected_head_sha"] = headSHA
+		}
+		isErr, text, _ := call(tool, args)
 		if !isErr || !strings.Contains(text, "contents:read and contents:write permissions") {
 			t.Errorf("%s: isErr=%v %s", tool, isErr, text)
 		}
@@ -1418,7 +1424,7 @@ func TestCombinedStatusRefusesMoreStatusesThanItReads(t *testing.T) {
 	routes["GET "+pr7] = reply(200, openPR("clean"))
 	routes["PUT "+pr7+"/merge"] = reply(200, `{"merged":true}`)
 	m, call := setup(t, routes)
-	isErr, text, _ := call("merge_merge_request", map[string]any{"merge_request": ref})
+	isErr, text, _ := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 	if !isErr || !strings.Contains(text, "1001 statuses") {
 		t.Errorf("isErr=%v %s", isErr, text)
 	}

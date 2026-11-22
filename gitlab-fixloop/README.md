@@ -23,6 +23,9 @@ The argument `merge_request` is the URL of the merge request on the server of `G
 | `merge_request_state` | `GET /projects/:id/merge_requests/:iid`. For an open merge request with a green pipeline also `GET /projects/:id` (the merge method) unless the merge request squashes, and `GET .../status_checks` when the status is `status_checks_must_pass` | Not needed. It reads. | `readOnlyHint: true` |
 | `merge_merge_request` | the reads above, then `PUT .../merge` with `sha` | `revert_merge_request` | `destructiveHint: false`, `idempotentHint: true` |
 | `revert_merge_request` | list and create merge requests, create a branch, `POST /repository/commits/:sha/revert`, then the merge call above | `revert_merge_request` on the revert merge request | `destructiveHint: false`, `idempotentHint: true` |
+| `open_merge_request` | `GET /projects/:id/merge_requests`, `HEAD /projects/:id/repository/files/:path` for each file, `POST /projects/:id/repository/commits` with `start_branch`, then `POST /projects/:id/merge_requests` | `close_merge_request` | `destructiveHint: false`, `idempotentHint: true` |
+| `close_merge_request` | `GET /projects/:id/merge_requests/:iid`, then `PUT` it with `state_event: close` | A person reopens it. No tool reopens it. | `destructiveHint: false`, `idempotentHint: true` |
+| `read_file` | `GET /projects/:id/repository/files/:path?ref=` | Not a change. | `readOnlyHint: true` |
 | `deployment_state` | `GET` the merge request, `GET /projects/:id/deployments`, `GET /repository/merge_base` | Not needed. It reads. | `readOnlyHint: true` |
 
 ### Mapping to the daemon shape
@@ -52,7 +55,7 @@ The input and the result follow `fixloop/connector.go`. Where GitLab differs, th
 1. The merge request is open.
 2. The head pipeline has the status `success` and ran for the current head commit.
 3. `detailed_merge_status` is `mergeable`.
-4. The `sha` argument, when given, is the head commit.
+4. The argument `expected_head_sha` is required. It is the head commit that the caller tested. `head_sha` of `merge_request_state` and of `open_merge_request` gives it. When the head is another commit, the tool merges nothing and the reason says `the head ... moved: expected <sha>, now <sha>`. The tool sends the head sha that it checked to the host.
 
 The tool sends the head sha that it checked in the merge call. GitLab refuses the merge with HTTP 409 when a push changed the head after the check. The result then has `merged: false` and the state `open`.
 
@@ -86,6 +89,32 @@ Limits:
 - GitLab refuses the revert (HTTP 400) when the revert conflicts with later commits. The tool shows the error. A person must revert by hand.
 - A project without a pipeline has no head pipeline. The tool opens the revert merge request and never merges it.
 - The tool does not wait for the pipeline. The caller calls it again.
+
+## open_merge_request
+
+The input follows the contract of the incident agent: `project` (the project path, for example `group/project`), `branch`, `base_branch`, `title`, `description` and `files`. A file is a `path` with `content` (the new text of the file) or `delete: true`. One call makes one commit with all changes, on the new source branch, from the target branch, and opens the merge request. The result holds `merge_request` (`group/project!12`), `url`, `source_branch`, `target_branch` and `created_at`.
+
+GitLab has no commit action that writes a file whether it exists or not. For each file with content, the tool sends `HEAD` for the path on the target branch. It uses the action `update` when GitLab answers 200 and `create` when it answers 404. A change with `delete: true` uses the action `delete`.
+
+The tool never writes to the target branch and never merges. The source branch is made from the head of the base branch. When the source branch exists, the tool compares it with the base branch (`GET /projects/:id/repository/compare` and the blob id of each file). It accepts the branch only when it holds exactly one commit beyond the base branch, and that commit changes exactly the files of the input with the git blob sha of the input content. It then returns the open merge request of the branch with `existing: true`, or opens one and makes no commit. In every other case it refuses with the reason, and it never builds on a foreign commit. A branch whose commit changes nothing against the base branch does not match, so the tool refuses it. The undo is `close_merge_request`.
+
+The input has these limits: 100 files, 1 MiB for one file, 8 MiB for all files, a title of 256 bytes, a branch name of plain characters, and a path with no `..`, no empty folder name and no `.git` folder.
+
+References: https://docs.gitlab.com/api/repository_files/, https://docs.gitlab.com/api/commits/ and https://docs.gitlab.com/api/merge_requests/.
+
+## read_file
+
+The input is `project`, `ref` (a branch, a tag or a commit) and `path`. The result is `found`, `content`, `sha` (the blob sha), `size`, `path` and `ref`. `found` is always present. A file that does not exist on the ref gives `found: false` with no error. GitLab says "File Not Found" or "Project Not Found" in the 404 body, and the tool uses it. A missing project is an error. The tool refuses a path with `..`, a leading `/`, a backslash, an empty folder name or a `.git` folder. It refuses a file over 1 MiB and a file that is not UTF-8 text. A folder is not a file. GitLab answers 404 for it, so the result is `found: false`. The tool does not tell a symbolic link from a file. GitLab gives the content of the link as it stores it. It never writes.
+
+Reference: https://docs.gitlab.com/api/repository_files/.
+
+## changed_files
+
+`merge_request_state` also returns `changed_files`, a list of `{path, change, previous_path, blob_sha, mode}`, with `changed_files_truncated` and `changed_files_error`. `change` is `added`, `modified`, `deleted`, `renamed` or `mode_changed`. `mode` is the file mode at the head (for example `100644`). GitLab gives `b_mode` in the diffs, and the tool returns it as `mode`. A file whose mode changed and whose diff is empty is `mode_changed`. The list has at most 100 files. The tool reads `GET /projects/:id/merge_requests/:iid/diffs?per_page=100`. The diffs give no blob id, so the tool reads the blob id of each file that exists at the head with `GET /projects/:id/repository/files/:path?ref=<head sha>`. That is one more call for each file, and it also reads the content of the file. The list is complete only when `changes_count` of the merge request is a number that equals the number of files. `changes_count` is capped at "1000+". When it ends with `+`, or differs from the number of files, `changed_files_truncated` is true. The diffs belong to the head only when `diff_refs.head_sha` equals `sha`. After a push, GitLab makes the new diff later, so the two can differ. Then `changed_files_error` says so and the list is empty. The pages are https://docs.gitlab.com/api/merge_requests/. The page of the API is https://docs.gitlab.com/api/merge_requests/#list-merge-request-diffs. When the host does not give the list, the state is still returned, `changed_files` is empty and `changed_files_error` holds the cause. An empty list with an error means that the files are unknown.
+
+An agent should refuse each `mode_changed` entry, and a `mode` that is not `100644` for a file that it wrote.
+
+The diffs and the blobs come from later reads. The tool reads the merge request again after them. When `sha` or `diff_refs.head_sha` is not the one that the state used, `changed_files` is empty and `changed_files_error` says that the head moved.
 
 ## Deployment requirement
 
