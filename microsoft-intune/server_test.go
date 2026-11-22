@@ -107,7 +107,7 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func setup(t *testing.T) (*mock, func(string, map[string]any) (bool, string, *mcp.CallToolResult), map[string]*mcp.Tool) {
+func setup(t *testing.T) (srv *mock, call func(string, map[string]any) (bool, string, *mcp.CallToolResult), tools map[string]*mcp.Tool) {
 	t.Helper()
 	m := &mock{deployment: fixture(t, "deployment_ok.json"), members: fixture(t, "members_one.json")}
 	ts := httptest.NewServer(m)
