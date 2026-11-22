@@ -41,8 +41,8 @@ import (
 
 var (
 	projectKey = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,9}$`)
-	issueKey   = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,9}-[1-9][0-9]{0,8}$`)
-	transID    = regexp.MustCompile(`^[0-9]{1,9}$`)
+	issueKey   = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,9}-[1-9]\d{0,8}$`)
+	transID    = regexp.MustCompile(`^\d{1,9}$`)
 	nameFormat = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._-]{0,49}$`)
 )
 
@@ -150,8 +150,9 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 // adf returns a document of the Atlassian Document Format with one paragraph
 // for each line of the text.
 func adf(text string) map[string]any {
-	var paras []any
-	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	paras := make([]any, 0, len(lines))
+	for _, line := range lines {
 		p := map[string]any{"type": "paragraph", "content": []any{}}
 		if line != "" {
 			p["content"] = []any{map[string]any{"type": "text", "text": line}}
