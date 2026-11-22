@@ -50,6 +50,10 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"resources":[` + assetJS + `],"page":{"number":0,"size":25,"totalPages":1,"totalResources":1}}`))
 	case r.Method == http.MethodGet && r.URL.Path == "/api/3/assets/42":
 		_, _ = w.Write([]byte(assetJS))
+	case r.Method == http.MethodGet && r.URL.Path == "/api/3/assets/5000000001":
+		_, _ = w.Write([]byte(strings.Replace(assetJS, `"id":42`, `"id":5000000001`, 1)))
+	case r.Method == http.MethodGet && r.URL.Path == "/api/3/assets/5000000001/vulnerabilities":
+		_, _ = w.Write([]byte(`{"resources":[],"page":{"number":0,"size":25,"totalPages":0,"totalResources":0}}`))
 	case r.Method == http.MethodGet && r.URL.Path == "/api/3/assets/42/vulnerabilities":
 		_, _ = w.Write([]byte(`{"resources":[{"id":"ssh-cve-2020-14145","status":"vulnerable-exploited","since":"2026-11-01T00:00:00.000Z","instances":2,"results":[],"links":[]}],` +
 			`"page":{"number":0,"size":25,"totalPages":3,"totalResources":60}}`))
@@ -233,5 +237,23 @@ func TestConfig(t *testing.T) {
 	plain := map[string]string{"INSIGHTVM_URL": "http://console:3780", "INSIGHTVM_USER": "u", "INSIGHTVM_PASSWORD": "p"}
 	if _, err := build(kit.NewEnvFrom(plain), log); err == nil {
 		t.Error("plain http accepted")
+	}
+}
+
+// The spec types the asset id as int64. An id above 2^31 works.
+func TestAssetIDIsInt64(t *testing.T) {
+	m, call, _ := setup(t)
+	const big = 5000000001
+	_, text, res := call("get_asset", map[string]any{"asset_id": big})
+	var a assetOut
+	kittest.Structured(t, res, &a)
+	if a.ID != big || m.calls[0] != "GET /api/3/assets/5000000001" {
+		t.Errorf("asset = %+v calls %v %s", a, m.calls, text)
+	}
+	if isErr, text, _ := call("list_asset_vulnerabilities", map[string]any{"asset_id": big}); isErr {
+		t.Errorf("findings: %s", text)
+	}
+	if m.calls[1] != "GET /api/3/assets/5000000001/vulnerabilities" {
+		t.Errorf("calls = %v", m.calls)
 	}
 }

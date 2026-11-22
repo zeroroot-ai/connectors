@@ -155,7 +155,7 @@ func (m pageMeta) out() pageOut {
 // ---- assets ------------------------------------------------------------
 
 type asset struct {
-	ID              int     `json:"id"`
+	ID              int64   `json:"id"`
 	IP              string  `json:"ip,omitempty"`
 	HostName        string  `json:"hostName,omitempty"`
 	OS              string  `json:"os,omitempty"`
@@ -181,7 +181,7 @@ type vulnCounts struct {
 }
 
 type assetOut struct {
-	ID              int        `json:"asset_id"`
+	ID              int64      `json:"asset_id"`
 	IP              string     `json:"ip,omitempty"`
 	HostName        string     `json:"host_name,omitempty"`
 	OS              string     `json:"os,omitempty"`
@@ -249,17 +249,26 @@ func (v *service) findAssets(ctx context.Context, _ *mcp.CallToolRequest, in fin
 	return nil, out, nil
 }
 
+// checkAssetID refuses an asset id that is not positive. The spec types the id
+// as int64, so a console with many assets can have an id above 2^31.
+func checkAssetID(id int64) error {
+	if id < 1 {
+		return fmt.Errorf("%w: asset_id must be a positive integer", kit.ErrInvalidInput)
+	}
+	return nil
+}
+
 type assetIn struct {
-	AssetID int `json:"asset_id" jsonschema:"the id of the asset: a positive integer"`
+	AssetID int64 `json:"asset_id" jsonschema:"the id of the asset: a positive integer"`
 }
 
 func (v *service) getAsset(ctx context.Context, _ *mcp.CallToolRequest, in assetIn) (*mcp.CallToolResult, assetOut, error) {
 	var out assetOut
-	if err := kit.CheckRange("asset_id", in.AssetID, 1, 1<<31-1); err != nil {
-		return nil, out, fmt.Errorf("check asset_id: %w", err)
+	if err := checkAssetID(in.AssetID); err != nil {
+		return nil, out, err
 	}
 	var a asset
-	if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: kit.Path("api", "3", "assets", strconv.Itoa(in.AssetID))}, &a); err != nil {
+	if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: kit.Path("api", "3", "assets", strconv.FormatInt(in.AssetID, 10))}, &a); err != nil {
 		return nil, out, fmt.Errorf("get asset: %w", err)
 	}
 	if a.ID != in.AssetID {
@@ -271,7 +280,7 @@ func (v *service) getAsset(ctx context.Context, _ *mcp.CallToolRequest, in asset
 // ---- findings and vulnerabilities --------------------------------------
 
 type listFindingsIn struct {
-	AssetID int `json:"asset_id" jsonschema:"the id of the asset: a positive integer"`
+	AssetID int64 `json:"asset_id" jsonschema:"the id of the asset: a positive integer"`
 	pageIn
 }
 
@@ -289,8 +298,8 @@ type findingsOut struct {
 
 func (v *service) listFindings(ctx context.Context, _ *mcp.CallToolRequest, in listFindingsIn) (*mcp.CallToolResult, findingsOut, error) {
 	out := findingsOut{Findings: []finding{}}
-	if err := kit.CheckRange("asset_id", in.AssetID, 1, 1<<31-1); err != nil {
-		return nil, out, fmt.Errorf("check asset_id: %w", err)
+	if err := checkAssetID(in.AssetID); err != nil {
+		return nil, out, err
 	}
 	q, err := in.query()
 	if err != nil {
@@ -306,7 +315,7 @@ func (v *service) listFindings(ctx context.Context, _ *mcp.CallToolRequest, in l
 		Page pageMeta `json:"page"`
 	}
 	err = v.client.Do(ctx, kit.Request{
-		Method: http.MethodGet, Path: kit.Path("api", "3", "assets", strconv.Itoa(in.AssetID), "vulnerabilities"), Query: q,
+		Method: http.MethodGet, Path: kit.Path("api", "3", "assets", strconv.FormatInt(in.AssetID, 10), "vulnerabilities"), Query: q,
 	}, &resp)
 	if err != nil {
 		return nil, out, fmt.Errorf("list asset vulnerabilities: %w", err)
