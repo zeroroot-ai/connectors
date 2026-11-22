@@ -68,7 +68,7 @@ The servers have no second authentication scheme, by design. The README of each 
 | `prometheus` | observability | `query_instant`, `query_range`, `list_alerts`, `health_signal` | gibson#1540 |
 | `gitlab-fixloop` | git-host | `merge_request_state`, `merge_merge_request`, `revert_merge_request`, `deployment_state` | gibson#1539 |
 | `github-fixloop` | git-host | `merge_request_state`, `merge_merge_request`, `revert_merge_request`, `deployment_state` | gibson#1539 |
-| `okta` | identity, response | `revoke_user_sessions`, `suspend_user`, `unsuspend_user` | gibson#1548 |
+| `okta` | identity, response | `list_log_events`, `list_users`, `get_user`, `get_session`, `revoke_user_sessions`, `suspend_user`, `unsuspend_user` | gibson#1548, gibson#1436 |
 | `entra-id` | identity, response | `revoke_sign_in_sessions`, `disable_account`, `enable_account` | gibson#1549 |
 | `crowdstrike` | edr, response | `contain_host`, `lift_containment` | gibson#1545 |
 | `defender-endpoint` | edr, response | `isolate_device`, `release_device` | gibson#1546 |

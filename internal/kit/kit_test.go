@@ -257,6 +257,23 @@ func TestGraphError(t *testing.T) {
 	}
 }
 
+func TestClientReturnsResponseHeader(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Add("Link", "<https://x/a?after=1>; rel=\"self\"")
+		w.Header().Add("Link", "<https://x/a?after=2>; rel=\"next\"")
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer ts.Close()
+	u, _ := ParseBaseURL(ts.URL)
+	var h http.Header
+	if err := NewClient(u, ClientOptions{}).Do(context.Background(), Request{Method: http.MethodGet, Path: "/a", ResponseHeader: &h}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.Values("Link"); len(got) != 2 {
+		t.Errorf("Link = %v", got)
+	}
+}
+
 // The wait on a 429 follows Retry-After, then X-Rate-Limit-Reset (epoch
 // seconds, sent by Okta), and a cap limits it.
 func TestClientWaitsForRateLimitReset(t *testing.T) {
