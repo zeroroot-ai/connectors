@@ -27,9 +27,11 @@ const endpointID = "6bf2a1c8d9e04f3b8a7c5d2e1f0a9b8c"
 // .../endpoint-management): each call is a POST with {"request_data": {...}}
 // and answers {"reply": {...}}. A wrong key gets HTTP 401.
 type mock struct {
-	calls   []string
-	data    []map[string]any
-	headers []http.Header
+	calls         []string
+	data          []map[string]any
+	headers       []http.Header
+	respondStatus int    // when set, the isolate calls answer this status
+	count         string // the endpoints_count of the isolate answer
 }
 
 const incidentJS = `{"incident_id":"42","incident_name":"Incident 42","description":"Credential theft on 3 hosts","status":"new","severity":"high",` +
@@ -65,6 +67,17 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"reply":{"total_count":1,"result_count":1,"alerts":[` + alertJS + `]}}`))
 	case "/public_api/v1/endpoints/get_endpoint":
 		_, _ = w.Write([]byte(`{"reply":{"total_count":1,"result_count":1,"endpoints":[` + endpointJS + `]}}`))
+	case "/public_api/v1/endpoints/isolate", "/public_api/v1/endpoints/unisolate":
+		if m.respondStatus != 0 {
+			w.WriteHeader(m.respondStatus)
+			_, _ = w.Write([]byte(`{"reply":{"err_code":500,"err_msg":"boom"}}`))
+			return
+		}
+		count := "1"
+		if m.count != "" {
+			count = m.count
+		}
+		_, _ = w.Write([]byte(`{"reply":{"action_id":"4711","endpoints_count":"` + count + `"}}`))
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -268,11 +281,11 @@ func TestAuthFailureShowsNoKey(t *testing.T) {
 
 func TestReadOnly(t *testing.T) {
 	m, call, tools := setup(t)
-	if len(tools) != 4 {
+	if len(tools) != 6 {
 		t.Fatalf("tools = %d", len(tools))
 	}
-	for n, tl := range tools {
-		if tl.Annotations == nil || !tl.Annotations.ReadOnlyHint {
+	for _, n := range []string{"list_incidents", "get_incident", "list_alerts", "list_endpoints"} {
+		if tl := tools[n]; tl.Annotations == nil || !tl.Annotations.ReadOnlyHint {
 			t.Errorf("%s is not read only", n)
 		}
 	}
@@ -312,5 +325,73 @@ func TestConfig(t *testing.T) {
 		if _, err := build(kit.NewEnvFrom(env), log); err == nil {
 			t.Errorf("%s accepted", name)
 		}
+	}
+}
+
+func TestIsolateAndUnisolate(t *testing.T) {
+	m, call, tools := setup(t)
+	kittest.AssertReversible(t, tools, "isolate_endpoint", "unisolate_endpoint")
+	kittest.AssertReversible(t, tools, "unisolate_endpoint", "isolate_endpoint")
+	for _, n := range []string{"isolate_endpoint", "unisolate_endpoint"} {
+		kittest.AssertIdempotent(t, tools, n, true)
+	}
+	for _, c := range []struct{ tool, path string }{
+		{"isolate_endpoint", "POST /public_api/v1/endpoints/isolate"}, {"unisolate_endpoint", "POST /public_api/v1/endpoints/unisolate"},
+	} {
+		m.calls, m.data = nil, nil
+		isErr, text, res := call(c.tool, map[string]any{"endpoint_id": endpointID, "incident_id": "42"})
+		if isErr {
+			t.Fatalf("%s: %s", c.tool, text)
+		}
+		var out actionOut
+		kittest.Structured(t, res, &out)
+		if out.ActionID != "4711" || out.EndpointsCount != "1" || out.Action != c.tool || out.EndpointID != endpointID {
+			t.Errorf("%s: out = %+v", c.tool, out)
+		}
+		d := m.data[0]
+		if len(m.calls) != 1 || m.calls[0] != c.path || d["endpoint_id"] != endpointID || d["incident_id"] != "42" || d["filters"] != nil || len(d) != 2 {
+			t.Errorf("%s: calls %v data %v", c.tool, m.calls, d)
+		}
+	}
+	// Without an incident, the body holds the endpoint only.
+	m.data = nil
+	call("isolate_endpoint", map[string]any{"endpoint_id": endpointID})
+	if d := m.data[0]; len(d) != 1 || d["endpoint_id"] != endpointID {
+		t.Errorf("data = %v", d)
+	}
+}
+
+// TestResponseActionsTakeOneEndpoint makes sure that no list, no filter and no
+// bad id reaches Cortex XDR.
+func TestResponseActionsTakeOneEndpoint(t *testing.T) {
+	m, call, _ := setup(t)
+	for _, tool := range []string{"isolate_endpoint", "unisolate_endpoint"} {
+		for _, in := range []map[string]any{
+			{}, {"endpoint_id": ""}, {"endpoint_id": "a,b"}, {"endpoint_id": "a b"}, {"endpoint_id": []string{endpointID}},
+			{"endpoint_id": endpointID, "filters": []string{"x"}}, {"endpoint_id": endpointID, "endpoint_ids": []string{endpointID}},
+			{"endpoint_id": endpointID, "incident_id": "4 2"}, {"endpoint_id": endpointID, "incident_id": "abc"}, {"endpoint_id": "../" + endpointID},
+		} {
+			if isErr, _, _ := call(tool, in); !isErr {
+				t.Errorf("%s accepted %v", tool, in)
+			}
+		}
+	}
+	if len(m.calls) != 0 {
+		t.Errorf("a bad input reached Cortex: %v", m.calls)
+	}
+}
+
+func TestResponseActionErrors(t *testing.T) {
+	m, call, _ := setup(t)
+	// A count other than 1 is an error: the request must change one endpoint.
+	m.count = "3"
+	if isErr, text, _ := call("isolate_endpoint", map[string]any{"endpoint_id": endpointID}); !isErr || !strings.Contains(text, "did not confirm one endpoint") {
+		t.Errorf("count 3: isErr=%v %s", isErr, text)
+	}
+	// A server error is shown and the call is not repeated.
+	m.count, m.respondStatus, m.calls = "", http.StatusInternalServerError, nil
+	isErr, text, _ := call("unisolate_endpoint", map[string]any{"endpoint_id": endpointID})
+	if !isErr || !strings.Contains(text, "HTTP 500") || len(m.calls) != 1 {
+		t.Errorf("500: isErr=%v calls %v %s", isErr, m.calls, text)
 	}
 }

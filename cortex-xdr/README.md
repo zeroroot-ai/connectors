@@ -1,6 +1,6 @@
 # cortex-xdr
 
-MCP server for Palo Alto Networks Cortex XDR, on the public API. Class `edr`. It reads incidents, the alerts of an incident, alerts and the state of endpoints. It has no tool that changes anything. It serves streamable HTTP on `:8080` at `/mcp` and answers `/healthz`.
+MCP server for Palo Alto Networks Cortex XDR, on the public API. Class `edr`. It reads incidents, the alerts of an incident, alerts and the state of endpoints. It isolates one endpoint and releases it. It serves streamable HTTP on `:8080` at `/mcp` and answers `/healthz`.
 
 The official Cortex MCP server needs a build from a download of the tenant, and it has no published image or endpoint. So this server uses the documented public API.
 
@@ -27,6 +27,8 @@ References: https://cortex-docs.paloaltonetworks.com/xdr-3-api/cortex-xdr-3.x-ap
 | `get_incident` | `POST /public_api/v1/incidents/get_incident_extra_data` | Not a change. | `readOnlyHint: true` |
 | `list_alerts` | `POST /public_api/v1/alerts/get_alerts` | Not a change. | `readOnlyHint: true` |
 | `list_endpoints` | `POST /public_api/v1/endpoints/get_endpoint` | Not a change. | `readOnlyHint: true` |
+| `isolate_endpoint` | `POST /public_api/v1/endpoints/isolate` | `unisolate_endpoint` | `destructiveHint: false`, `idempotentHint: true` |
+| `unisolate_endpoint` | `POST /public_api/v1/endpoints/unisolate` | `isolate_endpoint` | `destructiveHint: false`, `idempotentHint: true` |
 
 - Each call is a search with a `POST`. It changes nothing, and the client repeats it on a temporary error.
 - The filters are typed. `status`, `severity`, `isolation` and the endpoint status take one value from the list of the API. A time is parsed as RFC 3339 and sent as epoch milliseconds. `endpoint_id` and `hostname` must match a fixed pattern. The tool writes each filter itself, so a text cannot add a filter or change an operator. `description_contains` is a text in one `contains` filter.
@@ -34,9 +36,15 @@ References: https://cortex-docs.paloaltonetworks.com/xdr-3-api/cortex-xdr-3.x-ap
 - A list sorts by `creation_time`, newest first. The times in a result are epoch milliseconds, as the API gives them.
 - `get_incident` returns the incident and up to `alerts_limit` alerts (default 25, at most 100). The API allows 10 of these calls a minute for the tenant.
 
-## Isolate is not built
+## Isolate and release
 
-The API has `endpoints/isolate` and `endpoints/unisolate`. They need the licenses Prevent or Pro per Endpoint. This server has read tools only, as the coordinator asked for read tools first. Add the two response tools in a later change, with the undo pair that ADR-0180 asks for.
+The Cortex XDR docs confirm both calls: `POST /public_api/v1/endpoints/isolate` and `POST /public_api/v1/endpoints/unisolate` (https://cortex-docs.paloaltonetworks.com/xdr-3-api/cortex-xdr-3.x-apis/response-action.md). Unisolate is the undo.
+
+- A tool takes one `endpoint_id` and an optional `incident_id`. The API also accepts a list of endpoints through filters, and it refuses `endpoint_id` and filters together. The tools never send filters, so one call changes at most one endpoint. A list, a filter or a second field is refused before the call.
+- The answer is `action_id` and `endpoints_count`. It shows only that the request went to the endpoint. A count other than 1 is an error. To see the result, read `is_isolated` with `list_endpoints`, or look for the action in the Action Center. The page also has a Get Action Status call. It is not built.
+- The client does not repeat these calls on a server error, because a repeat could make a second action.
+- Both calls need the license Cortex XDR Prevent or Pro per Endpoint. A key without it gets HTTP 402. A key without the right gets HTTP 403.
+- The page limits isolate to 1000 endpoints in one request. The tools send one.
 
 ## Not verified
 
@@ -59,4 +67,4 @@ The server has no second authentication scheme, by design. The proxy and the Net
 
 ## Vendor permission
 
-Make an API key for this server with a custom role that has view rights on incidents, alerts and endpoints and no response right. Prefer an advanced key, because it never sends the key itself. Do not use an administrator role.
+Make an API key for this server with a custom role that has view rights on incidents, alerts and endpoints, and the response right to isolate an endpoint. Give no other response right. Prefer an advanced key, because it never sends the key itself. Do not use an administrator role.

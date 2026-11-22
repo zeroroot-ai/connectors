@@ -28,6 +28,14 @@ import (
 //     (the same page, section Get Alerts)
 //   - POST /public_api/v1/endpoints/get_endpoint
 //     https://cortex-docs.paloaltonetworks.com/xdr-3-api/cortex-xdr-3.x-apis/endpoint-management
+//   - POST /public_api/v1/endpoints/isolate and /endpoints/unisolate
+//     https://cortex-docs.paloaltonetworks.com/xdr-3-api/cortex-xdr-3.x-apis/response-action.md
+//     The body is {"request_data": {"endpoint_id": "<id>", "incident_id": "<optional>"}}.
+//     The page allows a list of endpoints with filters instead, and refuses both
+//     together. The tools send endpoint_id only, so one call changes one endpoint.
+//     The answer is {"reply": {"action_id": "...", "endpoints_count": "1"}}. It says only
+//     that the request went to the endpoint. Both calls need the license Cortex XDR
+//     Prevent or Pro per Endpoint.
 // Each call takes {"request_data": {...}} and answers {"reply": {...}}. A filter
 // is {"field","operator","value"}. A page is search_from and search_to, at most
 // 100 records. The base URL is https://api-{fqdn}, where the fqdn belongs to the
@@ -158,9 +166,23 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 		Name: "list_endpoints",
 		Description: "List the state of Cortex XDR endpoints: name, status, platform, addresses, last seen and whether the endpoint is isolated. Read only. " +
 			"All inputs are optional. status is connected, disconnected, lost or uninstalled. isolation is isolated or unisolated. " +
-			"This server has no isolate tool yet.",
+			"To isolate or release one endpoint, use isolate_endpoint and unisolate_endpoint.",
 		Annotations: kit.ReadOnly("List Cortex XDR endpoints"),
 	}, v.listEndpoints)
+	kit.AddTool(s, log, &mcp.Tool{
+		Name: "isolate_endpoint",
+		Description: "Response action. Isolate one Cortex XDR endpoint from the network. The agent of the endpoint keeps its link to Cortex XDR. " +
+			"The answer shows only that the request went to the endpoint. The endpoint can be offline, and then the isolation starts when it connects. " +
+			"Read is_isolated with list_endpoints to see the result. Needs the license Cortex XDR Prevent or Pro per Endpoint. " +
+			"Undo: call unisolate_endpoint with the same endpoint_id.",
+		Annotations: kit.Reversible("Isolate Cortex XDR endpoint", true),
+	}, v.isolate)
+	kit.AddTool(s, log, &mcp.Tool{
+		Name: "unisolate_endpoint",
+		Description: "Response action. Release one isolated Cortex XDR endpoint. The answer shows only that the request went to the endpoint. " +
+			"This is the undo of isolate_endpoint.",
+		Annotations: kit.Reversible("Unisolate Cortex XDR endpoint", true),
+	}, v.unisolate)
 }
 
 // ---- request helpers ---------------------------------------------------
@@ -226,12 +248,16 @@ func collect(fs ...*filter) []filter {
 
 // call sends one request. A search changes nothing, so the client repeats it.
 func (v *service) call(ctx context.Context, op string, path []string, data map[string]any, reply any) error {
+	return v.send(ctx, op, path, data, reply, true)
+}
+
+func (v *service) send(ctx context.Context, op string, path []string, data map[string]any, reply any, retry bool) error {
 	var resp struct {
 		Reply any `json:"reply"`
 	}
 	resp.Reply = reply
 	err := v.client.Do(ctx, kit.Request{
-		Method: http.MethodPost, Path: kit.Path(append([]string{"v1"}, path...)...), JSON: map[string]any{"request_data": data}, Retry: true,
+		Method: http.MethodPost, Path: kit.Path(append([]string{"v1"}, path...)...), JSON: map[string]any{"request_data": data}, Retry: retry,
 	}, &resp)
 	if err != nil {
 		return fmt.Errorf("%s: %w", op, err)
@@ -498,5 +524,56 @@ func (v *service) listEndpoints(ctx context.Context, _ *mcp.CallToolRequest, in 
 	}
 	out.Count, out.Total = len(out.Endpoints), reply.TotalCount
 	out.HasMore = from+out.Count < out.Total
+	return nil, out, nil
+}
+
+// ---- response actions --------------------------------------------------
+
+type actionIn struct {
+	EndpointID string `json:"endpoint_id" jsonschema:"the id of one endpoint. A list or a filter is not accepted."`
+	IncidentID string `json:"incident_id,omitempty" jsonschema:"an incident id, digits. The action then shows in the timeline of the incident."`
+}
+
+type actionOut struct {
+	EndpointID     string `json:"endpoint_id"`
+	Action         string `json:"action"`
+	ActionID       string `json:"action_id"`
+	EndpointsCount string `json:"endpoints_count"`
+}
+
+func (v *service) isolate(ctx context.Context, _ *mcp.CallToolRequest, in actionIn) (*mcp.CallToolResult, actionOut, error) {
+	return v.respond(ctx, "isolate", in)
+}
+
+func (v *service) unisolate(ctx context.Context, _ *mcp.CallToolRequest, in actionIn) (*mcp.CallToolResult, actionOut, error) {
+	return v.respond(ctx, "unisolate", in)
+}
+
+// respond sends the isolate or the unisolate call for one endpoint. The call
+// is not repeated, because a repeat after a server error could make a second
+// action.
+func (v *service) respond(ctx context.Context, op string, in actionIn) (*mcp.CallToolResult, actionOut, error) {
+	out := actionOut{EndpointID: in.EndpointID, Action: op + "_endpoint"}
+	if err := kit.CheckString("endpoint_id", in.EndpointID, 64, endpointFormat); err != nil {
+		return nil, out, fmt.Errorf("check endpoint_id: %w", err)
+	}
+	data := map[string]any{"endpoint_id": in.EndpointID}
+	if in.IncidentID != "" {
+		if err := kit.CheckString("incident_id", in.IncidentID, 20, incidentFormat); err != nil {
+			return nil, out, fmt.Errorf("check incident_id: %w", err)
+		}
+		data["incident_id"] = in.IncidentID
+	}
+	var reply struct {
+		ActionID       any `json:"action_id"`
+		EndpointsCount any `json:"endpoints_count"`
+	}
+	if err := v.send(ctx, op+" endpoint", []string{"endpoints", op}, data, &reply, false); err != nil {
+		return nil, out, err
+	}
+	out.ActionID, out.EndpointsCount = fmt.Sprint(reply.ActionID), fmt.Sprint(reply.EndpointsCount)
+	if reply.ActionID == nil || out.EndpointsCount != "1" {
+		return nil, out, fmt.Errorf("%s endpoint: Cortex XDR did not confirm one endpoint (endpoints_count %s)", op, out.EndpointsCount)
+	}
 	return nil, out, nil
 }
