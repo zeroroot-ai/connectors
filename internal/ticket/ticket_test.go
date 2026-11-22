@@ -62,3 +62,19 @@ func TestCheckUpdateAndSearch(t *testing.T) {
 		t.Error("StatusOf")
 	}
 }
+
+func TestSearchByDedupKey(t *testing.T) {
+	if _, err := CheckSearch(SearchInput{DedupKey: "finding/42:disk-full"}); err != nil {
+		t.Errorf("a valid key: %v", err)
+	}
+	for _, k := range []string{"a b", "x^y", `x"`, "-x", strings.Repeat("a", MaxDedupKey+1)} {
+		if _, err := CheckSearch(SearchInput{DedupKey: k}); err == nil {
+			t.Errorf("accepted %q", k)
+		}
+	}
+	// The status defaults to any with a key, and to open without one.
+	if StatusOf(SearchInput{DedupKey: "k"}) != StatusAny || StatusOf(SearchInput{}) != StatusOpen ||
+		StatusOf(SearchInput{DedupKey: "k", Status: StatusOpen}) != StatusOpen {
+		t.Error("wrong default status")
+	}
+}

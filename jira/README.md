@@ -41,6 +41,7 @@ How the contract maps to Jira:
 - `description`, `body` and the resolution are plain text. The server writes them as a document of the Atlassian Document Format with one paragraph for each line. `get_ticket` reads the text of a document again.
 - `closed` is true when the category of the status is `done`.
 - `dedup_key` is stored as the label `zeroroot-dedup-<key>`. Before a create, the tool searches for the oldest issue with that label. When one exists, the tool returns it with `existing: true` and makes no new issue. The client never repeats a create call, so a timeout cannot make two issues. The search and the create are two calls, so two calls at the same time can still make two.
+- `search_tickets` with `dedup_key` adds the condition `labels = "zeroroot-dedup-<key>"` and sorts by `created` with the oldest issue first. The status defaults to `any`. The key has the contract format, and `jqlString` quotes it.
 - `close_ticket` reads the transitions. When exactly one leads to a status in the category `done`, the tool does the transition and adds the resolution as a comment in the same request (`update.comment`). Jira does both or neither. With none or more than one, the tool changes nothing and names them. Then call `list_transitions` and `transition_ticket`. When a transition needs a resolution, set `JIRA_RESOLUTION`.
 
 ## No JQL injection

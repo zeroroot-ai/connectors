@@ -421,6 +421,14 @@ func encodedQuery(in ticket.SearchInput) (string, error) {
 		}
 		conds = append(conds, "short_descriptionLIKE"+in.TitleContains)
 	}
+	if in.DedupKey != "" {
+		// The key has a fixed pattern. The tool still refuses ^ and javascript: here,
+		// so a change of the pattern cannot add a condition to the query.
+		if strings.Contains(in.DedupKey, "^") || strings.Contains(strings.ToLower(in.DedupKey), "javascript:") {
+			return "", fmt.Errorf("%w: dedup_key must not hold the character ^ or the text javascript", kit.ErrInvalidInput)
+		}
+		conds = append(conds, "correlation_id="+in.DedupKey)
+	}
 	if in.CreatedAfter != "" {
 		t, err := time.Parse(time.RFC3339, in.CreatedAfter)
 		if err != nil {
@@ -428,7 +436,11 @@ func encodedQuery(in ticket.SearchInput) (string, error) {
 		}
 		conds = append(conds, "opened_at>="+t.UTC().Format(queryTime))
 	}
-	conds = append(conds, "ORDERBYDESCopened_at")
+	if in.DedupKey != "" {
+		conds = append(conds, "ORDERBYopened_at") // oldest first
+	} else {
+		conds = append(conds, "ORDERBYDESCopened_at")
+	}
 	return strings.Join(conds, "^"), nil
 }
 

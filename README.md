@@ -110,13 +110,14 @@ The servers of class `ticket` (`servicenow`, `jira`) use the same tool names, th
 | `add_comment` | `ticket_id`, `body` | `ticket_id`, `action`, `status` | None. The vendor keeps the comment. |
 | `close_ticket` | `ticket_id`, `resolution` | `ticket_id`, `action`, `status` | No tool of the contract. A person reopens the ticket. Jira also has `transition_ticket`. |
 | `get_ticket` | `ticket_id` | `ticket_id`, `number`, `url`, `title`, `description`, `status`, `priority`, `closed`, `created_at`, `updated_at` | Not a change. |
-| `search_tickets` | optional `queue`, `status` (`open`, `closed`, `any`), `title_contains`, `label`, `created_after`, `limit` | `tickets` (the fields of `get_ticket`), `count` | Not a change. |
+| `search_tickets` | optional `queue`, `status` (`open`, `closed`, `any`), `title_contains`, `label`, `dedup_key`, `created_after`, `limit` | `tickets` (the fields of `get_ticket`), `count` | Not a change. |
 
 - `ticket_id` is the value that the tools of the server take back. It is the key on Jira and the `sys_id` on ServiceNow. `number` is the identifier that a person reads.
 - `queue` is the project key on Jira and the `sys_id` of the assignment group on ServiceNow.
 - `priority` is `low`, `medium`, `high` or `critical`. The default is `medium`.
 - Each search filter is typed. A server builds its query from the filters and never passes free text on as query syntax. Each server states how it makes a text safe. It quotes and escapes the text, or it refuses a text with a character that the query language cannot escape.
 - `dedup_key` makes `create_ticket` safe to repeat. The server searches for a ticket that holds the key, and stores the key in the new ticket (the field `correlation_id` on ServiceNow, a label on Jira). A second call with the same key, for example a retry after a timeout, returns the first ticket with `existing: true`. The search and the create are two calls, so two calls at the same time can still make two tickets. A server does not repeat a create call by itself, because a repeat could make a second ticket.
+- `search_tickets` with `dedup_key` finds the tickets that `create_ticket` made with this key. Jira searches the label of the key. ServiceNow matches `correlation_id` exactly. ServiceNow has no labels, so this is the way to find a ticket there. The result holds at most `limit` tickets, oldest first, and `count` is the number of tickets in the result. The status defaults to `any`, so a ticket that someone closed is found. The other filters still apply. The key has the same format as in `create_ticket`, so it cannot add a condition to the query. ServiceNow also refuses `^` and `javascript:` in the key.
 - `description` and `body` are plain text. The server converts it to the format of the vendor.
 - A server adds only tools that have no contract name. Jira adds `list_transitions` and `transition_ticket`.
 

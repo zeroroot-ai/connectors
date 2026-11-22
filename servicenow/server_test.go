@@ -435,3 +435,46 @@ func TestCreateIsNotRepeated(t *testing.T) {
 		t.Errorf("the create call was sent %d times: %v", posts, m.calls)
 	}
 }
+
+// A search by dedup_key matches correlation_id exactly, with the oldest incident
+// first. The status defaults to any, so a closed incident is found.
+func TestSearchByDedupKey(t *testing.T) {
+	m, call, _ := setup(t)
+	m.dedup = true // the incident has the key in correlation_id
+	isErr, text, res := call(ticket.ToolSearch, map[string]any{"dedup_key": "finding/42:disk-full"})
+	if isErr {
+		t.Fatal(text)
+	}
+	if got := m.queries[0].Get("sysparm_query"); got != "correlation_id=finding/42:disk-full^ORDERBYopened_at" {
+		t.Errorf("query = %q", got)
+	}
+	var out ticket.SearchOutput
+	kittest.Structured(t, res, &out)
+	if out.Count != len(out.Tickets) || out.Count != 1 {
+		t.Errorf("out = %+v", out)
+	}
+	call(ticket.ToolSearch, map[string]any{"dedup_key": "k1", "status": "open", "queue": group})
+	want := "state<6^assignment_group=" + group + "^correlation_id=k1^ORDERBYopened_at"
+	if got := m.queries[1].Get("sysparm_query"); got != want {
+		t.Errorf("query = %q", got)
+	}
+}
+
+// A dedup_key cannot add a condition to the encoded query.
+func TestSearchByDedupKeyRefusesInjection(t *testing.T) {
+	m, call, _ := setup(t)
+	for _, k := range []string{"x^active=false", "x^ORDERBYsys_id", "javascript:alert(1)", "a b", "x=y^z", strings.Repeat("a", 101)} {
+		if isErr, _, _ := call(ticket.ToolSearch, map[string]any{"dedup_key": k}); !isErr {
+			t.Errorf("accepted dedup_key %q", k)
+		}
+	}
+	if len(m.calls) != 0 {
+		t.Errorf("an injection reached ServiceNow: %v", m.calls)
+	}
+	// The query builder refuses ^ and javascript: even if the format check were absent.
+	for _, k := range []string{"x^y", "JavaScript:x"} {
+		if _, err := encodedQuery(ticket.SearchInput{DedupKey: k}); err == nil {
+			t.Errorf("encodedQuery accepted %q", k)
+		}
+	}
+}
