@@ -62,7 +62,7 @@ func (m *readMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func readSetup(t *testing.T) (*readMock, func(string, map[string]any) (bool, string, *mcp.CallToolResult), map[string]*mcp.Tool) {
+func readSetup(t *testing.T) (srv *readMock, call func(string, map[string]any) (bool, string, *mcp.CallToolResult), tools map[string]*mcp.Tool) {
 	t.Helper()
 	m := &readMock{}
 	ts := httptest.NewTLSServer(m)
@@ -73,7 +73,7 @@ func readSetup(t *testing.T) (*readMock, func(string, map[string]any) (bool, str
 		t.Fatal(err)
 	}
 	cs := kittest.Connect(t, register)
-	call := func(tool string, args map[string]any) (bool, string, *mcp.CallToolResult) {
+	call = func(tool string, args map[string]any) (bool, string, *mcp.CallToolResult) {
 		res := kittest.Call(t, cs, tool, args)
 		return res.IsError, kittest.Text(t, res), res
 	}

@@ -162,11 +162,11 @@ func (v *service) listLogEvents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	return nil, out, nil
 }
 
-func limitOf(n, max int) (int, error) {
+func limitOf(n, maxN int) (int, error) {
 	if n == 0 {
 		return defaultLimit, nil
 	}
-	if err := kit.CheckRange("limit", n, 1, max); err != nil {
+	if err := kit.CheckRange("limit", n, 1, maxN); err != nil {
 		return 0, fmt.Errorf("check limit: %w", err)
 	}
 	return n, nil
