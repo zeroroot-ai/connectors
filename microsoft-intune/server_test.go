@@ -317,7 +317,7 @@ func TestAnnotationsAndReadOnly(t *testing.T) {
 	if len(tools) != 6 {
 		t.Fatalf("tools = %d", len(tools))
 	}
-	kittest.AssertReversible(t, tools, "start_patch_deployment", "rollback_patch_deployment")
+	kittest.AssertIrreversible(t, tools, "start_patch_deployment")
 	kittest.AssertReversible(t, tools, "rollback_patch_deployment", "resume_patch_deployment")
 	kittest.AssertReversible(t, tools, "resume_patch_deployment", "rollback_patch_deployment")
 	kittest.AssertIrreversible(t, tools, "remove_patch_deployment")

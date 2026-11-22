@@ -33,7 +33,7 @@ Reference: https://learn.microsoft.com/en-us/graph/api/resources/windowsupdates-
 | Tool | Vendor call | Undo | Annotations |
 |---|---|---|---|
 | `list_catalog_entries` | `GET /admin/windows/updates/catalog/entries` | Not a change. | `readOnlyHint: true` |
-| `start_patch_deployment` | `POST /admin/windows/updates/deployments`, then `POST .../deployments/{id}/audience/updateAudienceById` | `rollback_patch_deployment` | `destructiveHint: false`, `idempotentHint: false` |
+| `start_patch_deployment` | `POST /admin/windows/updates/deployments`, then `POST .../deployments/{id}/audience/updateAudienceById` | None. | `destructiveHint: true`, `idempotentHint: false` |
 | `get_patch_deployment` | `GET .../deployments/{id}`, `GET .../deployments/{id}/audience`, `GET .../deploymentAudiences/{audienceId}/members` | Not a change. | `readOnlyHint: true` |
 | `rollback_patch_deployment` | `PATCH .../deployments/{id}` with `state.requestedValue` `paused` | `resume_patch_deployment` | `destructiveHint: false`, `idempotentHint: true` |
 | `resume_patch_deployment` | `PATCH .../deployments/{id}` with `state.requestedValue` `none` | `rollback_patch_deployment` | `destructiveHint: false`, `idempotentHint: true` |
@@ -41,7 +41,7 @@ Reference: https://learn.microsoft.com/en-us/graph/api/resources/windowsupdates-
 
 One device for each deployment. `start_patch_deployment` creates a deployment, then adds one device to its audience. An empty audience gets no offer. When the second call fails, the tool deletes the deployment. Each tool that changes or reads a deployment first checks that its audience holds exactly one device. It refuses any other deployment, so the tools never act on a group.
 
-The rollback stops the offer of the update. It does not uninstall an update that the device already installed. The description of each tool says so. Graph has no call that uninstalls an update. The owner can decide that `start_patch_deployment` needs the approval queue of ADR-0132 for this reason.
+`start_patch_deployment` is marked as an action with no undo, the same mark as a session revoke. The reason is that the rollback only stops the offer of the update. It does not uninstall an update that the device already installed, and Graph has no call that uninstalls an update. The owner decided on 2026-11-21 that an update install destroys no data, so it does not wait for approval (ADR-0180). The mark tells the caller that the install stays. `rollback_patch_deployment` and `resume_patch_deployment` stay reversible, because they only pause and resume the offer.
 
 A deployment that Intune created can fail on the audience calls. Microsoft lists this as a known issue. The tools then refuse the deployment.
 

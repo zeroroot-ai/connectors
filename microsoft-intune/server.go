@@ -97,9 +97,10 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 		Description: "Patch action. Start a Windows Update deployment of one catalog update for exactly one device. " +
 			"The audience of the deployment holds that device and no other. Windows Update offers the update to " +
 			"the device. The device installs it when it applies the offer. " +
-			"Undo: call rollback_patch_deployment with the deployment_id. This stops the offer. It does not " +
-			"uninstall an update that the device already installed. Read the result with get_patch_deployment.",
-		Annotations: kit.Reversible("Start Windows patch deployment for one device", false),
+			"No tool undoes this action: an installed update stays installed. " +
+			"rollback_patch_deployment stops the offer before the device applies it, and it does not uninstall anything. " +
+			"Read the result with get_patch_deployment.",
+		Annotations: kit.Irreversible("Start Windows patch deployment for one device", false),
 	}, v.start)
 	kit.AddTool(s, log, &mcp.Tool{
 		Name: "get_patch_deployment",
