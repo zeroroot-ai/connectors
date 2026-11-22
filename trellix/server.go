@@ -35,7 +35,7 @@ import (
 
 const (
 	defaultAPI    = "https://api.manage.trellix.com"
-	defaultToken  = "https://iam.mcafee-cloud.com/iam/v1.1/token"
+	defaultIAMURL = "https://iam.mcafee-cloud.com/iam/v1.1/token"
 	defaultScopes = "epo.evt.r,epo.device.r,mi.user.investigate,soc.rts.c,soc.rts.r,soc.hts.r"
 	maxLimit      = 100
 	defaultLimit  = 25
@@ -58,20 +58,20 @@ func buildWith(env *kit.Env, log *slog.Logger, hc *http.Client) (func(*mcp.Serve
 	secret := env.Secret("TRELLIX_CLIENT_SECRET")
 	apiKey := env.Secret("TRELLIX_API_KEY")
 	api := env.OptionalURL("TRELLIX_API_URL", defaultAPI)
-	tokenURL := env.OptionalURL("TRELLIX_TOKEN_URL", defaultToken)
+	iamURL := env.OptionalURL("TRELLIX_IAM_URL", defaultIAMURL)
 	scopes := env.Optional("TRELLIX_SCOPES", defaultScopes)
 	timeout := env.Duration("TRELLIX_TIMEOUT", 20*time.Second)
 	if err := env.Err(); err != nil {
 		return nil, fmt.Errorf("read configuration: %w", err)
 	}
-	if api.Scheme != "https" || tokenURL.Scheme != "https" {
-		return nil, errors.New("TRELLIX_API_URL and TRELLIX_TOKEN_URL must use https")
+	if api.Scheme != "https" || iamURL.Scheme != "https" {
+		return nil, errors.New("TRELLIX_API_URL and TRELLIX_IAM_URL must use https")
 	}
 	if !scopeList.MatchString(scopes) {
 		return nil, errors.New("TRELLIX_SCOPES has the wrong format")
 	}
 	cc := &kit.ClientCredentials{
-		TokenURL: tokenURL.String(), ID: clientID, Secret: secret,
+		TokenURL: iamURL.String(), ID: clientID, Secret: secret,
 		Extra: url.Values{"scope": {scopes}}, HTTPClient: hc,
 	}
 	bearer := cc.Authenticator()

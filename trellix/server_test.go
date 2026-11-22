@@ -79,7 +79,7 @@ func setup(t *testing.T) (srv *mock, call func(string, map[string]any) (isErr bo
 	t.Cleanup(ts.Close)
 	register, err := buildWith(kit.NewEnvFrom(map[string]string{
 		"TRELLIX_CLIENT_ID": "cid", "TRELLIX_CLIENT_SECRET": "csecret", "TRELLIX_API_KEY": "key123",
-		"TRELLIX_API_URL": ts.URL, "TRELLIX_TOKEN_URL": ts.URL + "/iam/v1.1/token",
+		"TRELLIX_API_URL": ts.URL, "TRELLIX_IAM_URL": ts.URL + "/iam/v1.1/token",
 	}), slog.New(slog.DiscardHandler), ts.Client())
 	if err != nil {
 		t.Fatal(err)
@@ -115,6 +115,11 @@ func TestListAlerts(t *testing.T) {
 	if h.Get("x-api-key") != "key123" || h.Get("Content-Type") != "application/vnd.api+json" || h.Get("Authorization") != "Bearer trellix-token" {
 		t.Errorf("headers = %v", h)
 	}
+	checkTokenRequest(t, m)
+}
+
+func checkTokenRequest(t *testing.T, m *mock) {
+	t.Helper()
 	// The token request: client credentials, the id and the secret in the authorization header, the scopes.
 	if m.tokenUser != "cid" || m.tokenForm.Get("grant_type") != "client_credentials" || m.tokenForm.Get("scope") != defaultScopes {
 		t.Errorf("token: user %q form %v", m.tokenUser, m.tokenForm)
@@ -187,7 +192,7 @@ func TestAuthFailureShowsNoSecret(t *testing.T) {
 	defer ts.Close()
 	register, err := buildWith(kit.NewEnvFrom(map[string]string{
 		"TRELLIX_CLIENT_ID": "cid", "TRELLIX_CLIENT_SECRET": "csecret", "TRELLIX_API_KEY": "wrong-key",
-		"TRELLIX_API_URL": ts.URL, "TRELLIX_TOKEN_URL": ts.URL + "/iam/v1.1/token",
+		"TRELLIX_API_URL": ts.URL, "TRELLIX_IAM_URL": ts.URL + "/iam/v1.1/token",
 	}), slog.New(slog.DiscardHandler), ts.Client())
 	if err != nil {
 		t.Fatal(err)
@@ -231,7 +236,7 @@ func TestConfig(t *testing.T) {
 	}
 	for name, extra := range map[string]map[string]string{
 		"plain api":   {"TRELLIX_API_URL": "http://api.manage.trellix.com"},
-		"plain token": {"TRELLIX_TOKEN_URL": "http://iam.mcafee-cloud.com/iam/v1.1/token"},
+		"plain token": {"TRELLIX_IAM_URL": "http://iam.mcafee-cloud.com/iam/v1.1/token"},
 		"bad scopes":  {"TRELLIX_SCOPES": "a b&c=d"},
 	} {
 		env := map[string]string{}

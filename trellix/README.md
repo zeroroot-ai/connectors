@@ -14,7 +14,7 @@ The isolate call is documented: `POST /edr/v2/remediation/host` with the action 
 | `TRELLIX_CLIENT_SECRET` | Required. The client secret. The server sends it in the authorization header of the token request ("Auth Style: In Header"). |
 | `TRELLIX_API_KEY` | Required. The API key. The server sends it as `x-api-key`. It comes from the onboarding e-mail or the API Access Management page. |
 | `TRELLIX_API_URL` | Optional. The gateway. The default is `https://api.manage.trellix.com`. The onboarding e-mail gives the gateway of your tenant. |
-| `TRELLIX_TOKEN_URL` | Optional. The default is `https://iam.mcafee-cloud.com/iam/v1.1/token`. |
+| `TRELLIX_IAM_URL` | Optional. The default is `https://iam.mcafee-cloud.com/iam/v1.1/token`. |
 | `TRELLIX_SCOPES` | Optional. The scopes of the token. The default is the list of the Trellix page: `epo.evt.r,epo.device.r,mi.user.investigate,soc.rts.c,soc.rts.r,soc.hts.r`. |
 | `TRELLIX_TIMEOUT` | Optional. Time limit of one vendor call. The default is `20s`. |
 | `LISTEN_ADDR` | Optional. The default is `:8080`. |
