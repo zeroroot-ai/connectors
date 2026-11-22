@@ -1,0 +1,25 @@
+purple-mcp
+==========
+
+The image of this folder holds a copy of purple-mcp, the MCP server of
+SentinelOne for Purple AI, the alerts, the vulnerabilities, the
+misconfigurations and the asset inventory.
+
+  Source:    https://github.com/Sentinel-One/purple-mcp
+  Commit:    07d4992089b10affff6163f296b1f6cb5734539f (tag v0.7.0)
+  Copyright: (c) 2025 SentinelOne, Inc.
+  License:   MIT
+
+The text of the MIT license of purple-mcp is in the image at
+/licenses/purple-mcp-LICENSE. It is the file LICENSE of the commit above.
+
+Zero Root did not change the source of purple-mcp. The Dockerfile in this
+folder fetches the commit, checks its hash, and installs the dependencies that
+the file uv.lock of that commit locks. Each dependency has its own license.
+
+SentinelOne and Purple AI are trademarks of SentinelOne, Inc. Zero Root is not
+affiliated with SentinelOne.
+
+The Dockerfile, the README and this NOTICE are part of the connectors
+repository of Zero Root and use its license (Elastic License 2.0). That license
+does not apply to purple-mcp.
