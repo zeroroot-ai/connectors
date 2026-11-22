@@ -57,6 +57,12 @@ const (
 
 var labelFormat = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,50}$`)
 
+// MaxDedupKey is the longest dedup_key. ServiceNow stores it in correlation_id,
+// which holds 100 characters.
+const MaxDedupKey = 100
+
+var dedupFormat = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@=+-]*$`)
+
 // CreateInput is the input of create_ticket.
 type CreateInput struct {
 	Title       string   `json:"title" jsonschema:"one line that names the problem, at most 255 characters"`
@@ -64,6 +70,12 @@ type CreateInput struct {
 	Queue       string   `json:"queue,omitempty" jsonschema:"where the ticket goes: the project key on Jira, the id of the assignment group on ServiceNow"`
 	Priority    string   `json:"priority,omitempty" jsonschema:"low, medium, high or critical. The default is medium."`
 	Labels      []string `json:"labels,omitempty" jsonschema:"up to 10 labels of letters, digits and . _ : -"`
+	// DedupKey makes create_ticket safe to repeat. The server searches for a
+	// ticket that holds the key before it creates one, and stores the key in
+	// the new ticket. A retry after a timeout returns the ticket that exists,
+	// with existing true. The search and the create are two calls, so two
+	// calls at the same time can still make two tickets.
+	DedupKey string `json:"dedup_key,omitempty" jsonschema:"a key of the finding or the action, at most 100 characters of letters, digits and . _ : / @ = + -. A second call with the same key returns the first ticket."`
 }
 
 // UpdateInput is the input of update_ticket. Give at least one of title,
@@ -123,6 +135,9 @@ type Created struct {
 	TicketID string `json:"ticket_id"`
 	Number   string `json:"number,omitempty"`
 	URL      string `json:"url,omitempty"`
+	// Existing is true when a ticket with the dedup_key existed, and the tool
+	// made no new ticket.
+	Existing bool `json:"existing,omitempty"`
 }
 
 // Changed is the result of update_ticket, add_comment and close_ticket.
@@ -166,6 +181,11 @@ func CheckCreate(in CreateInput) error {
 	for _, l := range in.Labels {
 		if !labelFormat.MatchString(l) {
 			return fmt.Errorf("%w: a label has the wrong format", kit.ErrInvalidInput)
+		}
+	}
+	if in.DedupKey != "" {
+		if err := kit.CheckString("dedup_key", in.DedupKey, MaxDedupKey, dedupFormat); err != nil {
+			return fmt.Errorf("check dedup_key: %w", err)
 		}
 	}
 	return nil

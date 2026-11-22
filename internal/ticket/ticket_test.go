@@ -9,7 +9,7 @@ import (
 )
 
 func TestCheckCreate(t *testing.T) {
-	ok := CreateInput{Title: "t", Description: "d", Priority: High, Labels: []string{"zeroroot", "a:b"}}
+	ok := CreateInput{Title: "t", Description: "d", Priority: High, Labels: []string{"zeroroot", "a:b"}, DedupKey: "finding/42:disk-full"}
 	if err := CheckCreate(ok); err != nil {
 		t.Fatal(err)
 	}
@@ -22,6 +22,11 @@ func TestCheckCreate(t *testing.T) {
 		"bad priority":   func(i *CreateInput) { i.Priority = "urgent" },
 		"bad label":      func(i *CreateInput) { i.Labels = []string{"a b"} },
 		"many labels":    func(i *CreateInput) { i.Labels = make([]string, MaxLabels+1) },
+		"long dedup key": func(i *CreateInput) { i.DedupKey = strings.Repeat("a", MaxDedupKey+1) },
+		"dedup space":    func(i *CreateInput) { i.DedupKey = "a b" },
+		"dedup quote":    func(i *CreateInput) { i.DedupKey = `a"b` },
+		"dedup caret":    func(i *CreateInput) { i.DedupKey = "a^b" },
+		"dedup newline":  func(i *CreateInput) { i.DedupKey = "a\nb" },
 	}
 	for name, f := range bad {
 		in := ok
