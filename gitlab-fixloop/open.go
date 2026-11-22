@@ -80,11 +80,11 @@ func (v *service) openMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 	if err := fixloop.CheckOpen(in); err != nil {
 		return nil, out, fmt.Errorf("check input: %w", err)
 	}
-	if err := kit.CheckString("repo", in.Repo, maxRefLen, nil); err != nil {
-		return nil, out, fmt.Errorf("check repo: %w", err)
+	if err := kit.CheckString("project", in.Repo, maxRefLen, nil); err != nil {
+		return nil, out, fmt.Errorf("check project: %w", err)
 	}
 	if !projectFormat.MatchString(in.Repo) || !fixloop.ValidPath(in.Repo) {
-		return nil, out, fmt.Errorf("%w: repo must be the path of the project, for example group/project", kit.ErrInvalidInput)
+		return nil, out, fmt.Errorf("%w: project must be the path of the project, for example group/project", kit.ErrInvalidInput)
 	}
 	project := in.Repo
 

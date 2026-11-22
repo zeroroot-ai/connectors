@@ -31,14 +31,17 @@ type FileChange struct {
 	Delete  bool    `json:"delete,omitempty" jsonschema:"true removes the file. Leave content out."`
 }
 
-// OpenInput is the argument of open_merge_request.
+// OpenInput is the argument of open_merge_request. The names follow the
+// contract of the incident agent (README of zeroroot-ai/incident-agent): the
+// same branch in two calls opens one merge request, and a file with content is
+// written whether it exists or not.
 type OpenInput struct {
-	Repo         string       `json:"repo" jsonschema:"the repository: owner/repo on GitHub, group/project on GitLab"`
-	SourceBranch string       `json:"source_branch" jsonschema:"the new branch that holds the changes. It must not exist, unless it has an open merge request from an earlier call."`
-	TargetBranch string       `json:"target_branch" jsonschema:"the branch that the merge request merges into. It must exist."`
+	Repo         string       `json:"project" jsonschema:"the repository: owner/repo on GitHub, group/project on GitLab"`
+	SourceBranch string       `json:"branch" jsonschema:"the new branch that holds the changes. It must not exist, unless it has an open merge request from an earlier call."`
+	TargetBranch string       `json:"base_branch" jsonschema:"the branch that the merge request merges into. It must exist."`
 	Title        string       `json:"title" jsonschema:"title of the merge request and message of the commit"`
-	Body         string       `json:"body,omitempty" jsonschema:"description of the merge request"`
-	Changes      []FileChange `json:"changes" jsonschema:"the file changes of the one commit: 1 to 100 files"`
+	Body         string       `json:"description,omitempty" jsonschema:"description of the merge request"`
+	Changes      []FileChange `json:"files" jsonschema:"the file changes of the one commit: 1 to 100 files"`
 }
 
 // OpenResult is the result of open_merge_request. MergeRequest is the
@@ -77,37 +80,29 @@ func CheckBranch(field, name string) error {
 // CheckOpen checks the parts of OpenInput that do not depend on the Git host.
 // The server checks repo with the format of its host.
 func CheckOpen(in OpenInput) error {
-	if err := CheckBranch("source_branch", in.SourceBranch); err != nil {
+	if err := CheckBranch("branch", in.SourceBranch); err != nil {
 		return err
 	}
-	if err := CheckBranch("target_branch", in.TargetBranch); err != nil {
+	if err := CheckBranch("base_branch", in.TargetBranch); err != nil {
 		return err
 	}
 	if in.SourceBranch == in.TargetBranch {
-		return fmt.Errorf("%w: source_branch and target_branch must differ", kit.ErrInvalidInput)
+		return fmt.Errorf("%w: branch and base_branch must differ", kit.ErrInvalidInput)
 	}
 	if err := kit.CheckString("title", in.Title, MaxTitleLen, nil); err != nil {
 		return fmt.Errorf("check title: %w", err)
 	}
 	if len(in.Body) > MaxBodyLen {
-		return fmt.Errorf("%w: body is longer than %d bytes", kit.ErrInvalidInput, MaxBodyLen)
+		return fmt.Errorf("%w: description is longer than %d bytes", kit.ErrInvalidInput, MaxBodyLen)
 	}
-	if err := kit.CheckRange("number of changes", len(in.Changes), 1, MaxChanges); err != nil {
+	if err := kit.CheckRange("number of files", len(in.Changes), 1, MaxChanges); err != nil {
 		return fmt.Errorf("check changes: %w", err)
 	}
 	seen := map[string]bool{}
 	total := 0
 	for _, c := range in.Changes {
-		if err := kit.CheckString("path", c.Path, MaxPathLen, nil); err != nil {
-			return fmt.Errorf("check path: %w", err)
-		}
-		if !ValidPath(c.Path) || strings.Contains(c.Path, "\\") {
-			return fmt.Errorf("%w: path is not a plain relative path", kit.ErrInvalidInput)
-		}
-		for _, seg := range strings.Split(c.Path, "/") {
-			if strings.EqualFold(seg, ".git") {
-				return fmt.Errorf("%w: path has a .git folder", kit.ErrInvalidInput)
-			}
+		if err := CheckFilePath(c.Path); err != nil {
+			return err
 		}
 		if seen[c.Path] {
 			return fmt.Errorf("%w: path appears twice", kit.ErrInvalidInput)
@@ -136,4 +131,55 @@ type CloseResult struct {
 	MergeRequest string `json:"merge_request"`
 	State        string `json:"state"`
 	Closed       bool   `json:"closed"`
+}
+
+// CheckFilePath refuses a path that is not a plain relative path in a
+// repository: empty, too long, with a leading /, a backslash, an empty folder
+// name, a . or .. folder, or a .git folder.
+func CheckFilePath(p string) error {
+	if err := kit.CheckString("path", p, MaxPathLen, nil); err != nil {
+		return fmt.Errorf("check path: %w", err)
+	}
+	if !ValidPath(p) || strings.Contains(p, "\\") {
+		return fmt.Errorf("%w: path is not a plain relative path", kit.ErrInvalidInput)
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if strings.EqualFold(seg, ".git") {
+			return fmt.Errorf("%w: path has a .git folder", kit.ErrInvalidInput)
+		}
+	}
+	return nil
+}
+
+// FileInput is the argument of read_file. The names follow the contract of
+// the incident agent.
+type FileInput struct {
+	Repo string `json:"project" jsonschema:"the repository: owner/repo on GitHub, group/project on GitLab"`
+	Ref  string `json:"ref" jsonschema:"a branch, a tag or a commit"`
+	Path string `json:"path" jsonschema:"path of the file in the repository, with / between folders"`
+}
+
+// FileResult is the result of read_file. Found is always present. When the
+// file does not exist on the ref, Found is false and the other fields are
+// empty. A missing project is an error, not a missing file.
+type FileResult struct {
+	Found   bool   `json:"found"`
+	Content string `json:"content"`
+	// SHA is the blob sha of the file.
+	SHA  string `json:"sha,omitempty"`
+	Size int    `json:"size,omitempty"`
+	Path string `json:"path"`
+	Ref  string `json:"ref"`
+}
+
+// MaxReadSize is the largest file that read_file returns.
+const MaxReadSize = 1 << 20
+
+// CheckFile checks the part of FileInput that does not depend on the Git
+// host. The server checks the project with the format of its host.
+func CheckFile(in FileInput) error {
+	if err := CheckBranch("ref", in.Ref); err != nil {
+		return err
+	}
+	return CheckFilePath(in.Path)
 }

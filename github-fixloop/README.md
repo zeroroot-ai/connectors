@@ -27,6 +27,7 @@ The argument `merge_request` is the URL of the pull request on the host of the s
 | `revert_merge_request` | git data API and pull request calls, then the merge call above | `revert_merge_request` on the revert pull request | `destructiveHint: false`, `idempotentHint: true` |
 | `open_merge_request` | `GET` the source and target references and the target commit, `POST /repos/{o}/{r}/git/blobs`, `/git/trees`, `/git/commits`, `/git/refs`, then `POST /repos/{o}/{r}/pulls` | `close_merge_request` | `destructiveHint: false`, `idempotentHint: true` |
 | `close_merge_request` | `GET /repos/{o}/{r}/pulls/{n}`, then `PATCH /repos/{o}/{r}/pulls/{n}` with `state: closed` | A person reopens it. No tool reopens it. | `destructiveHint: false`, `idempotentHint: true` |
+| `read_file` | `GET /repos/{o}/{r}/contents/{path}?ref=` and, on a 404, `GET /repos/{o}/{r}` | Not a change. | `readOnlyHint: true` |
 | `deployment_state` | `GET` the pull request, `GET /deployments`, `GET /deployments/{id}/statuses`, `GET /compare/{base}...{head}` | Not needed. It reads. | `readOnlyHint: true` |
 
 ### Mapping to the daemon shape
@@ -98,13 +99,19 @@ Limits:
 
 ## open_merge_request
 
-The input is `repo` (`owner/repo`), `source_branch`, `target_branch`, `title`, `body` and `changes`. A change is a `path` with `content` (the new text of the file) or `delete: true`. One call makes one commit with all changes, on the new source branch, from the target branch, and opens the pull request. The result holds `merge_request` (`owner/repo#12`), `url`, `source_branch`, `target_branch` and `created_at`.
+The input follows the contract of the incident agent: `project` (`owner/repo`), `branch`, `base_branch`, `title`, `description` and `files`. A file is a `path` with `content` (the new text of the file) or `delete: true`. One call makes one commit with all changes, on the new source branch, from the target branch, and opens the pull request. The result holds `merge_request` (`owner/repo#12`), `url`, `source_branch`, `target_branch` and `created_at`.
 
 The tool never writes to the target branch and never merges. It refuses a source branch that exists, unless an open pull request goes from that branch into the target branch. It then returns that pull request with `existing: true` and writes nothing. It does not compare the content of that branch with the input. The undo is `close_merge_request`.
 
 Each file is written with the mode `100644`. A file that is executable in the repository loses its mode when the tool changes its content. The input has these limits: 100 files, 1 MiB for one file, 8 MiB for all files, a title of 256 bytes, a branch name of plain characters, and a path with no `..`, no empty folder name and no `.git` folder.
 
 References: https://docs.github.com/en/rest/git/blobs#create-a-blob, https://docs.github.com/en/rest/git/trees#create-a-tree, https://docs.github.com/en/rest/git/commits#create-a-commit, https://docs.github.com/en/rest/git/refs#create-a-reference and https://docs.github.com/en/rest/pulls/pulls#create-a-pull-request.
+
+## read_file
+
+The input is `project`, `ref` (a branch, a tag or a commit) and `path`. The result is `found`, `content`, `sha` (the blob sha), `size`, `path` and `ref`. `found` is always present. A file that does not exist on the ref gives `found: false` with no error. A 404 of GitHub means a missing path or a missing repository, so the tool reads the repository to tell them apart. A missing repository is an error. The tool refuses a path with `..`, a leading `/`, a backslash, an empty folder name or a `.git` folder. It refuses a folder, a file over 1 MiB and a file that is not UTF-8 text. It never writes.
+
+Reference: https://docs.github.com/en/rest/repos/contents#get-repository-content.
 
 ## Deployment requirement
 

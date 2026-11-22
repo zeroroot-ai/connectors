@@ -25,6 +25,7 @@ The argument `merge_request` is the URL of the merge request on the server of `G
 | `revert_merge_request` | list and create merge requests, create a branch, `POST /repository/commits/:sha/revert`, then the merge call above | `revert_merge_request` on the revert merge request | `destructiveHint: false`, `idempotentHint: true` |
 | `open_merge_request` | `GET /projects/:id/merge_requests`, `HEAD /projects/:id/repository/files/:path` for each file, `POST /projects/:id/repository/commits` with `start_branch`, then `POST /projects/:id/merge_requests` | `close_merge_request` | `destructiveHint: false`, `idempotentHint: true` |
 | `close_merge_request` | `GET /projects/:id/merge_requests/:iid`, then `PUT` it with `state_event: close` | A person reopens it. No tool reopens it. | `destructiveHint: false`, `idempotentHint: true` |
+| `read_file` | `GET /projects/:id/repository/files/:path?ref=` | Not a change. | `readOnlyHint: true` |
 | `deployment_state` | `GET` the merge request, `GET /projects/:id/deployments`, `GET /repository/merge_base` | Not needed. It reads. | `readOnlyHint: true` |
 
 ### Mapping to the daemon shape
@@ -91,7 +92,7 @@ Limits:
 
 ## open_merge_request
 
-The input is `repo` (the project path, for example `group/project`), `source_branch`, `target_branch`, `title`, `body` and `changes`. A change is a `path` with `content` (the new text of the file) or `delete: true`. One call makes one commit with all changes, on the new source branch, from the target branch, and opens the merge request. The result holds `merge_request` (`group/project!12`), `url`, `source_branch`, `target_branch` and `created_at`.
+The input follows the contract of the incident agent: `project` (the project path, for example `group/project`), `branch`, `base_branch`, `title`, `description` and `files`. A file is a `path` with `content` (the new text of the file) or `delete: true`. One call makes one commit with all changes, on the new source branch, from the target branch, and opens the merge request. The result holds `merge_request` (`group/project!12`), `url`, `source_branch`, `target_branch` and `created_at`.
 
 GitLab has no commit action that writes a file whether it exists or not. For each file with content, the tool sends `HEAD` for the path on the target branch. It uses the action `update` when GitLab answers 200 and `create` when it answers 404. A change with `delete: true` uses the action `delete`.
 
@@ -100,6 +101,12 @@ The tool never writes to the target branch and never merges. It refuses a source
 The input has these limits: 100 files, 1 MiB for one file, 8 MiB for all files, a title of 256 bytes, a branch name of plain characters, and a path with no `..`, no empty folder name and no `.git` folder.
 
 References: https://docs.gitlab.com/api/repository_files/, https://docs.gitlab.com/api/commits/ and https://docs.gitlab.com/api/merge_requests/.
+
+## read_file
+
+The input is `project`, `ref` (a branch, a tag or a commit) and `path`. The result is `found`, `content`, `sha` (the blob sha), `size`, `path` and `ref`. `found` is always present. A file that does not exist on the ref gives `found: false` with no error. GitLab says "File Not Found" or "Project Not Found" in the 404 body, and the tool uses it. A missing project is an error. The tool refuses a path with `..`, a leading `/`, a backslash, an empty folder name or a `.git` folder. It refuses a folder, a file over 1 MiB and a file that is not UTF-8 text. It never writes.
+
+Reference: https://docs.gitlab.com/api/repository_files/#get-file-from-repository.
 
 ## Deployment requirement
 

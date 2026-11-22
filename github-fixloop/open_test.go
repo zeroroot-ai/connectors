@@ -41,9 +41,9 @@ func openRoutes() map[string]handler {
 
 func openArgs() map[string]any {
 	return map[string]any{
-		"repo": "acme/shop", "source_branch": srcBranch, "target_branch": "main",
-		"title": "Fix SQL injection", "body": "Uses a bound parameter.",
-		"changes": []map[string]any{
+		"project": "acme/shop", "branch": srcBranch, "base_branch": "main",
+		"title": "Fix SQL injection", "description": "Uses a bound parameter.",
+		"files": []map[string]any{
 			{"path": "src/db.go", "content": "package db\n"},
 			{"path": "old/unused.go", "delete": true},
 		},
@@ -113,15 +113,15 @@ func TestOpenShowsAGitHubError(t *testing.T) {
 func TestOpenRefusesBadInput(t *testing.T) {
 	m, call := setup(t, openRoutes())
 	mutate := map[string]func(map[string]any){
-		"repo without owner": func(a map[string]any) { a["repo"] = "shop" },
-		"repo path":          func(a map[string]any) { a["repo"] = "acme/shop/../x" },
-		"repo dot dot":       func(a map[string]any) { a["repo"] = "acme/.." },
-		"same branch":        func(a map[string]any) { a["source_branch"] = "main" },
-		"bad branch":         func(a map[string]any) { a["source_branch"] = "a..b" },
-		"no changes":         func(a map[string]any) { a["changes"] = []map[string]any{} },
-		"path escape":        func(a map[string]any) { a["changes"] = []map[string]any{{"path": "../x", "content": "a"}} },
-		"content and delete": func(a map[string]any) { a["changes"] = []map[string]any{{"path": "a", "content": "a", "delete": true}} },
-		"no title":           func(a map[string]any) { a["title"] = "" },
+		"project without owner": func(a map[string]any) { a["project"] = "shop" },
+		"project path":          func(a map[string]any) { a["project"] = "acme/shop/../x" },
+		"project dot dot":       func(a map[string]any) { a["project"] = "acme/.." },
+		"same branch":           func(a map[string]any) { a["branch"] = "main" },
+		"bad branch":            func(a map[string]any) { a["branch"] = "a..b" },
+		"no changes":            func(a map[string]any) { a["files"] = []map[string]any{} },
+		"path escape":           func(a map[string]any) { a["files"] = []map[string]any{{"path": "../x", "content": "a"}} },
+		"content and delete":    func(a map[string]any) { a["files"] = []map[string]any{{"path": "a", "content": "a", "delete": true}} },
+		"no title":              func(a map[string]any) { a["title"] = "" },
 	}
 	for name, f := range mutate {
 		a := openArgs()

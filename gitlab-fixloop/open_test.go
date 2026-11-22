@@ -34,9 +34,9 @@ func openRoutes() routeMap {
 
 func openArgs() map[string]any {
 	return map[string]any{
-		"repo": "acme/shop", "source_branch": srcBranch, "target_branch": "main",
-		"title": "Fix SQL injection", "body": "Uses a bound parameter.",
-		"changes": []map[string]any{
+		"project": "acme/shop", "branch": srcBranch, "base_branch": "main",
+		"title": "Fix SQL injection", "description": "Uses a bound parameter.",
+		"files": []map[string]any{
 			{"path": "src/db.go", "content": "package db\n"},
 			{"path": "src/new.go", "content": "package db\n"},
 			{"path": "old/unused.go", "delete": true},
@@ -106,16 +106,16 @@ func TestOpenShowsAGitLabError(t *testing.T) {
 func TestOpenRefusesBadInput(t *testing.T) {
 	m, call := setup(t, openRoutes())
 	mutate := map[string]func(map[string]any){
-		"repo query":         func(a map[string]any) { a["repo"] = "acme/shop?x=1" },
-		"repo dot dot":       func(a map[string]any) { a["repo"] = "acme/../x" },
-		"repo empty segment": func(a map[string]any) { a["repo"] = "acme//shop" },
-		"same branch":        func(a map[string]any) { a["source_branch"] = "main" },
-		"bad branch":         func(a map[string]any) { a["target_branch"] = "a b" },
-		"no changes":         func(a map[string]any) { a["changes"] = []map[string]any{} },
-		"path escape":        func(a map[string]any) { a["changes"] = []map[string]any{{"path": "a/../../x", "content": "a"}} },
-		"git folder":         func(a map[string]any) { a["changes"] = []map[string]any{{"path": ".git/config", "content": "a"}} },
-		"content and delete": func(a map[string]any) { a["changes"] = []map[string]any{{"path": "a", "content": "a", "delete": true}} },
-		"no title":           func(a map[string]any) { a["title"] = "" },
+		"project query":         func(a map[string]any) { a["project"] = "acme/shop?x=1" },
+		"project dot dot":       func(a map[string]any) { a["project"] = "acme/../x" },
+		"project empty segment": func(a map[string]any) { a["project"] = "acme//shop" },
+		"same branch":           func(a map[string]any) { a["branch"] = "main" },
+		"bad branch":            func(a map[string]any) { a["base_branch"] = "a b" },
+		"no changes":            func(a map[string]any) { a["files"] = []map[string]any{} },
+		"path escape":           func(a map[string]any) { a["files"] = []map[string]any{{"path": "a/../../x", "content": "a"}} },
+		"git folder":            func(a map[string]any) { a["files"] = []map[string]any{{"path": ".git/config", "content": "a"}} },
+		"content and delete":    func(a map[string]any) { a["files"] = []map[string]any{{"path": "a", "content": "a", "delete": true}} },
+		"no title":              func(a map[string]any) { a["title"] = "" },
 	}
 	for name, f := range mutate {
 		a := openArgs()

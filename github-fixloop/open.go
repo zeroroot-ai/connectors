@@ -90,11 +90,11 @@ func (v *service) openMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 		return nil, out, fmt.Errorf("check input: %w", err)
 	}
 	owner, repo, ok := strings.Cut(in.Repo, "/")
-	if err := kit.CheckString("repo", in.Repo, maxRefLen, nil); err != nil {
-		return nil, out, fmt.Errorf("check repo: %w", err)
+	if err := kit.CheckString("project", in.Repo, maxRefLen, nil); err != nil {
+		return nil, out, fmt.Errorf("check project: %w", err)
 	}
 	if !ok || !ownerFormat.MatchString(owner) || !validRepo(repo) {
-		return nil, out, fmt.Errorf("%w: repo must be owner/repo", kit.ErrInvalidInput)
+		return nil, out, fmt.Errorf("%w: project must be owner/repo", kit.ErrInvalidInput)
 	}
 	r := prRef{owner: owner, repo: repo}
 
