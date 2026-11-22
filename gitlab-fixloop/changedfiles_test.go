@@ -179,3 +179,40 @@ func TestStateChangedFilesError(t *testing.T) {
 		t.Errorf("out = %v", out)
 	}
 }
+
+// The diffs and the blobs are read after the state. When the head or the diff
+// version moves between the reads, the files may belong to another commit, so
+// the tool gives none and says why. The state itself is still returned.
+func TestStateChangedFilesWhenTheHeadMoves(t *testing.T) {
+	const moved = "cccccccccccccccccccccccccccccccccccccccc"
+	diffs := func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+		_, _ = w.Write([]byte("[" + diffJS("a.go", false, false, false) + "]"))
+	}
+	for name, second := range map[string]string{
+		"the head moves":         strings.Replace(openMR("success", "mergeable"), `"sha":"`+headSHA+`","merge_commit_sha"`, `"sha":"`+moved+`","merge_commit_sha"`, 1),
+		"the diff version moves": strings.Replace(openMR("success", "mergeable"), `"head_sha":"`+headSHA+`"}`, `"head_sha":"`+moved+`"}`, 1),
+	} {
+		reads := 0
+		routes := stateWith(diffs, "a.go")
+		routes["GET "+api+mr7] = func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+			reads++
+			if reads > 1 { // the read after the files
+				_, _ = w.Write([]byte(second))
+				return
+			}
+			_, _ = w.Write([]byte(openMR("success", "mergeable")))
+		}
+		_, call := setup(t, routes)
+		isErr, text, out := call("merge_request_state", map[string]any{"merge_request": ref})
+		files, _ := out["changed_files"].([]any)
+		errText, _ := out["changed_files_error"].(string)
+		if isErr || out["state"] != "open" || out["head_sha"] != headSHA || len(files) != 0 || !strings.Contains(errText, "moved from") {
+			t.Errorf("%s: isErr=%v %s out=%v", name, isErr, text, out)
+		}
+	}
+	_, call := setup(t, stateWith(diffs, "a.go"))
+	_, _, ok := call("merge_request_state", map[string]any{"merge_request": ref})
+	if f, _ := ok["changed_files"].([]any); len(f) != 1 || ok["changed_files_error"] != nil {
+		t.Errorf("a stable head: %v", ok)
+	}
+}

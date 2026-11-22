@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -301,5 +302,59 @@ func (v *service) foreign(ctx context.Context, r prRef, in fixloop.OpenInput) (c
 			return "", "its commit holds another content or another mode for " + c.Path, nil
 		}
 	}
-	return cmp.Commits[0].SHA, "", nil
+	// The compare answer has no file mode. The tree of the commit has it, so
+	// the tool reads the tree and requires the mode 100644 and the type blob
+	// for each written path. A mode 100755, a symlink (120000) or a submodule
+	// is a change that this tool did not make.
+	commit = cmp.Commits[0].SHA
+	reason, err = v.checkModes(ctx, r, commit, in)
+	if err != nil || reason != "" {
+		return "", reason, err
+	}
+	return commit, "", nil
+}
+
+// checkModes reads the tree of the commit and refuses a written path whose
+// entry is not a blob with the mode 100644. A tree that GitHub cuts cannot be
+// checked, so it is refused.
+func (v *service) checkModes(ctx context.Context, r prRef, commit string, in fixloop.OpenInput) (string, error) {
+	var c gitCommit
+	if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: repoPath(r, "git", "commits", commit)}, &c); err != nil {
+		return "", fmt.Errorf("read the commit of the source branch: %w", err)
+	}
+	var tree struct {
+		Truncated bool `json:"truncated"`
+		Tree      []struct {
+			Path string `json:"path"`
+			Mode string `json:"mode"`
+			Type string `json:"type"`
+			SHA  string `json:"sha"`
+		} `json:"tree"`
+	}
+	err := v.client.Do(ctx, kit.Request{
+		Method: http.MethodGet, Path: repoPath(r, "git", "trees", c.Tree.SHA), Query: url.Values{"recursive": {"1"}},
+	}, &tree)
+	if err != nil {
+		return "", fmt.Errorf("read the tree of the source branch: %w", err)
+	}
+	if tree.Truncated {
+		return "has a tree that is too large for the tool to check the file modes", nil
+	}
+	entries := make(map[string][3]string, len(tree.Tree))
+	for _, e := range tree.Tree {
+		entries[e.Path] = [3]string{e.Mode, e.Type, e.SHA}
+	}
+	for _, f := range in.Changes {
+		if f.Delete {
+			if _, ok := entries[f.Path]; ok {
+				return "its commit does not remove " + f.Path, nil
+			}
+			continue
+		}
+		e, ok := entries[f.Path]
+		if !ok || e[0] != fileMode || e[1] != "blob" || e[2] != fixloop.BlobSHA(*f.Content) {
+			return "its commit holds a file mode, a type or a content that this tool did not write for " + f.Path, nil
+		}
+	}
+	return "", nil
 }

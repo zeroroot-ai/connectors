@@ -385,6 +385,12 @@ func (v *service) mergeRequestState(ctx context.Context, _ *mcp.CallToolRequest,
 	}
 	st.ChangedFiles = []fixloop.ChangedFile{}
 	files, truncated, ferr := v.changedFiles(ctx, project, iid, mr)
+	if ferr == nil {
+		// The diffs and the blobs come from later reads, so the head can have
+		// moved. The tool reads the merge request again after them, and gives
+		// the files only when sha and diff_refs.head_sha are unchanged.
+		ferr = v.sameHeadAfter(ctx, project, iid, mr)
+	}
 	if ferr != nil {
 		st.ChangedFilesError = ferr.Error()
 	} else {
@@ -866,4 +872,18 @@ func (v *service) holds(ctx context.Context, project, commit, deployed string) b
 		Query: url.Values{"refs[]": {commit, deployed}},
 	}, &base)
 	return err == nil && base.ID == commit
+}
+
+// sameHeadAfter reads the merge request again and fails when its head, or the
+// head of its diff version, is not the one that the state used.
+func (v *service) sameHeadAfter(ctx context.Context, project string, iid int, before *glMR) error {
+	again, err := v.getMR(ctx, project, iid)
+	if err != nil {
+		return fmt.Errorf("check the head after the files: %w", err)
+	}
+	if !strings.EqualFold(again.SHA, before.SHA) || !strings.EqualFold(again.DiffRefs.HeadSHA, before.DiffRefs.HeadSHA) {
+		return fmt.Errorf("the head of the merge request moved from %s to %s while the files were read, so the files may belong to another commit",
+			before.SHA, again.SHA)
+	}
+	return nil
 }

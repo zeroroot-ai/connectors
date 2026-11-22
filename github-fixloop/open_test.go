@@ -92,6 +92,20 @@ func ownCompare() string {
 
 func branchExists(routes map[string]handler) map[string]handler {
 	routes["GET "+repo+"/git/ref/heads/"+srcBranch] = reply(200, `{"object":{"sha":"`+newComSHA+`"}}`)
+	return ownTree(routes, `{"path":"src/db.go","mode":"100644","type":"blob","sha":"`+fixloop.BlobSHA("package db\n")+`"}`)
+}
+
+// ownTree answers the commit of the branch and its recursive tree, which the
+// resume reads to check the file mode. The entries are the files that exist.
+func ownTree(routes map[string]handler, entries ...string) map[string]handler {
+	routes["GET "+repo+"/git/commits/"+newComSHA] = reply(200, `{"sha":"`+newComSHA+`","tree":{"sha":"`+newTreeSHA+`"},"parents":[{"sha":"`+baseSHA+`"}]}`)
+	routes["GET "+repo+"/git/trees/"+newTreeSHA] = func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+		if r.URL.Query().Get("recursive") != "1" {
+			http.Error(w, `{"message":"not recursive"}`, http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"sha":"` + newTreeSHA + `","truncated":false,"tree":[` + strings.Join(entries, ",") + `]}`))
+	}
 	return routes
 }
 
@@ -377,7 +391,7 @@ func TestOpenHeadIsTheCommitOfTheTool(t *testing.T) {
 		t.Error("resume with a new pull request: the head was not checked")
 	}
 	// The branch moved after the compare: its head is not the commit that the compare showed.
-	routes = openRoutes()
+	routes = branchExists(openRoutes())
 	routes["GET "+repo+"/git/ref/heads/"+srcBranch] = reply(200, `{"object":{"sha":"`+moved+`"}}`)
 	routes[compareKey] = reply(200, ownCompare())
 	routes["GET "+repo+"/pulls"] = reply(200, `[`+ownPR(newComSHA)+`]`)
@@ -408,5 +422,46 @@ func TestOpenIgnoresAPullRequestFromAFork(t *testing.T) {
 	}
 	if m.called("POST "+repo+"/pulls") != 1 {
 		t.Error("the tool used the pull request of the fork")
+	}
+}
+
+// The compare answer has no file mode, so the resume reads the tree of the
+// commit. A mode other than 100644, a type other than blob, a cut tree and a
+// path that should be removed are all refused, and nothing is written.
+func TestOpenRefusesAForeignModeInTheTree(t *testing.T) {
+	blob := fixloop.BlobSHA("package db\n")
+	entry := func(mode, typ string) string {
+		return `{"path":"src/db.go","mode":"` + mode + `","type":"` + typ + `","sha":"` + blob + `"}`
+	}
+	cases := map[string][]string{
+		"executable":        {entry("100755", "blob")},
+		"symlink":           {entry("120000", "blob")},
+		"submodule":         {entry("160000", "commit")},
+		"a tree not a blob": {entry("040000", "tree")},
+		"path missing":      {},
+		"deleted file kept": {entry("100644", "blob"), `{"path":"old/unused.go","mode":"100644","type":"blob","sha":"` + blobSHA + `"}`},
+	}
+	for name, entries := range cases {
+		routes := branchExists(openRoutes())
+		ownTree(routes, entries...)
+		routes[compareKey] = reply(200, ownCompare())
+		routes["GET "+repo+"/pulls"] = reply(200, `[`+ownPR(newComSHA)+`]`)
+		m, call := setup(t, routes)
+		isErr, text, _ := call("open_merge_request", openArgs())
+		if !isErr || !strings.Contains(text, "does not build on it") {
+			t.Errorf("%s: isErr=%v %s", name, isErr, text)
+		}
+		for _, c := range m.calls {
+			if strings.HasPrefix(c, "POST") {
+				t.Errorf("%s: the tool wrote: %s", name, c)
+			}
+		}
+	}
+	routes := branchExists(openRoutes())
+	routes["GET "+repo+"/git/trees/"+newTreeSHA] = reply(200, `{"truncated":true,"tree":[]}`)
+	routes[compareKey] = reply(200, ownCompare())
+	_, call := setup(t, routes)
+	if isErr, text, _ := call("open_merge_request", openArgs()); !isErr || !strings.Contains(text, "too large") {
+		t.Errorf("truncated tree: isErr=%v %s", isErr, text)
 	}
 }

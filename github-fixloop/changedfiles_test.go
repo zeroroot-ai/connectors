@@ -112,3 +112,37 @@ func TestStateChangedFilesError(t *testing.T) {
 		t.Errorf("isErr=%v %s out=%v", isErr, text, out)
 	}
 }
+
+// The files are read after the state. When the head moves between the two
+// reads, the files may belong to another commit, so the tool gives none and
+// says why. The state itself is still returned.
+func TestStateChangedFilesWhenTheHeadMoves(t *testing.T) {
+	const moved = "dddddddddddddddddddddddddddddddddddddddd"
+	reads := 0
+	routes := stateRoutes(func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+		_, _ = w.Write([]byte("[" + prFile("a.go", "added", "1111", "") + "]"))
+	})
+	routes["GET "+pr7] = func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+		reads++
+		head := headSHA
+		if reads > 1 { // the read after the files
+			head = moved
+		}
+		_, _ = w.Write([]byte(pullJSON("open", false, "true", "clean", head)))
+	}
+	_, call := setup(t, routes)
+	isErr, text, out := call("merge_request_state", map[string]any{"merge_request": ref})
+	files, _ := out["changed_files"].([]any)
+	errText, _ := out["changed_files_error"].(string)
+	if isErr || out["head_sha"] != headSHA || len(files) != 0 || !strings.Contains(errText, "moved from "+headSHA+" to "+moved) {
+		t.Errorf("isErr=%v %s out=%v", isErr, text, out)
+	}
+	// A head that does not move gives the files.
+	_, call = setup(t, stateRoutes(func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+		_, _ = w.Write([]byte("[" + prFile("a.go", "added", "1111", "") + "]"))
+	}))
+	_, _, ok := call("merge_request_state", map[string]any{"merge_request": ref})
+	if f, _ := ok["changed_files"].([]any); len(f) != 1 || ok["changed_files_error"] != nil {
+		t.Errorf("a stable head: %v", ok)
+	}
+}
