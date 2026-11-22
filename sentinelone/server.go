@@ -54,6 +54,7 @@ func buildWith(env *kit.Env, log *slog.Logger, hc *http.Client) (func(*mcp.Serve
 type service struct{ client *kit.Client }
 
 func (v *service) register(s *mcp.Server, log *slog.Logger) {
+	v.registerRead(s, log)
 	kit.AddTool(s, log, &mcp.Tool{
 		Name: "disconnect_from_network",
 		Description: "Response action. Disconnect one SentinelOne agent from the network. The endpoint keeps its link " +

@@ -1,5 +1,5 @@
 // Command sentinelone is the MCP server of Zero Root for response actions on SentinelOne agents.
-// The vendor server of SentinelOne (purple-mcp) is read only. This server changes a user (ADR-0180).
+// This server reads threats and agent state, and it changes the network state of an agent (ADR-0180).
 package main
 
 import (
