@@ -253,7 +253,6 @@ func TestClientWaitsForRateLimitReset(t *testing.T) {
 		min, max time.Duration
 	}{
 		"reset in 3 s":      {http.Header{"X-Rate-Limit-Reset": {strconv.FormatInt(time.Now().Add(3*time.Second).Unix(), 10)}}, 1500 * time.Millisecond, 4 * time.Second},
-		"reset far away":    {http.Header{"X-Rate-Limit-Reset": {strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)}}, maxRateWait, maxRateWait},
 		"reset in the past": {http.Header{"X-Rate-Limit-Reset": {"1"}}, 1, maxBackoff},
 		"retry after first": {http.Header{"Retry-After": {"2"}, "X-Rate-Limit-Reset": {strconv.FormatInt(time.Now().Add(9*time.Second).Unix(), 10)}}, 2 * time.Second, 2 * time.Second},
 		"bad reset":         {http.Header{"X-Rate-Limit-Reset": {"soon"}}, 1, maxBackoff},
@@ -298,5 +297,70 @@ func TestClientWaitsForRateLimitReset(t *testing.T) {
 	}})
 	if err := c.Do(context.Background(), Request{Method: http.MethodGet, Path: "/x"}, nil); err != nil || len(waits) != 1 || waits[0] > maxBackoff {
 		t.Errorf("503: err=%v waits=%v", err, waits)
+	}
+}
+
+// A reset that is further away than maxRateWait fails the call at once, with
+// the time in the error, and the client sends no second request and does not wait.
+func TestClientFailsAtOnceWhenTheResetIsFar(t *testing.T) {
+	until := time.Now().Add(time.Hour).Truncate(time.Second)
+	for name, h := range map[string]http.Header{
+		"reset":       {"X-Rate-Limit-Reset": {strconv.FormatInt(until.Unix(), 10)}},
+		"retry after": {"Retry-After": {"3600"}},
+		"http date":   {"Retry-After": {until.UTC().Format(http.TimeFormat)}},
+	} {
+		var calls atomic.Int32
+		slept := false
+		c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			calls.Add(1)
+			for k, v := range h {
+				w.Header()[k] = v
+			}
+			w.WriteHeader(http.StatusTooManyRequests)
+		}), ClientOptions{MaxRetries: 3, Sleep: func(context.Context, time.Duration) error { slept = true; return nil }})
+		err := c.Do(context.Background(), Request{Method: http.MethodGet, Path: "/x"}, nil)
+		var rl *RateLimitError
+		var ae *APIError
+		if !errors.As(err, &rl) || !errors.As(err, &ae) || ae.Status != 429 || !strings.Contains(err.Error(), "rate limited until ") {
+			t.Errorf("%s: err = %v", name, err)
+			continue
+		}
+		if d := time.Until(rl.Until); d < 55*time.Minute || d > 61*time.Minute {
+			t.Errorf("%s: until = %v", name, rl.Until)
+		}
+		if calls.Load() != 1 || slept {
+			t.Errorf("%s: calls %d slept %v", name, calls.Load(), slept)
+		}
+	}
+}
+
+// The wait is counted on the clock of the vendor, from the Date header, so a
+// wrong clock of this host does not change it. Retry-After can be an HTTP date.
+func TestClientCountsTheWaitFromTheDateHeader(t *testing.T) {
+	vendorNow := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC) // far from the clock of this host
+	for name, h := range map[string]http.Header{
+		"reset":     {"X-Rate-Limit-Reset": {strconv.FormatInt(vendorNow.Add(3*time.Second).Unix(), 10)}},
+		"http date": {"Retry-After": {vendorNow.Add(3 * time.Second).Format(http.TimeFormat)}},
+	} {
+		var calls atomic.Int32
+		var waits []time.Duration
+		c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if calls.Add(1) == 1 {
+				w.Header().Set("Date", vendorNow.Format(http.TimeFormat))
+				for k, v := range h {
+					w.Header()[k] = v
+				}
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			_, _ = w.Write([]byte("{}"))
+		}), ClientOptions{MaxRetries: 1, Sleep: func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }})
+		if err := c.Do(context.Background(), Request{Method: http.MethodGet, Path: "/x"}, nil); err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if len(waits) != 1 || waits[0] < 2*time.Second || waits[0] > 4*time.Second {
+			t.Errorf("%s: waits = %v, want about 3s", name, waits)
+		}
 	}
 }

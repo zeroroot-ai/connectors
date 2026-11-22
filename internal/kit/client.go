@@ -163,8 +163,10 @@ func (c *Client) DoBytes(ctx context.Context, r Request) ([]byte, error) {
 		}
 		if wait <= 0 {
 			wait = min(200*time.Millisecond<<attempt, maxBackoff)
-		} else {
-			wait = min(wait, maxRateWait)
+		} else if wait > maxRateWait {
+			// The vendor asks for a longer wait than the tool accepts. A retry
+			// before that time would fail again, so the call fails at once.
+			return nil, &RateLimitError{Until: time.Now().Add(wait), Cause: err}
 		}
 		c.log.Debug("vendor request failed, retry", "method", r.Method, "attempt", attempt+1)
 		if err := c.sleep(ctx, wait); err != nil {
@@ -268,22 +270,56 @@ func temporary(err error) bool {
 	return false
 }
 
+// RateLimitError is the error of a call that the vendor refused with HTTP 429
+// and asked to repeat after a time that is longer than the client waits. The
+// client does not retry. Until is the time that the vendor named.
+type RateLimitError struct {
+	Until time.Time
+	Cause error
+}
+
+func (e *RateLimitError) Error() string {
+	return "rate limited until " + e.Until.UTC().Format(time.RFC3339) + ": " + e.Cause.Error()
+}
+
+func (e *RateLimitError) Unwrap() error { return e.Cause }
+
 // retryAfter returns the wait that the vendor asks for. It reads Retry-After
 // (seconds). On a 429 with no Retry-After it reads X-Rate-Limit-Reset, the
 // time of the reset in epoch seconds, which Okta sends. The caller caps the
 // wait. A reset time in the past gives no wait, so the backoff applies.
 func retryAfter(resp *http.Response) time.Duration {
-	if s, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && s >= 0 {
-		return time.Duration(s) * time.Second
+	now := serverNow(resp)
+	ra := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if sec, err := strconv.Atoi(ra); err == nil && sec >= 0 {
+		return time.Duration(sec) * time.Second
+	}
+	// Retry-After can be an HTTP date. The wait is counted from the Date header
+	// of the answer, so a wrong clock of this host does not change it.
+	if t, err := http.ParseTime(ra); err == nil {
+		if d := t.Sub(now); d > 0 {
+			return d
+		}
+		return 0
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		if reset, err := strconv.ParseInt(resp.Header.Get("X-Rate-Limit-Reset"), 10, 64); err == nil {
-			if d := time.Until(time.Unix(reset, 0)); d > 0 {
+			if d := time.Unix(reset, 0).Sub(now); d > 0 {
 				return d
 			}
 		}
 	}
 	return 0
+}
+
+// serverNow is the time of the vendor: the Date header of the answer. A reset
+// time and a Retry-After date are on the clock of the vendor, so the wait is
+// counted on that clock. Without a Date header, the clock of this host is used.
+func serverNow(resp *http.Response) time.Time {
+	if t, err := http.ParseTime(resp.Header.Get("Date")); err == nil {
+		return t
+	}
+	return time.Now()
 }
 
 func sleepContext(ctx context.Context, d time.Duration) error {
