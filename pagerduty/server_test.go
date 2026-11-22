@@ -27,10 +27,11 @@ const dedup = "finding/42:disk-full"
 // 400) and the REST API v2 (GET /incidents/{id} answers {"incident":{...}},
 // GET /incidents lists with incident_key). One server answers both addresses.
 type mock struct {
-	calls   []string
-	bodies  []map[string]any
-	queries []string
-	header  http.Header
+	calls      []string
+	bodies     []map[string]any
+	queries    []string
+	header     http.Header
+	failEvents int // the first n events answer 503
 }
 
 const incidentJSON = `{"id":"PT4KHLK","incident_number":1234,"title":"Disk full","status":"triggered","urgency":"high",` +
@@ -49,6 +50,9 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	m.bodies = append(m.bodies, body)
 	switch {
+	case r.Method == http.MethodPost && r.URL.Path == "/v2/enqueue" && m.failEvents > 0:
+		m.failEvents--
+		w.WriteHeader(http.StatusServiceUnavailable)
 	case r.Method == http.MethodPost && r.URL.Path == "/v2/enqueue":
 		if body["routing_key"] != routing {
 			w.WriteHeader(http.StatusBadRequest)
@@ -270,5 +274,60 @@ func TestConfig(t *testing.T) {
 	}
 	if _, err := build(kit.NewEnvFrom(map[string]string{"PAGERDUTY_ROUTING_KEY": routing, "PAGERDUTY_API_TOKEN": "t"}), log); err != nil {
 		t.Errorf("good config: %v", err)
+	}
+}
+
+// TestEventsAreRepeatedOnATemporaryError fails when Retry is removed from the
+// events call. With a dedup_key, the same event twice has the same effect, so
+// the client repeats it after a 503.
+func TestEventsAreRepeatedOnATemporaryError(t *testing.T) {
+	m, call, _ := setup(t)
+	m.failEvents = 1
+	isErr, text, _ := call("trigger_alert", map[string]any{"summary": "s", "source": "x", "dedup_key": "k"})
+	if isErr {
+		t.Fatalf("a 503 was not repeated: %s", text)
+	}
+	if len(m.calls) != 2 || m.calls[0] != "POST /v2/enqueue" || m.calls[1] != "POST /v2/enqueue" {
+		t.Errorf("calls = %v", m.calls)
+	}
+	m.calls, m.failEvents = nil, 1
+	if isErr, text, _ := call("resolve_alert", map[string]any{"dedup_key": "k"}); isErr || len(m.calls) != 2 {
+		t.Errorf("resolve: isErr=%v calls %v %s", isErr, m.calls, text)
+	}
+}
+
+func TestFindIncidentsIsScopedToTheService(t *testing.T) {
+	m := &mock{}
+	ts := httptest.NewTLSServer(m)
+	defer ts.Close()
+	build := func(extra map[string]string) func(string, map[string]any) (bool, string, *mcp.CallToolResult) {
+		env := map[string]string{
+			"PAGERDUTY_ROUTING_KEY": routing, "PAGERDUTY_API_TOKEN": "rest-token", "PAGERDUTY_EVENTS_URL": ts.URL, "PAGERDUTY_API_URL": ts.URL,
+		}
+		for k, v := range extra {
+			env[k] = v
+		}
+		register, err := buildWith(kit.NewEnvFrom(env), slog.New(slog.DiscardHandler), ts.Client())
+		if err != nil {
+			t.Fatal(err)
+		}
+		cs := kittest.Connect(t, register)
+		return func(tool string, args map[string]any) (bool, string, *mcp.CallToolResult) {
+			res := kittest.Call(t, cs, tool, args)
+			return res.IsError, kittest.Text(t, res), res
+		}
+	}
+	build(map[string]string{"PAGERDUTY_SERVICE_ID": "PSVC1"})("find_incidents", map[string]any{"dedup_key": dedup})
+	if q := m.queries[0]; !strings.Contains(q, "service_ids%5B%5D=PSVC1") {
+		t.Errorf("query = %s", q)
+	}
+	m.queries = nil
+	build(nil)("find_incidents", map[string]any{"dedup_key": dedup})
+	if q := m.queries[0]; strings.Contains(q, "service_ids") {
+		t.Errorf("a server with no service id scoped the query: %s", q)
+	}
+	if _, err := buildWith(kit.NewEnvFrom(map[string]string{"PAGERDUTY_ROUTING_KEY": routing, "PAGERDUTY_API_TOKEN": "t", "PAGERDUTY_SERVICE_ID": "bad id&x"}),
+		slog.New(slog.DiscardHandler), nil); err == nil {
+		t.Error("a bad service id was accepted")
 	}
 }

@@ -10,6 +10,7 @@ MCP server for paging with PagerDuty. Class `paging`. It sends alerts through th
 | `PAGERDUTY_API_TOKEN` | Required. A REST API key. Make it a read-only General Access key. The server sends `Authorization: Token token=<key>`. |
 | `PAGERDUTY_EVENTS_URL` | Optional. The default is `https://events.pagerduty.com`. For the EU service region use `https://events.eu.pagerduty.com`. |
 | `PAGERDUTY_API_URL` | Optional. The default is `https://api.pagerduty.com`. For the EU service region use `https://api.eu.pagerduty.com`. |
+| `PAGERDUTY_SERVICE_ID` | Optional. The id of the service that the routing key belongs to. When set, `find_incidents` lists only the incidents of this service, with `service_ids[]`. Set it, because the same `dedup_key` on another service is another alert. |
 | `PAGERDUTY_TIMEOUT` | Optional. Time limit of one vendor call. The default is `20s`. |
 | `LISTEN_ADDR` | Optional. The default is `:8080`. |
 
@@ -32,6 +33,10 @@ References: https://docs.pagerduty.com/developer/api/reference/events-v2/send-ev
 - `summary` has at most 1024 characters, `dedup_key` at most 255. `severity` is `critical`, `error`, `warning` or `info`. The default is `error`. `custom_details` has at most 20 pairs of text.
 - PagerDuty drops an acknowledge or a resolve for a `dedup_key` that has no open alert, and the Events API still answers 202. The tool then reports success. Read the incident to see the state.
 - The Events API allows about 120 events a minute for each integration key, and a 429 means that the event was not taken. The client retries a 429 after the wait that PagerDuty asks for.
+
+## Grouping of alerts
+
+PagerDuty groups alerts into incidents. The list-incidents page says that an incident with child alerts has no incident key, so a query by `incident_key` returns the incidents whose alerts match the key. `find_incidents` therefore returns the incidents that hold the alert, and an incident can hold other alerts too. Check `service_id` and `dedup_key` in the result. The parameter `service_ids[]` is on the page https://docs.pagerduty.com/developer/api/reference/rest/incidents/list-incidents. It is sent only when `PAGERDUTY_SERVICE_ID` is set.
 
 ## Not verified
 

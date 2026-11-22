@@ -58,12 +58,16 @@ func buildWith(env *kit.Env, log *slog.Logger, hc *http.Client) (func(*mcp.Serve
 	token := env.Secret("PAGERDUTY_API_TOKEN")
 	eventsURL := env.OptionalURL("PAGERDUTY_EVENTS_URL", "https://events.pagerduty.com")
 	apiURL := env.OptionalURL("PAGERDUTY_API_URL", "https://api.pagerduty.com")
+	serviceID := env.Optional("PAGERDUTY_SERVICE_ID", "")
 	timeout := env.Duration("PAGERDUTY_TIMEOUT", 20*time.Second)
 	if err := env.Err(); err != nil {
 		return nil, fmt.Errorf("read configuration: %w", err)
 	}
 	if eventsURL.Scheme != "https" || apiURL.Scheme != "https" {
 		return nil, errors.New("PAGERDUTY_EVENTS_URL and PAGERDUTY_API_URL must use https")
+	}
+	if serviceID != "" && !incidentFormat.MatchString(serviceID) {
+		return nil, errors.New("PAGERDUTY_SERVICE_ID has the wrong format")
 	}
 	if !keyFormat.MatchString(routing.Reveal()) {
 		return nil, errors.New("PAGERDUTY_ROUTING_KEY has the wrong format")
@@ -77,13 +81,14 @@ func buildWith(env *kit.Env, log *slog.Logger, hc *http.Client) (func(*mcp.Serve
 		Logger: log, Timeout: timeout, HTTPClient: hc,
 	})
 	events := kit.NewClient(eventsURL, kit.ClientOptions{Logger: log, Timeout: timeout, HTTPClient: hc})
-	svc := &service{events: events, rest: rest, routing: routing}
+	svc := &service{events: events, rest: rest, routing: routing, serviceID: serviceID}
 	return func(s *mcp.Server) { svc.register(s, log) }, nil
 }
 
 type service struct {
 	events, rest *kit.Client
 	routing      kit.Secret
+	serviceID    string // when set, find_incidents reads the incidents of this service only
 }
 
 func (v *service) register(s *mcp.Server, log *slog.Logger) {
@@ -116,7 +121,8 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 	kit.AddTool(s, log, &mcp.Tool{
 		Name: "find_incidents",
 		Description: "Find the incidents of one dedup_key. The Events API gives a dedup_key and no incident id, so call this to get the incident. " +
-			"Read only. Returns at most 10 incidents, in any status.",
+			"Read only. Returns at most 10 incidents, in any status. PagerDuty groups alerts into incidents: an incident that holds more than one alert has no incident key of its own, " +
+			"so the list holds the incidents whose alerts match the key. When the server has a service id, only the incidents of that service are listed.",
 		Annotations: kit.ReadOnly("Find PagerDuty incidents by dedup key"),
 	}, v.findIncidents)
 }
@@ -324,9 +330,15 @@ func (v *service) findIncidents(ctx context.Context, _ *mcp.CallToolRequest, in 
 	var resp struct {
 		Incidents []incident `json:"incidents"`
 	}
+	q := url.Values{"incident_key": {in.DedupKey}, "date_range": {"all"}, "limit": {"10"}}
+	if v.serviceID != "" {
+		// The same dedup_key on another service is another alert. The service of
+		// the routing key is the service of this server.
+		q.Set("service_ids[]", v.serviceID)
+	}
 	err := v.rest.Do(ctx, kit.Request{
 		Method: http.MethodGet, Path: kit.Path("incidents"),
-		Query: url.Values{"incident_key": {in.DedupKey}, "date_range": {"all"}, "limit": {"10"}},
+		Query: q,
 	}, &resp)
 	if err != nil {
 		return nil, out, fmt.Errorf("find incidents: %w", err)
