@@ -44,7 +44,7 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(invJS))
 	case r.Method == http.MethodGet && r.URL.Path == "/idr/v2/investigations/"+rrn+"/alerts":
 		_, _ = w.Write([]byte(`{"data":[{"id":"alert-1","title":"Impossible travel","alertType":"IMPOSSIBLE_TRAVEL","alertTypeDescription":"A user signed in from two places",` +
-			`"alertSource":"INSIGHT_IDR","detectionRuleRrn":"rrn:rule","createdTime":"2026-11-20T09:31:00Z","firstEventTime":"2026-11-20T09:00:00Z",` +
+			`"alertSource":"INSIGHT_IDR","detectionRuleRrn":{"ruleName":"Impossible Travel","ruleRrn":{"partition":"cba","service":"","regionCode":"","organizationId":"","resourceTypes":["detection-rule"],"resource":"FX11KBBSCK20"}},"createdTime":"2026-11-20T09:31:00Z","firstEventTime":"2026-11-20T09:00:00Z",` +
 			`"latestEventTime":"2026-11-20T09:30:00Z"}],"metadata":{"index":0,"size":20,"total_pages":1,"total_data":1}}`))
 	default:
 		w.WriteHeader(http.StatusNotFound)
@@ -105,7 +105,7 @@ func TestGetInvestigationAndAlerts(t *testing.T) {
 	_, _, res = call("list_investigation_alerts", map[string]any{"investigation_id": rrn, "size": 5, "index": 1})
 	var al alertsOut
 	kittest.Structured(t, res, &al)
-	if len(al.Alerts) != 1 || al.Alerts[0].ID != "alert-1" || al.Alerts[0].AlertType != "IMPOSSIBLE_TRAVEL" || al.Alerts[0].DetectionRuleRRN != "rrn:rule" {
+	if len(al.Alerts) != 1 || al.Alerts[0].ID != "alert-1" || al.Alerts[0].AlertType != "IMPOSSIBLE_TRAVEL" || al.Alerts[0].DetectionRuleRRN != "rrn:cba::::detection-rule:FX11KBBSCK20" || al.Alerts[0].DetectionRuleName != "Impossible Travel" {
 		t.Errorf("alerts = %+v", al)
 	}
 	if q := m.queries[1]; q.Get("size") != "5" || q.Get("index") != "1" {
@@ -188,5 +188,16 @@ func TestConfig(t *testing.T) {
 	}
 	if _, err := build(kit.NewEnvFrom(map[string]string{"INSIGHTIDR_API_KEY": "k", "INSIGHTIDR_REGION": "eu"}), log); err != nil {
 		t.Errorf("good config: %v", err)
+	}
+}
+
+// The spec types detectionRuleRrn as an object {ruleName, ruleRrn}, and ruleRrn
+// as an object too. The examples show a text. The tool takes both.
+func TestRRNText(t *testing.T) {
+	if rrnText("rrn:a:b") != "rrn:a:b" || rrnText(nil) != "" || rrnText(5.0) != "" {
+		t.Error("rrnText of a text, nil or a number")
+	}
+	if got := rrnText(map[string]any{"partition": "cba", "service": "", "regionCode": "", "organizationId": "", "resourceTypes": []any{"detection-rule"}, "resource": "FX1"}); got != "rrn:cba::::detection-rule:FX1" {
+		t.Errorf("rrnText of an object = %q", got)
 	}
 }

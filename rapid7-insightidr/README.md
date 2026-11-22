@@ -28,6 +28,7 @@ References: the OpenAPI spec https://help.rapid7.com/insightidr/en-us/api/v2/ins
 - `status` is `OPEN`, `INVESTIGATING` or `CLOSED`. `priority` is `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` or `UNSPECIFIED`. `source` is `MANUAL`, `HUNT` or `ALERT`. The tool refuses another value. Each input takes one value.
 - Each list takes `index` (the page, from 0) and `size` (1 to 100, default 20). A result has `index`, `total_pages` and `total_records`.
 - InsightIDR uses 28 days before now as the default `start_time`.
+- The spec types `detectionRuleRrn` of an alert as an object `{ruleName, ruleRrn}`, and `ruleRrn` as an rrn object. The tool returns `detection_rule_name` and `detection_rule_rrn`. It takes `ruleRrn` as text when it is text, and joins its parts when it is an object. The rrn of an investigation is read the same way.
 - The spec types the assignee as text or null. The tool reads a text, or the field `email` or `name` of an object.
 
 ## Alerts of the alert triage API are not built

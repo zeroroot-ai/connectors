@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -185,9 +186,32 @@ func assigneeText(a any) string {
 	return ""
 }
 
+// rrnText gives the text of an rrn. The spec types the rrn as an object with
+// partition, service, regionCode, organizationId, resourceTypes and resource,
+// and its examples are text such as rrn:cba:::detection-rule:FX11KBBSCK20. The
+// tool takes a text as it is, and joins the parts of an object in that order.
+func rrnText(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case map[string]any:
+		str := func(k string) string { s, _ := x[k].(string); return s }
+		var types []string
+		if arr, ok := x["resourceTypes"].([]any); ok {
+			for _, t := range arr {
+				if s, ok := t.(string); ok {
+					types = append(types, s)
+				}
+			}
+		}
+		return "rrn:" + strings.Join([]string{str("partition"), str("service"), str("regionCode"), str("organizationId"), strings.Join(types, ":"), str("resource")}, ":")
+	}
+	return ""
+}
+
 func (i investigation) out(id string) investigationOut {
-	if s, ok := i.RRN.(string); ok && id == "" {
-		id = s
+	if id == "" {
+		id = rrnText(i.RRN)
 	}
 	return investigationOut{
 		ID: id, Title: i.Title, Source: i.Source, Status: i.Status, Priority: i.Priority, Disposition: i.Disposition,
@@ -292,6 +316,7 @@ type alert struct {
 	AlertType            string `json:"alert_type,omitempty"`
 	AlertTypeDescription string `json:"alert_type_description,omitempty"`
 	AlertSource          string `json:"alert_source,omitempty"`
+	DetectionRuleName    string `json:"detection_rule_name,omitempty"`
 	DetectionRuleRRN     string `json:"detection_rule_rrn,omitempty"`
 	CreatedTime          string `json:"created_time,omitempty"`
 	FirstEventTime       string `json:"first_event_time,omitempty"`
@@ -319,10 +344,14 @@ func (v *service) listAlerts(ctx context.Context, _ *mcp.CallToolRequest, in ale
 			AlertType            string `json:"alertType"`
 			AlertTypeDescription string `json:"alertTypeDescription"`
 			AlertSource          string `json:"alertSource"`
-			DetectionRuleRRN     string `json:"detectionRuleRrn"`
-			CreatedTime          string `json:"createdTime"`
-			FirstEventTime       string `json:"firstEventTime"`
-			LatestEventTime      string `json:"latestEventTime"`
+			// The spec types this field as an object {ruleName, ruleRrn}.
+			DetectionRule struct {
+				RuleName string `json:"ruleName"`
+				RuleRRN  any    `json:"ruleRrn"`
+			} `json:"detectionRuleRrn"`
+			CreatedTime     string `json:"createdTime"`
+			FirstEventTime  string `json:"firstEventTime"`
+			LatestEventTime string `json:"latestEventTime"`
 		} `json:"data"`
 		Metadata metadata `json:"metadata"`
 	}
@@ -335,7 +364,7 @@ func (v *service) listAlerts(ctx context.Context, _ *mcp.CallToolRequest, in ale
 	for _, a := range resp.Data {
 		out.Alerts = append(out.Alerts, alert{
 			ID: a.ID, Title: a.Title, AlertType: a.AlertType, AlertTypeDescription: a.AlertTypeDescription, AlertSource: a.AlertSource,
-			DetectionRuleRRN: a.DetectionRuleRRN, CreatedTime: a.CreatedTime, FirstEventTime: a.FirstEventTime, LatestEventTime: a.LatestEventTime,
+			DetectionRuleName: a.DetectionRule.RuleName, DetectionRuleRRN: rrnText(a.DetectionRule.RuleRRN), CreatedTime: a.CreatedTime, FirstEventTime: a.FirstEventTime, LatestEventTime: a.LatestEventTime,
 		})
 	}
 	out.pageOut = resp.Metadata.out()
