@@ -1,6 +1,8 @@
 package fixloop
 
 import (
+	"crypto/sha1" //nolint:gosec // git names a blob with SHA-1, this is no security use
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
@@ -186,4 +188,14 @@ func CheckFile(in FileInput) error {
 		return err
 	}
 	return CheckFilePath(in.Path)
+}
+
+// BlobSHA returns the git blob sha of a text: the SHA-1 of "blob <length>",
+// a zero byte and the text. A host gives the same sha for a file with this
+// content, so a caller can compare it with the BlobSHA of a changed file.
+func BlobSHA(content string) string {
+	h := sha1.New() //nolint:gosec // git names a blob with SHA-1, this is no security use
+	_, _ = fmt.Fprintf(h, "blob %d\x00", len(content))
+	_, _ = h.Write([]byte(content))
+	return hex.EncodeToString(h.Sum(nil))
 }

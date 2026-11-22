@@ -19,7 +19,7 @@ import (
 
 // read_file uses the repository files API:
 //   GET /projects/:id/repository/files/:file_path?ref=:ref
-// https://docs.gitlab.com/api/repository_files/#get-file-from-repository
+// https://docs.gitlab.com/api/repository_files/
 // The answer is {"file_path","size","encoding":"base64","content":"<base64>",
 // "blob_id":"<blob sha>","ref",...}. A missing file answers 404 with
 // {"message":"404 File Not Found"}. A missing project answers 404 with

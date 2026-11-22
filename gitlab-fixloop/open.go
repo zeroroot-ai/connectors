@@ -88,14 +88,17 @@ func (v *service) openMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 	}
 	project := in.Repo
 
-	// A branch from an earlier call that failed after the commit: use its open
-	// merge request, if it has one.
-	mr, err := v.openMROf(ctx, project, in)
+	// The source branch is made from the head of the base branch. When it
+	// exists already, the tool accepts it only when its one commit is the
+	// commit that this call would make: the same files with the same blobs.
+	// A commit of another author, or another change, is refused. The tool never
+	// builds on a foreign commit.
+	exists, err := v.branchExists(ctx, project, in.SourceBranch)
 	if err != nil {
 		return nil, out, err
 	}
-	if mr != nil {
-		return nil, v.openResult(project, mr, in, true), nil
+	if exists {
+		return v.resume(ctx, project, in, out)
 	}
 	actions := make([]map[string]any, 0, len(in.Changes))
 	for _, c := range in.Changes {
@@ -180,4 +183,118 @@ func (v *service) openResult(project string, mr *glMR, in fixloop.OpenInput, exi
 		SourceBranch: in.SourceBranch, TargetBranch: in.TargetBranch, HeadSHA: mr.SHA,
 		CreatedAt: fixloop.Time(fixloop.ParseTime(mr.CreatedAt)), Existing: existing,
 	}
+}
+
+func (v *service) branchExists(ctx context.Context, project, branch string) (bool, error) {
+	err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: kit.Path("projects", project, "repository", "branches", branch)}, nil)
+	var ae *kit.APIError
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.As(err, &ae) && ae.Status == http.StatusNotFound:
+		return false, nil
+	}
+	return false, fmt.Errorf("read the source branch: %w", err)
+}
+
+// resume handles a source branch that exists. It checks that the branch is
+// the work of this tool, then returns its open merge request, or opens one.
+func (v *service) resume(ctx context.Context, project string, in fixloop.OpenInput, out fixloop.OpenResult) (*mcp.CallToolResult, fixloop.OpenResult, error) {
+	reason, err := v.foreign(ctx, project, in)
+	if err != nil {
+		return nil, out, err
+	}
+	if reason != "" {
+		return nil, out, fmt.Errorf("%w: the branch %s exists and %s. The tool does not build on it. Use another branch name",
+			kit.ErrInvalidInput, in.SourceBranch, reason)
+	}
+	mr, err := v.openMROf(ctx, project, in)
+	if err != nil {
+		return nil, out, err
+	}
+	if mr != nil {
+		return nil, v.openResult(project, mr, in, true), nil
+	}
+	var created glMR
+	err = v.client.Do(ctx, kit.Request{
+		Method: http.MethodPost, Path: kit.Path("projects", project, "merge_requests"),
+		JSON: map[string]any{
+			"source_branch": in.SourceBranch, "target_branch": in.TargetBranch,
+			"title": in.Title, "description": in.Body, "remove_source_branch": true,
+		},
+	}, &created)
+	if err != nil {
+		return nil, out, fmt.Errorf("open the merge request (the branch %s stays, call the tool again): %w", in.SourceBranch, err)
+	}
+	return nil, v.openResult(project, &created, in, false), nil
+}
+
+// foreign compares the branch with the base branch. It returns an empty reason
+// when the branch holds exactly one commit and that commit changes exactly the
+// files of the input with the blobs of the input. Otherwise it returns the
+// reason.
+func (v *service) foreign(ctx context.Context, project string, in fixloop.OpenInput) (string, error) {
+	var cmp struct {
+		Commits []struct {
+			ID string `json:"id"`
+		} `json:"commits"`
+		Diffs []struct {
+			NewPath     string `json:"new_path"`
+			RenamedFile bool   `json:"renamed_file"`
+			DeletedFile bool   `json:"deleted_file"`
+		} `json:"diffs"`
+	}
+	err := v.client.Do(ctx, kit.Request{
+		Method: http.MethodGet, Path: kit.Path("projects", project, "repository", "compare"),
+		Query: url.Values{"from": {in.TargetBranch}, "to": {in.SourceBranch}},
+	}, &cmp)
+	if err != nil {
+		return "", fmt.Errorf("compare the source branch with %s: %w", in.TargetBranch, err)
+	}
+	if len(cmp.Commits) != 1 {
+		return fmt.Sprintf("holds %d commits that %s does not have, and this tool makes one", len(cmp.Commits), in.TargetBranch), nil
+	}
+	if len(cmp.Diffs) != len(in.Changes) {
+		return "its commit changes other files than the input", nil
+	}
+	got := make(map[string]bool, len(cmp.Diffs)) // the path, and true for a delete
+	for _, d := range cmp.Diffs {
+		if d.RenamedFile {
+			return "its commit renames " + d.NewPath, nil
+		}
+		got[d.NewPath] = d.DeletedFile
+	}
+	for _, c := range in.Changes {
+		deleted, ok := got[c.Path]
+		switch {
+		case !ok:
+			return "its commit changes other files than the input", nil
+		case c.Delete != deleted:
+			return "its commit does not make the change of " + c.Path, nil
+		case c.Delete:
+			continue
+		}
+		blob, err := v.blobAt(ctx, project, c.Path, in.SourceBranch)
+		if err != nil {
+			return "", err
+		}
+		if blob != fixloop.BlobSHA(*c.Content) {
+			return "its commit holds another content for " + c.Path, nil
+		}
+	}
+	return "", nil
+}
+
+// blobAt returns the git blob sha of a file at a ref.
+func (v *service) blobAt(ctx context.Context, project, path, ref string) (string, error) {
+	var f struct {
+		BlobID string `json:"blob_id"`
+	}
+	err := v.client.Do(ctx, kit.Request{
+		Method: http.MethodGet, Path: kit.Path("projects", project, "repository", "files", path), Query: url.Values{"ref": {ref}},
+	}, &f)
+	if err != nil {
+		return "", fmt.Errorf("read the blob of %s: %w", path, err)
+	}
+	return f.BlobID, nil
 }

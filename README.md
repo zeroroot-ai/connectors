@@ -76,6 +76,28 @@ The servers have no second authentication scheme, by design. The README of each 
 | `qualys` | scanner | `get_host_detections` | gibson#1541 |
 | `puppet` | patch | `start_patch_job`, `start_rollback_job`, `get_job` | gibson#1544 |
 
+## Git host contract
+
+The two servers of class `git-host` (`github-fixloop` and `gitlab-fixloop`) have the same tools, the same arguments and the same result fields. The types are in `internal/fixloop`. `merge_request` is a URL of the host, or `owner/repo#12` on GitHub and `group/project!12` on GitLab.
+
+| Tool | Arguments | Result | Undo |
+|---|---|---|---|
+| `open_merge_request` | `project`, `branch`, `base_branch`, `title`, `description`, `files` (each `path` with `content`, or `delete: true`) | `merge_request`, `url`, `source_branch`, `target_branch`, `created_at`, `head_sha`, `existing` | `close_merge_request` |
+| `close_merge_request` | `merge_request` | `merge_request`, `state`, `closed` | A person reopens it. |
+| `read_file` | `project`, `ref`, `path` | `found`, `content`, `sha` (the blob sha), `size`, `path`, `ref` | Not a change. |
+| `merge_request_state` | `merge_request` | `state`, `pipeline_green`, `pipeline_status`, `reason`, `head_sha`, `source_branch`, `created_at`, `merge_commit`, `changed_files`, `changed_files_truncated`, `changed_files_error` | Not a change. |
+| `merge_merge_request` | `merge_request`, optional `expected_head_sha` (and `merge_method` on GitHub) | `merged`, `state`, `reason`, `head_sha`, `merge_commit` | `revert_merge_request` |
+| `revert_merge_request` | `merge_request` | `revert_merge_request`, `state`, `merged` | `revert_merge_request` on the revert |
+| `deployment_state` | `merge_request` | `deployed`, `application`, `at`, `restart` | Not a change. |
+
+Rules of the contract:
+
+- `open_merge_request` makes the source branch from the head of `base_branch`, and puts all files in one commit. It never writes to the base branch and never merges.
+- When the source branch exists, the tool accepts it only when it holds exactly one commit beyond the base branch, and that commit changes exactly the files of the input with the git blob sha of the input content (a delete is a removed file). Then it returns the open merge request of the branch, or opens one, and makes no commit. In every other case it refuses with the reason. It never builds on a branch that holds a foreign commit.
+- `head_sha` is the head commit of the merge request. A caller passes it as `expected_head_sha` to `merge_merge_request`. The tool then merges nothing when the head moved, and the reason names both shas. It also sends the head sha to the host.
+- `changed_files` is a list of `{path, change, previous_path, blob_sha}`. `change` is `added`, `modified`, `deleted` or `renamed`. `previous_path` is set for a rename. `blob_sha` is the git blob sha of the file at the head, and it is empty for a deleted file. The list has at most 100 files. `changed_files_truncated` is true when the merge request has more. When the host does not give the list, `changed_files` is empty and `changed_files_error` holds the cause, so an empty list with an error means unknown. An agent computes the git blob sha of its expected content (`SHA-1` of `blob <length>`, a zero byte and the content) and compares it, so no content travels.
+- Only `merge_request_state` fills `changed_files`. The merge tools do not read it.
+
 ## Not built
 
 - Trellix (gibson#1542): the API reference of Trellix did not load from the workstation of the author, and no public source gave the request and response of an isolate call.

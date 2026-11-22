@@ -98,22 +98,17 @@ func (v *service) openMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 	}
 	r := prRef{owner: owner, repo: repo}
 
-	// A branch from an earlier call that failed after it made the branch: use
-	// its open pull request, if it has one.
+	// The source branch is made from the head of the base branch. When it
+	// exists already, the tool accepts it only when its one commit is the
+	// commit that this call would make: the same files with the same blobs.
+	// A commit of another author, or another change, is refused. The tool never
+	// builds on a foreign commit.
 	var existing gitRef
 	err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: refPath(r, in.SourceBranch)}, &existing)
 	var ae *kit.APIError
 	switch {
 	case err == nil:
-		pr, ferr := v.findPR(ctx, r, in.SourceBranch)
-		if ferr != nil {
-			return nil, out, ferr
-		}
-		if pr == nil || pr.State != "open" || pr.Base.Ref != in.TargetBranch {
-			return nil, out, fmt.Errorf("%w: the branch %s exists and has no open pull request into %s. Use another branch name",
-				kit.ErrInvalidInput, in.SourceBranch, in.TargetBranch)
-		}
-		return nil, v.openResult(r, pr, in, true), nil
+		return v.resume(ctx, r, in, out)
 	case errors.As(err, &ae) && ae.Status == http.StatusNotFound:
 	default:
 		return nil, out, fmt.Errorf("read the source branch: %w", err)
@@ -205,4 +200,79 @@ func (v *service) treeEntries(ctx context.Context, r prRef, changes []fixloop.Fi
 		entries = append(entries, map[string]any{"path": c.Path, "mode": fileMode, "type": "blob", "sha": b.SHA})
 	}
 	return entries, nil
+}
+
+// resume handles a source branch that exists. It checks that the branch is
+// the work of this tool, then returns its open pull request, or opens one.
+func (v *service) resume(ctx context.Context, r prRef, in fixloop.OpenInput, out fixloop.OpenResult) (*mcp.CallToolResult, fixloop.OpenResult, error) {
+	reason, err := v.foreign(ctx, r, in)
+	if err != nil {
+		return nil, out, err
+	}
+	if reason != "" {
+		return nil, out, fmt.Errorf("%w: the branch %s exists and %s. The tool does not build on it. Use another branch name",
+			kit.ErrInvalidInput, in.SourceBranch, reason)
+	}
+	pr, err := v.findPR(ctx, r, in.SourceBranch)
+	if err != nil {
+		return nil, out, err
+	}
+	if pr != nil && pr.State == "open" && pr.Base.Ref == in.TargetBranch {
+		return nil, v.openResult(r, pr, in, true), nil
+	}
+	var created ghPR
+	err = v.client.Do(ctx, kit.Request{
+		Method: http.MethodPost, Path: repoPath(r, "pulls"),
+		JSON: map[string]any{"title": in.Title, "head": in.SourceBranch, "base": in.TargetBranch, "body": in.Body},
+	}, &created)
+	if err != nil {
+		return nil, out, fmt.Errorf("open the pull request (the branch %s stays, call the tool again): %w", in.SourceBranch, err)
+	}
+	return nil, v.openResult(r, &created, in, false), nil
+}
+
+// foreign compares the branch with the base branch. It returns an empty reason
+// when the branch holds exactly one commit and that commit changes exactly the
+// files of the input with the blobs of the input. Otherwise it returns the
+// reason.
+func (v *service) foreign(ctx context.Context, r prRef, in fixloop.OpenInput) (string, error) {
+	var cmp struct {
+		AheadBy int `json:"ahead_by"`
+		Commits []struct {
+			SHA string `json:"sha"`
+		} `json:"commits"`
+		Files []struct {
+			Filename string `json:"filename"`
+			Status   string `json:"status"`
+			SHA      string `json:"sha"`
+		} `json:"files"`
+	}
+	err := v.client.Do(ctx, kit.Request{
+		Method: http.MethodGet, Path: repoPath(r, "compare", in.TargetBranch+"..."+in.SourceBranch),
+	}, &cmp)
+	if err != nil {
+		return "", fmt.Errorf("compare the source branch with %s: %w", in.TargetBranch, err)
+	}
+	if cmp.AheadBy != 1 || len(cmp.Commits) != 1 {
+		return fmt.Sprintf("holds %d commits that %s does not have, and this tool makes one", cmp.AheadBy, in.TargetBranch), nil
+	}
+	if len(cmp.Files) != len(in.Changes) {
+		return "its commit changes other files than the input", nil
+	}
+	got := make(map[string][2]string, len(cmp.Files))
+	for _, f := range cmp.Files {
+		got[f.Filename] = [2]string{f.Status, f.SHA}
+	}
+	for _, c := range in.Changes {
+		g, ok := got[c.Path]
+		switch {
+		case !ok:
+			return "its commit changes other files than the input", nil
+		case c.Delete && g[0] != "removed":
+			return "its commit does not remove " + c.Path, nil
+		case !c.Delete && (g[0] != "added" && g[0] != "modified" || g[1] != fixloop.BlobSHA(*c.Content)):
+			return "its commit holds another content for " + c.Path, nil
+		}
+	}
+	return "", nil
 }

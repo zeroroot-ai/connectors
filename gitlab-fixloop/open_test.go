@@ -3,9 +3,11 @@ package main
 import (
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/zeroroot-ai/connectors/internal/fixloop"
 	"github.com/zeroroot-ai/connectors/internal/kit"
 	"github.com/zeroroot-ai/connectors/internal/kit/kittest"
 )
@@ -57,12 +59,45 @@ func TestOpenMergeRequest(t *testing.T) {
 	checkOpenWrites(t, m)
 }
 
-func TestOpenReturnsTheOpenMergeRequestOfAnExistingBranch(t *testing.T) {
-	routes := openRoutes()
+const branchKey = "GET " + api + "/repository/branches/zeroroot%2Ffix-sqli-1"
+
+func diffJS(newPath string, newFile, renamed, deleted bool) string {
+	return `{"old_path":"` + newPath + `","new_path":"` + newPath + `","new_file":` + strconv.FormatBool(newFile) +
+		`,"renamed_file":` + strconv.FormatBool(renamed) + `,"deleted_file":` + strconv.FormatBool(deleted) + `,"diff":"@@"}`
+}
+
+// compareJS is the answer of GET /repository/compare: the commits of the
+// branch that the base does not have, and the diffs.
+func compareJS(commits int, diffs ...string) string {
+	cs := make([]string, 0, commits)
+	for range commits {
+		cs = append(cs, `{"id":"`+headSHA+`"}`)
+	}
+	return `{"commits":[` + strings.Join(cs, ",") + `],"diffs":[` + strings.Join(diffs, ",") + `],"compare_timeout":false}`
+}
+
+func blobRoute(content string) func(http.ResponseWriter, *http.Request, map[string]any) {
+	return reply(200, `{"file_name":"x","encoding":"base64","blob_id":"`+fixloop.BlobSHA(content)+`","content":""}`)
+}
+
+// ownBranch answers the calls for the branch that openArgs() makes.
+func ownBranch(routes routeMap, diffs ...string) routeMap {
+	if len(diffs) == 0 {
+		diffs = []string{diffJS("src/db.go", false, false, false), diffJS("src/new.go", true, false, false), diffJS("old/unused.go", false, false, true)}
+	}
+	routes[branchKey] = reply(200, `{"name":"`+srcBranch+`"}`)
+	routes["GET "+api+"/repository/compare"] = reply(200, compareJS(1, diffs...))
+	routes["GET "+api+"/repository/files/src%2Fdb.go"] = blobRoute("package db\n")
+	routes["GET "+api+"/repository/files/src%2Fnew.go"] = blobRoute("package db\n")
+	return routes
+}
+
+func TestOpenReturnsTheOpenMergeRequestOfAnOwnBranch(t *testing.T) {
+	routes := ownBranch(openRoutes())
 	routes["GET "+api+"/merge_requests"] = reply(200, `[`+newMR()+`]`)
 	m, call := setup(t, routes)
 	isErr, text, out := call("open_merge_request", openArgs())
-	if isErr || out["existing"] != true || out["merge_request"] != ref {
+	if isErr || out["existing"] != true || out["merge_request"] != ref || out["head_sha"] != headSHA {
 		t.Fatalf("isErr=%v %s %v", isErr, text, out)
 	}
 	for _, c := range m.calls {
@@ -72,15 +107,52 @@ func TestOpenReturnsTheOpenMergeRequestOfAnExistingBranch(t *testing.T) {
 	}
 }
 
-func TestOpenRefusesAnExistingBranchWithNoMergeRequest(t *testing.T) {
-	routes := openRoutes()
-	routes["POST "+api+"/repository/commits"] = reply(http.StatusBadRequest, `{"message":"A branch called 'zeroroot/fix-sqli-1' already exists."}`)
-	m, call := setup(t, routes)
-	if isErr, text, _ := call("open_merge_request", openArgs()); !isErr || !strings.Contains(text, "Use another branch name") {
-		t.Errorf("isErr=%v %s", isErr, text)
+// An own branch with no merge request is the result of a call that failed
+// after the commit. The tool opens the merge request and makes no commit.
+func TestOpenResumesAnOwnBranchWithNoMergeRequest(t *testing.T) {
+	m, call := setup(t, ownBranch(openRoutes()))
+	isErr, text, out := call("open_merge_request", openArgs())
+	if isErr || out["merge_request"] != ref || out["existing"] != nil {
+		t.Fatalf("isErr=%v %s %v", isErr, text, out)
 	}
-	if m.called("POST "+api+"/merge_requests") != 0 {
-		t.Error("the tool opened a merge request")
+	if m.called("POST "+api+"/repository/commits") != 0 || m.called("POST "+api+"/merge_requests") != 1 {
+		t.Errorf("calls = %v", m.calls)
+	}
+}
+
+// TestOpenRefusesABranchWithAForeignCommit makes sure that the tool never
+// builds on a branch that holds a commit that it did not make.
+func TestOpenRefusesABranchWithAForeignCommit(t *testing.T) {
+	good := []string{diffJS("src/db.go", false, false, false), diffJS("src/new.go", true, false, false), diffJS("old/unused.go", false, false, true)}
+	cases := map[string]func(routeMap){
+		"two commits": func(r routeMap) { r["GET "+api+"/repository/compare"] = reply(200, compareJS(2, good...)) },
+		"no commit":   func(r routeMap) { r["GET "+api+"/repository/compare"] = reply(200, compareJS(0)) },
+		"another file": func(r routeMap) {
+			r["GET "+api+"/repository/compare"] = reply(200, compareJS(1, good[0], good[1], diffJS("evil.sh", true, false, false)))
+		},
+		"fewer files": func(r routeMap) { r["GET "+api+"/repository/compare"] = reply(200, compareJS(1, good[0], good[1])) },
+		"not deleted": func(r routeMap) {
+			r["GET "+api+"/repository/compare"] = reply(200, compareJS(1, good[0], good[1], diffJS("old/unused.go", false, false, false)))
+		},
+		"renamed": func(r routeMap) {
+			r["GET "+api+"/repository/compare"] = reply(200, compareJS(1, diffJS("src/db.go", false, true, false), good[1], good[2]))
+		},
+		"another content": func(r routeMap) { r["GET "+api+"/repository/files/src%2Fnew.go"] = blobRoute("package evil\n") },
+	}
+	for name, mutate := range cases {
+		routes := ownBranch(openRoutes())
+		routes["GET "+api+"/merge_requests"] = reply(200, `[`+newMR()+`]`)
+		mutate(routes)
+		m, call := setup(t, routes)
+		isErr, text, _ := call("open_merge_request", openArgs())
+		if !isErr || !strings.Contains(text, "does not build on it") {
+			t.Errorf("%s: isErr=%v %s", name, isErr, text)
+		}
+		for _, c := range m.calls {
+			if strings.HasPrefix(c, "POST") || strings.HasPrefix(c, "PUT") || strings.HasPrefix(c, "DELETE") {
+				t.Errorf("%s: the tool wrote: %s", name, c)
+			}
+		}
 	}
 }
 

@@ -101,7 +101,7 @@ Limits:
 
 The input follows the contract of the incident agent: `project` (`owner/repo`), `branch`, `base_branch`, `title`, `description` and `files`. A file is a `path` with `content` (the new text of the file) or `delete: true`. One call makes one commit with all changes, on the new source branch, from the target branch, and opens the pull request. The result holds `merge_request` (`owner/repo#12`), `url`, `source_branch`, `target_branch` and `created_at`.
 
-The tool never writes to the target branch and never merges. It refuses a source branch that exists, unless an open pull request goes from that branch into the target branch. It then returns that pull request with `existing: true` and writes nothing. It does not compare the content of that branch with the input. The undo is `close_merge_request`.
+The tool never writes to the target branch and never merges. The source branch is made from the head of the base branch. When the source branch exists, the tool compares it with the base branch (`GET /repos/{o}/{r}/compare/{base}...{head}`). It accepts the branch only when it holds exactly one commit beyond the base branch, and that commit changes exactly the files of the input with the git blob sha of the input content. It then returns the open pull request of the branch with `existing: true`, or opens one and makes no commit. In every other case it refuses with the reason, and it never builds on a foreign commit. A branch whose commit changes nothing against the base branch does not match, so the tool refuses it. The undo is `close_merge_request`.
 
 Each file is written with the mode `100644`. A file that is executable in the repository loses its mode when the tool changes its content. The input has these limits: 100 files, 1 MiB for one file, 8 MiB for all files, a title of 256 bytes, a branch name of plain characters, and a path with no `..`, no empty folder name and no `.git` folder.
 
@@ -112,6 +112,10 @@ References: https://docs.github.com/en/rest/git/blobs#create-a-blob, https://doc
 The input is `project`, `ref` (a branch, a tag or a commit) and `path`. The result is `found`, `content`, `sha` (the blob sha), `size`, `path` and `ref`. `found` is always present. A file that does not exist on the ref gives `found: false` with no error. A 404 of GitHub means a missing path or a missing repository, so the tool reads the repository to tell them apart. A missing repository is an error. The tool refuses a path with `..`, a leading `/`, a backslash, an empty folder name or a `.git` folder. It refuses a folder, a file over 1 MiB and a file that is not UTF-8 text. It never writes.
 
 Reference: https://docs.github.com/en/rest/repos/contents#get-repository-content.
+
+## changed_files
+
+`merge_request_state` also returns `changed_files`, a list of `{path, change, previous_path, blob_sha}`, with `changed_files_truncated` and `changed_files_error`. `change` is `added`, `modified`, `deleted` or `renamed`. The list has at most 100 files. The tool reads `GET /repos/{o}/{r}/pulls/{n}/files?per_page=100`. GitHub gives the blob sha in `sha`, and the tool leaves `blob_sha` empty for a removed file. A status `copied` is `added`, and `changed` and `unchanged` are `modified`. To tell whether more files exist, the tool reads file number 101. The page of the API is https://docs.github.com/en/rest/pulls/pulls#list-pull-requests-files. When the host does not give the list, the state is still returned, `changed_files` is empty and `changed_files_error` holds the cause. An empty list with an error means that the files are unknown.
 
 ## Deployment requirement
 

@@ -607,7 +607,17 @@ func (v *service) mergeRequestState(ctx context.Context, _ *mcp.CallToolRequest,
 		return nil, fixloop.State{}, err
 	}
 	st, err := v.stateOf(ctx, r, pr)
-	return nil, st, err
+	if err != nil {
+		return nil, st, err
+	}
+	st.ChangedFiles = []fixloop.ChangedFile{}
+	files, truncated, ferr := v.changedFiles(ctx, r)
+	if ferr != nil {
+		st.ChangedFilesError = ferr.Error()
+	} else {
+		st.ChangedFiles, st.ChangedFilesTruncated = files, truncated
+	}
+	return nil, st, nil
 }
 
 // ---- merge_merge_request ----

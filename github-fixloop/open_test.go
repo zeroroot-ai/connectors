@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zeroroot-ai/connectors/internal/fixloop"
 	"github.com/zeroroot-ai/connectors/internal/kit"
 	"github.com/zeroroot-ai/connectors/internal/kit/kittest"
 )
@@ -63,13 +64,39 @@ func TestOpenMergeRequest(t *testing.T) {
 	checkOpenWrites(t, m)
 }
 
-func TestOpenReturnsTheOpenPullRequestOfAnExistingBranch(t *testing.T) {
-	routes := openRoutes()
+// compareJS is the answer of GET /compare/{base}...{head}: commits ahead of
+// the base, and the files with their status and blob sha.
+func compareJS(ahead int, files ...string) string {
+	commits := make([]string, 0, ahead)
+	for i := 0; i < ahead; i++ {
+		commits = append(commits, `{"sha":"`+newComSHA+`"}`)
+	}
+	return `{"ahead_by":` + itoa(ahead) + `,"commits":[` + strings.Join(commits, ",") + `],"files":[` + strings.Join(files, ",") + `]}`
+}
+
+func cmpFile(name, status, content string) string {
+	return `{"filename":"` + name + `","status":"` + status + `","sha":"` + fixloop.BlobSHA(content) + `"}`
+}
+
+const compareKey = "GET " + repo + "/compare/main...zeroroot%2Ffix-sqli-1"
+
+// ownCompare is the compare answer of the branch that openArgs() makes.
+func ownCompare() string {
+	return compareJS(1, cmpFile("src/db.go", "modified", "package db\n"), `{"filename":"old/unused.go","status":"removed","sha":"`+blobSHA+`"}`)
+}
+
+func branchExists(routes map[string]handler) map[string]handler {
 	routes["GET "+repo+"/git/ref/heads/"+srcBranch] = reply(200, `{"object":{"sha":"`+newComSHA+`"}}`)
+	return routes
+}
+
+func TestOpenReturnsTheOpenPullRequestOfAnOwnBranch(t *testing.T) {
+	routes := branchExists(openRoutes())
+	routes[compareKey] = reply(200, ownCompare())
 	routes["GET "+repo+"/pulls"] = reply(200, `[`+strings.Replace(openPR("clean"), `"ref":"fix"`, `"ref":"`+srcBranch+`"`, 1)+`]`)
 	m, call := setup(t, routes)
 	isErr, text, out := call("open_merge_request", openArgs())
-	if isErr || out["existing"] != true || out["merge_request"] != ref {
+	if isErr || out["existing"] != true || out["merge_request"] != ref || out["head_sha"] != headSHA {
 		t.Fatalf("isErr=%v %s %v", isErr, text, out)
 	}
 	for _, c := range m.calls {
@@ -79,17 +106,52 @@ func TestOpenReturnsTheOpenPullRequestOfAnExistingBranch(t *testing.T) {
 	}
 }
 
-func TestOpenRefusesAnExistingBranchWithNoPullRequest(t *testing.T) {
-	routes := openRoutes()
-	routes["GET "+repo+"/git/ref/heads/"+srcBranch] = reply(200, `{"object":{"sha":"`+newComSHA+`"}}`)
+// An own branch with no pull request is the result of a call that failed after
+// it made the branch. The tool opens the pull request and makes no commit.
+func TestOpenResumesAnOwnBranchWithNoPullRequest(t *testing.T) {
+	routes := branchExists(openRoutes())
+	routes[compareKey] = reply(200, ownCompare())
 	routes["GET "+repo+"/pulls"] = reply(200, `[]`)
 	m, call := setup(t, routes)
-	if isErr, text, _ := call("open_merge_request", openArgs()); !isErr || !strings.Contains(text, "Use another branch name") {
-		t.Errorf("isErr=%v %s", isErr, text)
+	isErr, text, out := call("open_merge_request", openArgs())
+	if isErr || out["merge_request"] != ref || out["existing"] != nil {
+		t.Fatalf("isErr=%v %s %v", isErr, text, out)
 	}
 	for _, c := range m.calls {
-		if strings.HasPrefix(c, "POST") {
-			t.Errorf("wrote: %s", c)
+		if strings.HasPrefix(c, "POST") && c != "POST "+repo+"/pulls" {
+			t.Errorf("the tool wrote on the branch: %s", c)
+		}
+	}
+	if m.called("POST "+repo+"/pulls") != 1 {
+		t.Error("no pull request was opened")
+	}
+}
+
+// TestOpenRefusesABranchWithAForeignCommit makes sure that the tool never
+// builds on a branch that holds a commit that it did not make.
+func TestOpenRefusesABranchWithAForeignCommit(t *testing.T) {
+	good := []string{cmpFile("src/db.go", "modified", "package db\n"), `{"filename":"old/unused.go","status":"removed","sha":"` + blobSHA + `"}`}
+	for name, cmp := range map[string]string{
+		"two commits":      compareJS(2, good...),
+		"no commit":        compareJS(0),
+		"another file":     compareJS(1, cmpFile("src/db.go", "modified", "package db\n"), cmpFile("evil.sh", "added", "x")),
+		"fewer files":      compareJS(1, good[0]),
+		"another content":  compareJS(1, cmpFile("src/db.go", "modified", "package evil\n"), good[1]),
+		"file not removed": compareJS(1, good[0], cmpFile("old/unused.go", "modified", "x")),
+		"renamed":          compareJS(1, cmpFile("src/db.go", "renamed", "package db\n"), good[1]),
+	} {
+		routes := branchExists(openRoutes())
+		routes[compareKey] = reply(200, cmp)
+		routes["GET "+repo+"/pulls"] = reply(200, `[`+strings.Replace(openPR("clean"), `"ref":"fix"`, `"ref":"`+srcBranch+`"`, 1)+`]`)
+		m, call := setup(t, routes)
+		isErr, text, _ := call("open_merge_request", openArgs())
+		if !isErr || !strings.Contains(text, "does not build on it") {
+			t.Errorf("%s: isErr=%v %s", name, isErr, text)
+		}
+		for _, c := range m.calls {
+			if strings.HasPrefix(c, "POST") || strings.HasPrefix(c, "PATCH") || strings.HasPrefix(c, "DELETE") {
+				t.Errorf("%s: the tool wrote: %s", name, c)
+			}
 		}
 	}
 }
@@ -153,6 +215,12 @@ func TestOpenAnnotations(t *testing.T) {
 
 func checkOpenWrites(t *testing.T, m *mock) {
 	t.Helper()
+	checkTreeWrites(t, m)
+	checkCommitWrites(t, m)
+}
+
+func checkTreeWrites(t *testing.T, m *mock) {
+	t.Helper()
 	blob := m.bodies["POST "+repo+"/git/blobs"]
 	if blob["encoding"] != "base64" || blob["content"] != base64.StdEncoding.EncodeToString([]byte("package db\n")) {
 		t.Errorf("blob = %v", blob)
@@ -169,6 +237,10 @@ func checkOpenWrites(t *testing.T, m *mock) {
 	if e := entries[1].(map[string]any); e["path"] != "old/unused.go" || e["sha"] != nil {
 		t.Errorf("entry 1 = %v", e)
 	}
+}
+
+func checkCommitWrites(t *testing.T, m *mock) {
+	t.Helper()
 	commit := m.bodies["POST "+repo+"/git/commits"]
 	if commit["tree"] != newTreeSHA || commit["message"] != "Fix SQL injection" || commit["parents"].([]any)[0] != baseSHA {
 		t.Errorf("commit = %v", commit)

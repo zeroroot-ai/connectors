@@ -96,7 +96,7 @@ The input follows the contract of the incident agent: `project` (the project pat
 
 GitLab has no commit action that writes a file whether it exists or not. For each file with content, the tool sends `HEAD` for the path on the target branch. It uses the action `update` when GitLab answers 200 and `create` when it answers 404. A change with `delete: true` uses the action `delete`.
 
-The tool never writes to the target branch and never merges. It refuses a source branch that exists, unless an open merge request goes from that branch into the target branch. It then returns that merge request with `existing: true` and writes nothing. It does not compare the content of that branch with the input. The undo is `close_merge_request`. The merge request asks GitLab to remove the source branch after a merge.
+The tool never writes to the target branch and never merges. The source branch is made from the head of the base branch. When the source branch exists, the tool compares it with the base branch (`GET /projects/:id/repository/compare` and the blob id of each file). It accepts the branch only when it holds exactly one commit beyond the base branch, and that commit changes exactly the files of the input with the git blob sha of the input content. It then returns the open merge request of the branch with `existing: true`, or opens one and makes no commit. In every other case it refuses with the reason, and it never builds on a foreign commit. A branch whose commit changes nothing against the base branch does not match, so the tool refuses it. The undo is `close_merge_request`.
 
 The input has these limits: 100 files, 1 MiB for one file, 8 MiB for all files, a title of 256 bytes, a branch name of plain characters, and a path with no `..`, no empty folder name and no `.git` folder.
 
@@ -106,7 +106,11 @@ References: https://docs.gitlab.com/api/repository_files/, https://docs.gitlab.c
 
 The input is `project`, `ref` (a branch, a tag or a commit) and `path`. The result is `found`, `content`, `sha` (the blob sha), `size`, `path` and `ref`. `found` is always present. A file that does not exist on the ref gives `found: false` with no error. GitLab says "File Not Found" or "Project Not Found" in the 404 body, and the tool uses it. A missing project is an error. The tool refuses a path with `..`, a leading `/`, a backslash, an empty folder name or a `.git` folder. It refuses a folder, a file over 1 MiB and a file that is not UTF-8 text. It never writes.
 
-Reference: https://docs.gitlab.com/api/repository_files/#get-file-from-repository.
+Reference: https://docs.gitlab.com/api/repository_files/.
+
+## changed_files
+
+`merge_request_state` also returns `changed_files`, a list of `{path, change, previous_path, blob_sha}`, with `changed_files_truncated` and `changed_files_error`. `change` is `added`, `modified`, `deleted` or `renamed`. The list has at most 100 files. The tool reads `GET /projects/:id/merge_requests/:iid/diffs?per_page=100`. The diffs give no blob id, so the tool reads the blob id of each file that exists at the head with `GET /projects/:id/repository/files/:path?ref=<head sha>`. That is one more call for each file, and it also reads the content of the file. To tell whether more files exist, the tool reads file number 101. The page of the API is https://docs.gitlab.com/api/merge_requests/#list-merge-request-diffs. When the host does not give the list, the state is still returned, `changed_files` is empty and `changed_files_error` holds the cause. An empty list with an error means that the files are unknown.
 
 ## Deployment requirement
 

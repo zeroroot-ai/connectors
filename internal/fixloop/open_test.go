@@ -56,3 +56,16 @@ func TestCheckOpenRefuses(t *testing.T) {
 		}
 	}
 }
+
+// The sha of the empty blob and of "hello\n" are the known values of git
+// (git hash-object).
+func TestBlobSHA(t *testing.T) {
+	for content, want := range map[string]string{
+		"":        "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+		"hello\n": "ce013625030ba8dba906f756967f9e9ca394464a",
+	} {
+		if got := BlobSHA(content); got != want {
+			t.Errorf("BlobSHA(%q) = %s, want %s", content, got, want)
+		}
+	}
+}

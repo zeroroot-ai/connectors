@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// The mock follows https://docs.gitlab.com/api/repository_files/#get-file-from-repository:
+// The mock follows https://docs.gitlab.com/api/repository_files/:
 // the answer is {"file_path","size","encoding":"base64","content","blob_id","ref"}.
 // A missing file answers 404 {"message":"404 File Not Found"}. A missing
 // project answers 404 {"message":"404 Project Not Found"}.
