@@ -27,12 +27,14 @@ const (
 // the answer is {"result": ...}, create answers 201, update answers 200 with
 // the record, and a missing record answers 404. Each field is a string.
 type mock struct {
-	calls   []string
-	queries []url.Values
-	bodies  []map[string]any
-	auth    string
-	state   string // the state that the incident has
-	ignore  bool   // answer 200 and keep the old state, as a business rule can
+	calls    []string
+	queries  []url.Values
+	bodies   []map[string]any
+	auth     string
+	state    string // the state that the incident has
+	ignore   bool   // answer 200 and keep the old state, as a business rule can
+	dedup    bool   // a search by correlation_id finds an incident
+	failPOST bool   // the create call answers 503
 }
 
 func recordJSON(state, prio string) string {
@@ -52,9 +54,14 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m.bodies = append(m.bodies, body)
 	const tbl = "/api/now/table/incident"
 	switch {
+	case r.Method == http.MethodPost && r.URL.Path == tbl && m.failPOST:
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"message":"Service Unavailable"},"status":"failure"}`))
 	case r.Method == http.MethodPost && r.URL.Path == tbl:
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"result":` + recordJSON("1", "3") + `}`))
+	case r.Method == http.MethodGet && r.URL.Path == tbl && strings.Contains(r.URL.Query().Get("sysparm_query"), "correlation_id=") && !m.dedup:
+		_, _ = w.Write([]byte(`{"result":[]}`))
 	case r.Method == http.MethodGet && r.URL.Path == tbl:
 		_, _ = w.Write([]byte(`{"result":[` + recordJSON("1", "3") + `]}`))
 	case r.URL.Path == tbl+"/"+sysID && r.Method == http.MethodGet:
@@ -210,7 +217,7 @@ func TestSearchBuildsTheQueryFromTypedFilters(t *testing.T) {
 		t.Fatal(text)
 	}
 	q := m.queries[0]
-	want := "active=true^assignment_group=" + group + "^short_descriptionLIKEdisk full^opened_at>=2026-11-20 08:00:00^ORDERBYDESCopened_at"
+	want := "state<6^assignment_group=" + group + "^short_descriptionLIKEdisk full^opened_at>=2026-11-20 08:00:00^ORDERBYDESCopened_at"
 	if q.Get("sysparm_query") != want || q.Get("sysparm_limit") != "5" {
 		t.Errorf("query = %q limit %q", q.Get("sysparm_query"), q.Get("sysparm_limit"))
 	}
@@ -224,7 +231,7 @@ func TestSearchBuildsTheQueryFromTypedFilters(t *testing.T) {
 		t.Errorf("status any: %q", got)
 	}
 	call(ticket.ToolSearch, map[string]any{"status": "closed"})
-	if got := m.queries[2].Get("sysparm_query"); !strings.HasPrefix(got, "active=false^") {
+	if got := m.queries[2].Get("sysparm_query"); !strings.HasPrefix(got, "state>=6^") {
 		t.Errorf("status closed: %q", got)
 	}
 }
@@ -282,12 +289,8 @@ func TestAnnotationsAndReadOnly(t *testing.T) {
 	kittest.AssertReversible(t, tools, ticket.ToolCreate, ticket.ToolClose)
 	kittest.AssertReversible(t, tools, ticket.ToolUpdate, ticket.ToolUpdate)
 	kittest.AssertIrreversible(t, tools, ticket.ToolComment)
-	if a := tools[ticket.ToolClose].Annotations; a == nil || a.DestructiveHint == nil || *a.DestructiveHint || a.ReadOnlyHint {
-		t.Errorf("close annotations = %+v", a)
-	}
-	if !strings.Contains(tools[ticket.ToolClose].Description, "A person can reopen") {
-		t.Error("close does not say how to undo it")
-	}
+	// No tool reopens an incident, so the close has no undo.
+	kittest.AssertIrreversible(t, tools, ticket.ToolClose)
 	for _, n := range []string{ticket.ToolGet, ticket.ToolSearch} {
 		if a := tools[n].Annotations; a == nil || !a.ReadOnlyHint {
 			t.Errorf("%s is not read only", n)
@@ -310,5 +313,125 @@ func TestConfig(t *testing.T) {
 	plain := map[string]string{"SERVICENOW_INSTANCE_URL": "http://x.service-now.com", "SERVICENOW_USER": "u", "SERVICENOW_PASSWORD": "p"}
 	if _, err := build(kit.NewEnvFrom(plain), log); err == nil {
 		t.Error("plain http accepted")
+	}
+}
+
+func TestCodeTagsAreNeutralized(t *testing.T) {
+	m, call, _ := setup(t)
+	call(ticket.ToolCreate, map[string]any{"title": "a [code]x[/code]", "description": "b [CODE]<script>[/Code]"})
+	call(ticket.ToolUpdate, map[string]any{"ticket_id": sysID, "title": "[code]t", "description": "[/code]d"})
+	call(ticket.ToolComment, map[string]any{"ticket_id": sysID, "body": "n [code]<b>[/code]"})
+	call(ticket.ToolClose, map[string]any{"ticket_id": sysID, "resolution": "r [Code]x"})
+	var all []string
+	for _, b := range m.bodies {
+		for _, v := range b {
+			if s, ok := v.(string); ok {
+				all = append(all, s)
+			}
+		}
+	}
+	text := strings.ToLower(strings.Join(all, "\n"))
+	if strings.Contains(text, "[code]") || strings.Contains(text, "[/code]") {
+		t.Errorf("a code tag reached ServiceNow: %v", all)
+	}
+	if !strings.Contains(text, "[ code ]") || !strings.Contains(text, "[ /code ]") {
+		t.Errorf("the tags were dropped and not neutralized: %v", all)
+	}
+	if got := plain("x [CoDe]y[/cOdE] z"); got != "x [ code ]y[ /code ] z" {
+		t.Errorf("plain = %q", got)
+	}
+}
+
+func TestSearchRefusesJavascript(t *testing.T) {
+	m, call, _ := setup(t)
+	for _, in := range []string{"javascript:gs.log(1)", "JavaScript:x", "a javascript:b", "x JAVASCRIPT:"} {
+		if isErr, _, _ := call(ticket.ToolSearch, map[string]any{"title_contains": in}); !isErr {
+			t.Errorf("accepted %q", in)
+		}
+	}
+	if len(m.calls) != 0 {
+		t.Errorf("reached ServiceNow: %v", m.calls)
+	}
+}
+
+// open means state below 6 and closed means 6 and higher, in the search and in get_ticket.
+func TestOpenMeansTheSameInSearchAndGet(t *testing.T) {
+	m, call, _ := setup(t)
+	for state, closed := range map[string]bool{"1": false, "2": false, "3": false, "5": false, "6": true, "7": true, "8": true} {
+		m.state = state
+		_, _, res := call(ticket.ToolGet, map[string]any{"ticket_id": sysID})
+		var out ticket.Ticket
+		kittest.Structured(t, res, &out)
+		if out.Closed != closed {
+			t.Errorf("state %s: closed = %v", state, out.Closed)
+		}
+	}
+	call(ticket.ToolSearch, map[string]any{})
+	call(ticket.ToolSearch, map[string]any{"status": "closed"})
+	last := len(m.queries)
+	if m.queries[last-2].Get("sysparm_query") != "state<6^ORDERBYDESCopened_at" || m.queries[last-1].Get("sysparm_query") != "state>=6^ORDERBYDESCopened_at" {
+		t.Errorf("queries = %v %v", m.queries[last-2], m.queries[last-1])
+	}
+}
+
+func TestDedupKey(t *testing.T) {
+	m, call, _ := setup(t)
+	args := map[string]any{"title": "a", "description": "b", "dedup_key": "finding/42:disk-full"}
+	isErr, text, res := call(ticket.ToolCreate, args)
+	if isErr {
+		t.Fatal(text)
+	}
+	var out ticket.Created
+	kittest.Structured(t, res, &out)
+	if out.Existing {
+		t.Error("a new incident is marked existing")
+	}
+	// The search comes first, then the create, and the key is stored in correlation_id.
+	if len(m.calls) != 2 || !strings.HasPrefix(m.calls[0], "GET ") || !strings.HasPrefix(m.calls[1], "POST ") {
+		t.Fatalf("calls = %v", m.calls)
+	}
+	if q := m.queries[0].Get("sysparm_query"); q != "correlation_id=finding/42:disk-full^ORDERBYopened_at" {
+		t.Errorf("search = %q", q)
+	}
+	if m.bodies[1]["correlation_id"] != "finding/42:disk-full" {
+		t.Errorf("body = %v", m.bodies[1])
+	}
+	// A retry finds the incident and makes no new one.
+	m.dedup, m.calls = true, nil
+	_, _, res = call(ticket.ToolCreate, args)
+	var again ticket.Created
+	kittest.Structured(t, res, &again)
+	if !again.Existing || again.TicketID != sysID || len(m.calls) != 1 {
+		t.Errorf("retry: %+v calls %v", again, m.calls)
+	}
+	// A key with the character ^ cannot add a condition.
+	m.calls = nil
+	for _, bad := range []string{"a^active=false", "a b", "a\nb", strings.Repeat("a", 101)} {
+		if isErr, _, _ := call(ticket.ToolCreate, map[string]any{"title": "a", "description": "b", "dedup_key": bad}); !isErr {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+	if len(m.calls) != 0 {
+		t.Errorf("a bad key reached ServiceNow: %v", m.calls)
+	}
+}
+
+// TestCreateIsNotRepeated fails when the create call gets Retry: true. A 503
+// would then make a second POST, and a second incident.
+func TestCreateIsNotRepeated(t *testing.T) {
+	m, call, _ := setup(t)
+	m.failPOST = true
+	isErr, text, _ := call(ticket.ToolCreate, map[string]any{"title": "a", "description": "b"})
+	if !isErr || !strings.Contains(text, "Service Unavailable") {
+		t.Errorf("isErr=%v %s", isErr, text)
+	}
+	posts := 0
+	for _, c := range m.calls {
+		if strings.HasPrefix(c, "POST ") {
+			posts++
+		}
+	}
+	if posts != 1 {
+		t.Errorf("the create call was sent %d times: %v", posts, m.calls)
 	}
 }

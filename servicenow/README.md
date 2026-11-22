@@ -21,10 +21,10 @@ Reference: https://www.servicenow.com/docs/r/api-reference/rest-apis/c_TableAPI.
 
 | Tool | Vendor call | Undo | Annotations |
 |---|---|---|---|
-| `create_ticket` | `POST /api/now/table/incident` | `close_ticket` | `destructiveHint: false`, `idempotentHint: false` |
+| `create_ticket` | `GET /api/now/table/incident` (look for `dedup_key`), then `POST /api/now/table/incident` | `close_ticket` | `destructiveHint: false`, `idempotentHint: false` |
 | `update_ticket` | `PATCH /api/now/table/incident/{sys_id}` | `update_ticket` with the old value | `destructiveHint: false`, `idempotentHint: true` |
 | `add_comment` | `PATCH /api/now/table/incident/{sys_id}` with `work_notes` | None. ServiceNow keeps the note. | `destructiveHint: true`, `idempotentHint: false` |
-| `close_ticket` | `PATCH /api/now/table/incident/{sys_id}` with `state`, `close_code`, `close_notes` | A person reopens it. No tool does. | `destructiveHint: false`, `idempotentHint: true` |
+| `close_ticket` | `PATCH /api/now/table/incident/{sys_id}` with `state`, `close_code`, `close_notes` | None. No tool of this server reopens an incident. A person does. | `destructiveHint: true`, `idempotentHint: true` |
 | `get_ticket` | `GET /api/now/table/incident/{sys_id}` | Not a change. | `readOnlyHint: true` |
 | `search_tickets` | `GET /api/now/table/incident` with `sysparm_query` | Not a change. | `readOnlyHint: true` |
 
@@ -34,13 +34,22 @@ How the contract maps to ServiceNow:
 - `queue` is the `sys_id` of the assignment group.
 - `priority` sets `urgency` and `impact`, because ServiceNow computes the priority from them: `critical` 1 and 1, `high` 1 and 2, `medium` 2 and 2, `low` 3 and 3. The read tools show the priority field: 1 is `critical`, 2 `high`, 3 `medium`, 4 and 5 `low`.
 - `add_comment` writes a work note. The caller of the incident does not see it.
+- `dedup_key` is stored in `correlation_id`. Before a create, the tool reads the oldest incident with that `correlation_id`, in any state. When one exists, the tool returns it with `existing: true` and makes no new incident. The create call is never repeated by the client, so a timeout cannot make two incidents. The search and the create are two calls, so two calls at the same time can still make two. The key has a fixed pattern of at most 100 characters, so it cannot add a condition to the query.
 - `close_ticket` sets state 7 with the close code of the server and the resolution as the close notes. ServiceNow can answer 200 and keep the old state, for example when a business rule refuses the change. The tool then returns an error. A close from some states can need a resolve first. The tool shows the error of ServiceNow.
-- `status` is the state number. `closed` is true for state 6 and higher. The page https://www.servicenow.com/docs/r/7LhbZn3yz3Q58qhjZoU9iQ/nCIOdm4VSGlySPh~AEaryw gives only 6 as Resolved and 7 as Closed.
+- `status` is the state number. `closed` is true for state 6 and higher. `search_tickets` uses the same rule: `status: open` is `state<6` and `status: closed` is `state>=6`. It does not use the field `active`, so a get and a search agree. The page https://www.servicenow.com/docs/r/7LhbZn3yz3Q58qhjZoU9iQ/nCIOdm4VSGlySPh~AEaryw gives only 6 as Resolved and 7 as Closed.
 - An incident has no labels. A call with `labels`, or a search with `label`, is refused. It is not dropped without a notice.
+
+## Close code
+
+`close_code` must be one of the choices of the instance. The choices are in the table `sys_choice` (name `incident`, element `close_code`). Read them with `GET /api/now/table/sys_choice?sysparm_query=name=incident^element=close_code&sysparm_fields=value,label`. The default is `Solved (Permanently)`. Set `SERVICENOW_CLOSE_CODE` to a value that the instance lists. A value that the instance does not list is refused by ServiceNow, and the tool shows the error.
+
+## Text that ServiceNow renders
+
+ServiceNow shows the text between `[code]` and `[/code]` as HTML in a journal field and in some fields of a form. A text from a finding could put markup in the view of a person. The tool writes `[ code ]` and `[ /code ]` for each tag, in any case, in the title, the description, the work note and the close notes.
 
 ## No query injection
 
-`search_tickets` builds `sysparm_query` from typed filters. The character `^` separates conditions in the encoded query, and the Table API documents no escape for it. So a `title_contains` with `^` is refused. The ids are 32 hex characters. The status is one of three values. The time is parsed as RFC 3339 and written again. A test feeds injection texts and makes sure that none reaches ServiceNow.
+`search_tickets` builds `sysparm_query` from typed filters. The character `^` separates conditions in the encoded query, and the Table API documents no escape for it. So a `title_contains` with `^` is refused. A value that starts with `javascript:` is run as a script in an encoded query, so a `title_contains` with `javascript:` at any place is refused. The ids are 32 hex characters. The status is one of three values. The time is parsed as RFC 3339 and written again. A test feeds injection texts and makes sure that none reaches ServiceNow.
 
 ## Security incidents not built
 

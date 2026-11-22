@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +45,9 @@ const (
 	fields = "sys_id,number,short_description,description,state,priority,opened_at,sys_updated_on,closed_at"
 	// closedState is the state Closed. ServiceNow treats 7 and higher as inactive.
 	closedState = "7"
+	// resolvedState is the first state that get_ticket and search_tickets count
+	// as closed: 6 (Resolved).
+	resolvedState = "6"
 )
 
 func build(env *kit.Env, log *slog.Logger) (func(*mcp.Server), error) {
@@ -84,6 +88,7 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 		Name: ticket.ToolCreate,
 		Description: "Open one ServiceNow incident. Give title and description. queue is the sys_id of the assignment group. " +
 			"priority is low, medium, high or critical. ServiceNow has no labels on an incident, so labels is refused. " +
+			"dedup_key makes a repeat safe: a second call with the same key returns the first incident with existing true. " +
 			"No tool deletes the incident. Undo: call close_ticket with the ticket_id of the result.",
 		Annotations: kit.Reversible("Create ServiceNow incident", false),
 	}, v.create)
@@ -103,8 +108,8 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 		Name: ticket.ToolClose,
 		Description: "Close one ServiceNow incident: state 7 with the close code of the server and the resolution as the close notes. " +
 			"ServiceNow can refuse a close from the current state, and then the tool shows its error. " +
-			"A person can reopen the incident. No tool of this server reopens it.",
-		Annotations: kit.Reversible("Close ServiceNow incident", true),
+			"No tool undoes this action: no tool of this server reopens the incident, and only a person does.",
+		Annotations: kit.Irreversible("Close ServiceNow incident", true),
 	}, v.close)
 	kit.AddTool(s, log, &mcp.Tool{
 		Name:        ticket.ToolGet,
@@ -213,6 +218,15 @@ func snError(op string, err error) error {
 	return fmt.Errorf("%s: %w", op, err)
 }
 
+// codeTag matches the tags [code] and [/code]. ServiceNow renders the text between
+// them as HTML in a journal field and in some fields of a form, so a text of a
+// finding could put markup in the view of a person.
+var codeTag = regexp.MustCompile(`(?i)\[(/?)code\]`)
+
+// plain neutralizes the code tags of ServiceNow in a text that goes to a field.
+// The tag gets a space inside the brackets, so it shows as text.
+func plain(s string) string { return codeTag.ReplaceAllString(s, "[ ${1}code ]") }
+
 // ---- tools --------------------------------------------------------------
 
 type single struct {
@@ -232,7 +246,7 @@ func (v *service) create(ctx context.Context, _ *mcp.CallToolRequest, in ticket.
 		prio = ticket.Medium
 	}
 	body := map[string]any{
-		"short_description": in.Title, "description": in.Description,
+		"short_description": plain(in.Title), "description": plain(in.Description),
 		"urgency": urgencyImpact[prio][0], "impact": urgencyImpact[prio][1],
 	}
 	if in.Queue != "" {
@@ -241,8 +255,19 @@ func (v *service) create(ctx context.Context, _ *mcp.CallToolRequest, in ticket.
 		}
 		body["assignment_group"] = in.Queue
 	}
+	if in.DedupKey != "" {
+		body["correlation_id"] = in.DedupKey
+		existing, err := v.byDedupKey(ctx, in.DedupKey)
+		if err != nil {
+			return nil, out, err
+		}
+		if existing != nil {
+			return nil, ticket.Created{TicketID: existing.SysID, Number: existing.Number, URL: v.recordURL(existing.SysID), Existing: true}, nil
+		}
+	}
 	var resp single
-	// A create call is not repeated: a repeat would open a second incident.
+	// A create call is not repeated by the client: a repeat after a timeout
+	// would open a second incident. The caller repeats it with the same dedup_key.
 	err := v.client.Do(ctx, kit.Request{
 		Method: http.MethodPost, Path: kit.Path("api", "now", "table", table),
 		Query: url.Values{"sysparm_fields": {fields}, "sysparm_exclude_reference_link": {"true"}}, JSON: body,
@@ -282,10 +307,10 @@ func (v *service) update(ctx context.Context, _ *mcp.CallToolRequest, in ticket.
 	}
 	body := map[string]any{}
 	if in.Title != "" {
-		body["short_description"] = in.Title
+		body["short_description"] = plain(in.Title)
 	}
 	if in.Description != "" {
-		body["description"] = in.Description
+		body["description"] = plain(in.Description)
 	}
 	if in.Priority != "" {
 		body["urgency"], body["impact"] = urgencyImpact[in.Priority][0], urgencyImpact[in.Priority][1]
@@ -311,7 +336,7 @@ func (v *service) comment(ctx context.Context, _ *mcp.CallToolRequest, in ticket
 	err := v.client.Do(ctx, kit.Request{
 		Method: http.MethodPatch, Path: recordPath(in.TicketID),
 		Query: url.Values{"sysparm_fields": {fields}, "sysparm_exclude_reference_link": {"true"}},
-		JSON:  map[string]any{"work_notes": in.Body},
+		JSON:  map[string]any{"work_notes": plain(in.Body)},
 	}, &resp)
 	if err != nil {
 		return nil, out, snError("add work note", err)
@@ -329,7 +354,7 @@ func (v *service) close(ctx context.Context, _ *mcp.CallToolRequest, in ticket.C
 		return nil, out, fmt.Errorf("check input: %w", err)
 	}
 	rec, err := v.patch(ctx, "close incident", in.TicketID, map[string]any{
-		"state": closedState, "close_code": v.closeCode, "close_notes": in.Resolution,
+		"state": closedState, "close_code": v.closeCode, "close_notes": plain(in.Resolution),
 	})
 	if err != nil {
 		return nil, out, err
@@ -373,10 +398,11 @@ func encodedQuery(in ticket.SearchInput) (string, error) {
 	}
 	var conds []string
 	switch ticket.StatusOf(in) {
+	// The same rule as record.closed: state 6 (Resolved) and higher is closed.
 	case ticket.StatusOpen:
-		conds = append(conds, "active=true")
+		conds = append(conds, "state<"+resolvedState)
 	case ticket.StatusClosed:
-		conds = append(conds, "active=false")
+		conds = append(conds, "state>="+resolvedState)
 	}
 	if in.Queue != "" {
 		if err := checkID("queue", in.Queue); err != nil {
@@ -387,6 +413,11 @@ func encodedQuery(in ticket.SearchInput) (string, error) {
 	if in.TitleContains != "" {
 		if strings.Contains(in.TitleContains, "^") {
 			return "", fmt.Errorf("%w: title_contains must not hold the character ^", kit.ErrInvalidInput)
+		}
+		// ServiceNow runs a value that starts with javascript: as a script in an
+		// encoded query. The tool refuses the text at any place.
+		if strings.Contains(strings.ToLower(in.TitleContains), "javascript:") {
+			return "", fmt.Errorf("%w: title_contains must not hold javascript:", kit.ErrInvalidInput)
 		}
 		conds = append(conds, "short_descriptionLIKE"+in.TitleContains)
 	}
@@ -429,4 +460,28 @@ func (v *service) search(ctx context.Context, _ *mcp.CallToolRequest, in ticket.
 	}
 	out.Count = len(out.Tickets)
 	return nil, out, nil
+}
+
+// byDedupKey returns the incident that holds the dedup key in correlation_id.
+// The key has a fixed pattern, so it cannot add a condition to the query. The
+// oldest incident wins, and the search does not look at the state, because a
+// retry must get the same incident back after someone closed it.
+func (v *service) byDedupKey(ctx context.Context, key string) (*record, error) {
+	var resp struct {
+		Result []record `json:"result"`
+	}
+	err := v.client.Do(ctx, kit.Request{
+		Method: http.MethodGet, Path: kit.Path("api", "now", "table", table),
+		Query: url.Values{
+			"sysparm_query": {"correlation_id=" + key + "^ORDERBYopened_at"}, "sysparm_limit": {"1"}, "sysparm_fields": {fields},
+			"sysparm_exclude_reference_link": {"true"},
+		},
+	}, &resp)
+	if err != nil {
+		return nil, snError("look for the dedup key", err)
+	}
+	if len(resp.Result) == 0 {
+		return nil, nil
+	}
+	return &resp.Result[0], nil
 }
