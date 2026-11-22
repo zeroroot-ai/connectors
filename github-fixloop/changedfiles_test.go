@@ -68,7 +68,7 @@ func TestStateChangedFilesKinds(t *testing.T) {
 }
 
 func TestStateChangedFilesTruncated(t *testing.T) {
-	var full []string
+	full := make([]string, 0, fixloop.MaxChangedFiles)
 	for i := range fixloop.MaxChangedFiles {
 		full = append(full, prFile("f"+strconv.Itoa(i)+".go", "added", "aa", ""))
 	}

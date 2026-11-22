@@ -65,7 +65,8 @@ func TestStateChangedFilesKinds(t *testing.T) {
 }
 
 func TestStateChangedFilesTruncated(t *testing.T) {
-	var full, paths []string
+	full := make([]string, 0, fixloop.MaxChangedFiles)
+	paths := make([]string, 0, fixloop.MaxChangedFiles)
 	for i := range fixloop.MaxChangedFiles {
 		p := "f" + strconv.Itoa(i) + ".go"
 		paths = append(paths, p)

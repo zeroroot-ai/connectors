@@ -68,7 +68,7 @@ func TestOpenMergeRequest(t *testing.T) {
 // the base, and the files with their status and blob sha.
 func compareJS(ahead int, files ...string) string {
 	commits := make([]string, 0, ahead)
-	for i := 0; i < ahead; i++ {
+	for range ahead {
 		commits = append(commits, `{"sha":"`+newComSHA+`"}`)
 	}
 	return `{"ahead_by":` + itoa(ahead) + `,"commits":[` + strings.Join(commits, ",") + `],"files":[` + strings.Join(files, ",") + `]}`
