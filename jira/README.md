@@ -22,10 +22,10 @@ Reference: https://developer.atlassian.com/cloud/jira/platform/rest/v3/ and the 
 
 | Tool | Vendor call | Undo | Annotations |
 |---|---|---|---|
-| `create_ticket` | `POST /rest/api/3/issue` | `close_ticket` | `destructiveHint: false`, `idempotentHint: false` |
+| `create_ticket` | `POST /rest/api/3/search/jql` (look for `dedup_key`), then `POST /rest/api/3/issue` | `close_ticket` | `destructiveHint: false`, `idempotentHint: false` |
 | `update_ticket` | `PUT /rest/api/3/issue/{key}` | `update_ticket` with the old value | `destructiveHint: false`, `idempotentHint: true` |
 | `add_comment` | `POST /rest/api/3/issue/{key}/comment` | None. Only a person deletes a comment. | `destructiveHint: true`, `idempotentHint: false` |
-| `close_ticket` | `GET` then `POST /rest/api/3/issue/{key}/transitions`, and a comment | A person reopens it, or a transition back | `destructiveHint: false`, `idempotentHint: true` |
+| `close_ticket` | `GET` then `POST /rest/api/3/issue/{key}/transitions`, with the comment in the same request | A person reopens it, or a transition back | `destructiveHint: false`, `idempotentHint: true` |
 | `get_ticket` | `GET /rest/api/3/issue/{key}` | Not a change. | `readOnlyHint: true` |
 | `search_tickets` | `POST /rest/api/3/search/jql` | Not a change. | `readOnlyHint: true` |
 | `list_transitions` | `GET /rest/api/3/issue/{key}/transitions` | Not a change. | `readOnlyHint: true` |
@@ -40,11 +40,12 @@ How the contract maps to Jira:
 - `priority`: `low` is Low, `medium` is Medium, `high` is High and `critical` is Highest. A project with other priority names makes Jira refuse the call, and the tool shows the error.
 - `description`, `body` and the resolution are plain text. The server writes them as a document of the Atlassian Document Format with one paragraph for each line. `get_ticket` reads the text of a document again.
 - `closed` is true when the category of the status is `done`.
-- `close_ticket` reads the transitions. When exactly one leads to a status in the category `done`, the tool adds the resolution as a comment and does the transition. With none or more than one, the tool changes nothing and names them. Then call `list_transitions` and `transition_ticket`. When a transition needs a resolution, set `JIRA_RESOLUTION`. When the transition fails after the comment, the error says that the comment was added.
+- `dedup_key` is stored as the label `zeroroot-dedup-<key>`. Before a create, the tool searches for the oldest issue with that label. When one exists, the tool returns it with `existing: true` and makes no new issue. The client never repeats a create call, so a timeout cannot make two issues. The search and the create are two calls, so two calls at the same time can still make two.
+- `close_ticket` reads the transitions. When exactly one leads to a status in the category `done`, the tool does the transition and adds the resolution as a comment in the same request (`update.comment`). Jira does both or neither. With none or more than one, the tool changes nothing and names them. Then call `list_transitions` and `transition_ticket`. When a transition needs a resolution, set `JIRA_RESOLUTION`.
 
 ## No JQL injection
 
-`search_tickets` builds the JQL from typed filters. Each text is written as a quoted string with `\` and `"` escaped, so it cannot end the string and add a clause. The project key and the label must match a fixed pattern, and a time is parsed and written again. A control character in a text is refused. A test feeds hostile texts and makes sure that the query without its string literals is always the fixed skeleton. A text in `summary ~` can hold the search syntax of Jira text fields, for example a wildcard. That changes what the text matches and adds no clause.
+`search_tickets` builds the JQL from typed filters. Each text is written as a quoted string with `\` and `"` escaped, so it cannot end the string and add a clause. In `title_contains`, the tool also puts a backslash before each character of the text search syntax of Jira (`+ - & | ! ( ) { } [ ] ^ " ~ * ? \ :`), so the text matches itself and not a wildcard, a range or an operator. The project key and the label must match a fixed pattern, and a time is parsed and written again. A control character in a text is refused. A test feeds hostile texts and makes sure that the query without its string literals is always the fixed skeleton.
 
 Jira refuses a search with no restriction. `search_tickets` with `status: any` and no other filter is refused.
 
@@ -53,7 +54,7 @@ Jira refuses a search with no restriction. `search_tickets` with `status: any` a
 No call to a live Jira. The tests use an `httptest` mock that follows the OpenAPI spec of Atlassian. The mock does not prove these points:
 
 - The field `to.statusCategory.key` of a transition. The spec page that was read says only that `to` holds the target status. The server relies on the key `done`.
-- The time zone of `created >= ` in JQL. The server writes UTC, and Jira can read the time in the zone of the user of the token.
+- That `created >= -<n>m` counts minutes the way that the Atlassian pages say. `created_after` is sent as the minutes from that time to now, rounded up by one minute, because a date in JQL is read in the time zone of the user of the token. A time in the future is refused.
 - The escape of a backslash in JQL. The pages that were read show the escape `\"` only.
 - That `POST /rest/api/3/search/jql` is the only search call on your site. The old `/rest/api/3/search` is marked as removed.
 

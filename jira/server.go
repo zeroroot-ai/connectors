@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,12 +83,16 @@ func buildWith(env *kit.Env, log *slog.Logger, hc *http.Client) (func(*mcp.Serve
 	client := kit.NewClient(base, kit.ClientOptions{
 		Auth: kit.BasicAuth(email, token), Logger: log, Timeout: timeout, HTTPClient: hc,
 	})
-	svc := &service{client: client, web: *base, issueType: issueType, resolution: resolution}
+	svc := &service{client: client, now: clock, web: *base, issueType: issueType, resolution: resolution}
 	return func(s *mcp.Server) { svc.register(s, log) }, nil
 }
 
+// clock is the time source of the search. Tests replace it.
+var clock = time.Now
+
 type service struct {
 	client     *kit.Client
+	now        func() time.Time
 	web        url.URL
 	issueType  string
 	resolution string // the resolution that close_ticket sets. Empty sets none.
@@ -98,6 +103,7 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 		Name: ticket.ToolCreate,
 		Description: "Open one Jira issue. Give title, description and queue, the key of the project. " +
 			"priority is low, medium, high or critical. The issue type is set by the server. " +
+			"dedup_key makes a repeat safe: a second call with the same key returns the first issue with existing true. " +
 			"No tool deletes the issue. Undo: call close_ticket with the ticket_id of the result.",
 		Annotations: kit.Reversible("Create Jira issue", false),
 	}, v.create)
@@ -114,8 +120,8 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 	}, v.comment)
 	kit.AddTool(s, log, &mcp.Tool{
 		Name: ticket.ToolClose,
-		Description: "Close one Jira issue. The tool adds the resolution as a comment, then does the one transition of the issue " +
-			"that leads to a status in the category done. When the issue has no such transition or more than one, the tool " +
+		Description: "Close one Jira issue. The tool does the one transition of the issue that leads to a status in the category done, " +
+			"and adds the resolution as a comment in the same request. When the issue has no such transition or more than one, the tool " +
 			"changes nothing and names them: call list_transitions and transition_ticket. " +
 			"A person can reopen the issue. Undo with a transition back, with list_transitions and transition_ticket, when the workflow has one.",
 		Annotations: kit.Reversible("Close Jira issue", true),
@@ -244,13 +250,25 @@ func (v *service) create(ctx context.Context, _ *mcp.CallToolRequest, in ticket.
 		"project": map[string]any{"key": in.Queue}, "summary": in.Title, "issuetype": map[string]any{"name": v.issueType},
 		"description": adf(in.Description), "priority": map[string]any{"name": priorityNames[prio]},
 	}
-	if len(in.Labels) > 0 {
-		f["labels"] = in.Labels
+	labels := append([]string{}, in.Labels...)
+	if in.DedupKey != "" {
+		existing, err := v.byDedupKey(ctx, in.DedupKey)
+		if err != nil {
+			return nil, out, err
+		}
+		if existing != "" {
+			return nil, ticket.Created{TicketID: existing, Number: existing, URL: v.browseURL(existing), Existing: true}, nil
+		}
+		labels = append(labels, dedupLabel(in.DedupKey))
+	}
+	if len(labels) > 0 {
+		f["labels"] = labels
 	}
 	var resp struct {
 		Key string `json:"key"`
 	}
-	// A create call is not repeated: a repeat would open a second issue.
+	// The client does not repeat a create call: a repeat after a timeout would
+	// open a second issue. The caller repeats it with the same dedup_key.
 	err := v.client.Do(ctx, kit.Request{
 		Method: http.MethodPost, Path: kit.Path("rest", "api", "3", "issue"), JSON: map[string]any{"fields": f},
 	}, &resp)
@@ -376,16 +394,18 @@ func (v *service) close(ctx context.Context, _ *mcp.CallToolRequest, in ticket.C
 		return nil, out, fmt.Errorf("%w: the issue has %d transitions to a done status (%s). Nothing changed. "+
 			"Call list_transitions and transition_ticket", kit.ErrInvalidInput, len(done), strings.Join(names, ", "))
 	}
-	if err := v.addComment(ctx, in.TicketID, in.Resolution); err != nil {
-		return nil, out, err
+	// The resolution goes in the same request as the transition. Jira does both
+	// or neither, so no issue is left with a comment and no close.
+	body := map[string]any{
+		"transition": map[string]any{"id": done[0].ID},
+		"update":     map[string]any{"comment": []any{map[string]any{"add": map[string]any{"body": adf(in.Resolution)}}}},
 	}
-	body := map[string]any{"transition": map[string]any{"id": done[0].ID}}
 	if v.resolution != "" {
 		body["fields"] = map[string]any{"resolution": map[string]any{"name": v.resolution}}
 	}
 	err = v.client.Do(ctx, kit.Request{Method: http.MethodPost, Path: issuePath(in.TicketID, "transitions"), JSON: body}, nil)
 	if err != nil {
-		return nil, out, fmt.Errorf("the resolution comment was added, the issue is not closed: %w", jiraError("transition issue", err))
+		return nil, out, jiraError("close issue", err)
 	}
 	out.Status = done[0].To.Name
 	return nil, out, nil
@@ -514,12 +534,27 @@ func jqlString(s string) string {
 	return `"` + s + `"`
 }
 
-// jqlTime is the format of a time in JQL. The tool writes it in UTC. Jira can
-// read it in the time zone of the user of the token.
-const jqlTime = "2006-01-02 15:04"
+// luceneSpecial holds the characters that the text search of Jira (Lucene)
+// reads as syntax: + - & | ! ( ) { } [ ] ^ " ~ * ? \\ :
+const luceneSpecial = `+-&|!(){}[]^"~*?\\:`
+
+// luceneEscape puts a backslash before each character of the text search syntax,
+// so the text matches itself and not a wildcard, a range or an operator.
+// jqlString then doubles each backslash, which gives the form \\+ that the
+// Atlassian pages show.
+func luceneEscape(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if strings.ContainsRune(luceneSpecial, r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
 
 // buildJQL builds the query from the typed filters.
-func buildJQL(in ticket.SearchInput) (string, error) {
+func buildJQL(in ticket.SearchInput, now time.Time) (string, error) {
 	var conds []string
 	switch ticket.StatusOf(in) {
 	case ticket.StatusOpen:
@@ -534,7 +569,7 @@ func buildJQL(in ticket.SearchInput) (string, error) {
 		conds = append(conds, "project = "+jqlString(in.Queue))
 	}
 	if in.TitleContains != "" {
-		conds = append(conds, "summary ~ "+jqlString(in.TitleContains))
+		conds = append(conds, "summary ~ "+jqlString(luceneEscape(in.TitleContains)))
 	}
 	if in.Label != "" {
 		conds = append(conds, "labels = "+jqlString(in.Label))
@@ -544,7 +579,14 @@ func buildJQL(in ticket.SearchInput) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("%w: created_after is not an RFC 3339 time", kit.ErrInvalidInput)
 		}
-		conds = append(conds, "created >= "+jqlString(t.UTC().Format(jqlTime)))
+		// A date in JQL is read in the time zone of the user of the token, and
+		// the tool does not know that zone. A relative time is counted by Jira
+		// from its own clock, so the tool sends the minutes since the time.
+		if t.After(now) {
+			return "", fmt.Errorf("%w: created_after is in the future", kit.ErrInvalidInput)
+		}
+		minutes := int(now.Sub(t)/time.Minute) + 1 // round up, so the issue at the time is in
+		conds = append(conds, "created >= -"+strconv.Itoa(minutes)+"m")
 	}
 	if len(conds) == 0 {
 		return "", fmt.Errorf("%w: give at least one filter. Jira refuses an unbounded search", kit.ErrInvalidInput)
@@ -558,7 +600,7 @@ func (v *service) search(ctx context.Context, _ *mcp.CallToolRequest, in ticket.
 	if err != nil {
 		return nil, out, fmt.Errorf("check input: %w", err)
 	}
-	jql, err := buildJQL(in)
+	jql, err := buildJQL(in, v.now())
 	if err != nil {
 		return nil, out, err
 	}
@@ -577,4 +619,32 @@ func (v *service) search(ctx context.Context, _ *mcp.CallToolRequest, in ticket.
 	}
 	out.Count = len(out.Tickets)
 	return nil, out, nil
+}
+
+// dedupLabel is the label that holds the dedup key of an issue.
+func dedupLabel(key string) string { return "zeroroot-dedup-" + key }
+
+// byDedupKey returns the key of the oldest issue that has the label of the
+// dedup key, or an empty string. The key has a fixed pattern, and jqlString
+// quotes the label, so it cannot add a clause.
+func (v *service) byDedupKey(ctx context.Context, key string) (string, error) {
+	var resp struct {
+		Issues []struct {
+			Key string `json:"key"`
+		} `json:"issues"`
+	}
+	err := v.client.Do(ctx, kit.Request{
+		Method: http.MethodPost, Path: kit.Path("rest", "api", "3", "search", "jql"), Retry: true, // a search changes nothing
+		JSON: map[string]any{"jql": "labels = " + jqlString(dedupLabel(key)) + " ORDER BY created ASC", "fields": []string{"summary"}, "maxResults": 1},
+	}, &resp)
+	if err != nil {
+		return "", jiraError("look for the dedup key", err)
+	}
+	if len(resp.Issues) == 0 {
+		return "", nil
+	}
+	if !issueKey.MatchString(resp.Issues[0].Key) {
+		return "", errors.New("look for the dedup key: Jira gave an issue with no key")
+	}
+	return resp.Issues[0].Key, nil
 }
