@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -241,5 +242,61 @@ func TestHandlerHealth(t *testing.T) {
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, HealthPath, http.NoBody))
 	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "ok") {
 		t.Errorf("health = %d %s", rr.Code, rr.Body)
+	}
+}
+
+// The wait on a 429 follows Retry-After, then X-Rate-Limit-Reset (epoch
+// seconds, sent by Okta), and a cap limits it.
+func TestClientWaitsForRateLimitReset(t *testing.T) {
+	cases := map[string]struct {
+		header   http.Header
+		min, max time.Duration
+	}{
+		"reset in 3 s":      {http.Header{"X-Rate-Limit-Reset": {strconv.FormatInt(time.Now().Add(3*time.Second).Unix(), 10)}}, 1500 * time.Millisecond, 4 * time.Second},
+		"reset far away":    {http.Header{"X-Rate-Limit-Reset": {strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)}}, maxRateWait, maxRateWait},
+		"reset in the past": {http.Header{"X-Rate-Limit-Reset": {"1"}}, 1, maxBackoff},
+		"retry after first": {http.Header{"Retry-After": {"2"}, "X-Rate-Limit-Reset": {strconv.FormatInt(time.Now().Add(9*time.Second).Unix(), 10)}}, 2 * time.Second, 2 * time.Second},
+		"bad reset":         {http.Header{"X-Rate-Limit-Reset": {"soon"}}, 1, maxBackoff},
+	}
+	for name, tc := range cases {
+		var calls atomic.Int32
+		var waits []time.Duration
+		c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if calls.Add(1) == 1 {
+				for k, v := range tc.header {
+					w.Header()[k] = v
+				}
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			_, _ = w.Write([]byte("{}"))
+		}), ClientOptions{MaxRetries: 1, Sleep: func(_ context.Context, d time.Duration) error {
+			waits = append(waits, d)
+			return nil
+		}})
+		if err := c.Do(context.Background(), Request{Method: http.MethodGet, Path: "/x"}, nil); err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if len(waits) != 1 || waits[0] < tc.min || waits[0] > tc.max {
+			t.Errorf("%s: waits = %v, want from %v to %v", name, waits, tc.min, tc.max)
+		}
+	}
+	// A 503 with a reset header does not use it: only a 429 does.
+	var waits []time.Duration
+	var calls atomic.Int32
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("X-Rate-Limit-Reset", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("{}"))
+	}), ClientOptions{MaxRetries: 1, Sleep: func(_ context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		return nil
+	}})
+	if err := c.Do(context.Background(), Request{Method: http.MethodGet, Path: "/x"}, nil); err != nil || len(waits) != 1 || waits[0] > maxBackoff {
+		t.Errorf("503: err=%v waits=%v", err, waits)
 	}
 }

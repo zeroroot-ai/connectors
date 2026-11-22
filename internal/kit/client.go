@@ -21,7 +21,8 @@ const (
 	DefaultMaxRetries = 2
 	DefaultMaxBody    = 8 << 20 // bytes of a response that the client reads
 	maxBackoff        = 4 * time.Second
-	errorSnippet      = 512 // bytes of a vendor error body in an APIError
+	maxRateWait       = 15 * time.Second // longest wait that a vendor asks for with Retry-After or a reset time
+	errorSnippet      = 512              // bytes of a vendor error body in an APIError
 )
 
 // Authenticator adds the credential to a request. It runs once for each
@@ -162,8 +163,9 @@ func (c *Client) DoBytes(ctx context.Context, r Request) ([]byte, error) {
 		}
 		if wait <= 0 {
 			wait = min(200*time.Millisecond<<attempt, maxBackoff)
+		} else {
+			wait = min(wait, maxRateWait)
 		}
-		wait = min(wait, maxBackoff)
 		c.log.Debug("vendor request failed, retry", "method", r.Method, "attempt", attempt+1)
 		if err := c.sleep(ctx, wait); err != nil {
 			return nil, fmt.Errorf("wait for retry: %w", err)
@@ -266,9 +268,20 @@ func temporary(err error) bool {
 	return false
 }
 
+// retryAfter returns the wait that the vendor asks for. It reads Retry-After
+// (seconds). On a 429 with no Retry-After it reads X-Rate-Limit-Reset, the
+// time of the reset in epoch seconds, which Okta sends. The caller caps the
+// wait. A reset time in the past gives no wait, so the backoff applies.
 func retryAfter(resp *http.Response) time.Duration {
 	if s, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && s >= 0 {
 		return time.Duration(s) * time.Second
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		if reset, err := strconv.ParseInt(resp.Header.Get("X-Rate-Limit-Reset"), 10, 64); err == nil {
+			if d := time.Until(time.Unix(reset, 0)); d > 0 {
+				return d
+			}
+		}
 	}
 	return 0
 }
