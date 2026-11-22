@@ -82,21 +82,22 @@ The servers of class `ticket` (`servicenow`, `jira`) use the same tool names, th
 
 | Tool | Arguments | Result | Undo |
 |---|---|---|---|
-| `create_ticket` | `title`, `description`, optional `queue`, `priority`, `labels` | `ticket_id`, `number`, `url` | None. Close the ticket with `close_ticket`. |
+| `create_ticket` | `title`, `description`, optional `queue`, `priority`, `labels`, `dedup_key` | `ticket_id`, `number`, `url`, `existing` | `close_ticket` |
 | `update_ticket` | `ticket_id`, and at least one of `title`, `description`, `priority` | `ticket_id`, `action`, `status` | Call it again with the old value. |
 | `add_comment` | `ticket_id`, `body` | `ticket_id`, `action`, `status` | None. The vendor keeps the comment. |
-| `close_ticket` | `ticket_id`, `resolution` | `ticket_id`, `action`, `status` | A person reopens the ticket. No tool does. |
+| `close_ticket` | `ticket_id`, `resolution` | `ticket_id`, `action`, `status` | No tool of the contract. A person reopens the ticket. Jira also has `transition_ticket`. |
 | `get_ticket` | `ticket_id` | `ticket_id`, `number`, `url`, `title`, `description`, `status`, `priority`, `closed`, `created_at`, `updated_at` | Not a change. |
 | `search_tickets` | optional `queue`, `status` (`open`, `closed`, `any`), `title_contains`, `label`, `created_after`, `limit` | `tickets` (the fields of `get_ticket`), `count` | Not a change. |
 
 - `ticket_id` is the value that the tools of the server take back. It is the key on Jira and the `sys_id` on ServiceNow. `number` is the identifier that a person reads.
 - `queue` is the project key on Jira and the `sys_id` of the assignment group on ServiceNow.
 - `priority` is `low`, `medium`, `high` or `critical`. The default is `medium`.
-- Each search filter is typed. A server builds its query from the filters and never passes free text on as query syntax. Text is quoted and escaped, or refused when it holds a character that the query language cannot escape.
+- Each search filter is typed. A server builds its query from the filters and never passes free text on as query syntax. Each server states how it makes a text safe. It quotes and escapes the text, or it refuses a text with a character that the query language cannot escape.
+- `dedup_key` makes `create_ticket` safe to repeat. The server searches for a ticket that holds the key, and stores the key in the new ticket (the field `correlation_id` on ServiceNow, a label on Jira). A second call with the same key, for example a retry after a timeout, returns the first ticket with `existing: true`. The search and the create are two calls, so two calls at the same time can still make two tickets. A server does not repeat a create call by itself, because a repeat could make a second ticket.
 - `description` and `body` are plain text. The server converts it to the format of the vendor.
 - A server adds only tools that have no contract name. Jira adds `list_transitions` and `transition_ticket`.
 
-PagerDuty is class `paging` and has its own tools: `trigger_alert`, `acknowledge_alert`, `resolve_alert` and `get_incident`.
+PagerDuty is class `paging` and has its own tools: `trigger_alert`, `acknowledge_alert`, `resolve_alert`, `get_incident` and `find_incidents`.
 
 ## Not built
 
