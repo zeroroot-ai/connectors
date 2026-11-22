@@ -15,10 +15,11 @@ import (
 	"github.com/zeroroot-ai/connectors/internal/kit/kittest"
 )
 
-const (
-	routing = "R0UT1NGKEY0123456789abcdef012345"
-	dedup   = "finding/42:disk-full"
-)
+// The test keys are made at run time with a low entropy, so a secret scanner
+// does not take them for a real key.
+var routing = strings.Repeat("r", 32)
+
+const dedup = "finding/42:disk-full"
 
 // The mock follows PagerDuty:
 // the Events API v2 (POST /v2/enqueue answers 202 {"status":"success",
@@ -107,6 +108,11 @@ func TestTriggerAcknowledgeResolve(t *testing.T) {
 		p["custom_details"].(map[string]any)["finding"] != "42" {
 		t.Errorf("body = %v", b)
 	}
+	checkAckResolve(t, m, call)
+}
+
+func checkAckResolve(t *testing.T, m *mock, call func(string, map[string]any) (bool, string, *mcp.CallToolResult)) {
+	t.Helper()
 	if isErr, text, _ := call("acknowledge_alert", map[string]any{"dedup_key": dedup}); isErr {
 		t.Fatal(text)
 	}
@@ -170,7 +176,7 @@ func TestEventErrorShowsPagerDutyAnswerAndNoKey(t *testing.T) {
 	ts := httptest.NewTLSServer(m)
 	defer ts.Close()
 	register, err := buildWith(kit.NewEnvFrom(map[string]string{
-		"PAGERDUTY_ROUTING_KEY": "WR0NGKEY0123456789abcdef01234567", "PAGERDUTY_API_TOKEN": "t",
+		"PAGERDUTY_ROUTING_KEY": strings.Repeat("w", 32), "PAGERDUTY_API_TOKEN": "t",
 		"PAGERDUTY_EVENTS_URL": ts.URL, "PAGERDUTY_API_URL": ts.URL,
 	}), slog.New(slog.DiscardHandler), ts.Client())
 	if err != nil {
@@ -178,7 +184,7 @@ func TestEventErrorShowsPagerDutyAnswerAndNoKey(t *testing.T) {
 	}
 	res := kittest.Call(t, kittest.Connect(t, register), "resolve_alert", map[string]any{"dedup_key": "k"})
 	text := kittest.Text(t, res)
-	if !res.IsError || !strings.Contains(text, "HTTP 400") || strings.Contains(text, "WR0NGKEY") || strings.Contains(text, routing) {
+	if !res.IsError || !strings.Contains(text, "HTTP 400") || strings.Contains(text, strings.Repeat("w", 32)) || strings.Contains(text, routing) {
 		t.Errorf("isErr=%v %s", res.IsError, text)
 	}
 }

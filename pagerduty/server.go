@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -304,7 +305,7 @@ func (v *service) getIncident(ctx context.Context, _ *mcp.CallToolRequest, in in
 	if err := v.rest.Do(ctx, kit.Request{Method: http.MethodGet, Path: kit.Path("incidents", in.IncidentID)}, &resp); err != nil {
 		return nil, out, fmt.Errorf("get incident: %w", err)
 	}
-	if resp.Incident.ID != in.IncidentID && fmt.Sprint(resp.Incident.IncidentNumber) != in.IncidentID {
+	if resp.Incident.ID != in.IncidentID && strconv.Itoa(resp.Incident.IncidentNumber) != in.IncidentID {
 		return nil, out, errors.New("get incident: PagerDuty did not return the incident")
 	}
 	return nil, resp.Incident.out(), nil
