@@ -417,7 +417,7 @@ func encodedQuery(in ticket.SearchInput) (string, error) {
 		// ServiceNow runs a value that starts with javascript: as a script in an
 		// encoded query. The tool refuses the text at any place.
 		if strings.Contains(strings.ToLower(in.TitleContains), "javascript:") {
-			return "", fmt.Errorf("%w: title_contains must not hold javascript:", kit.ErrInvalidInput)
+			return "", fmt.Errorf("%w: title_contains must not hold the text javascript", kit.ErrInvalidInput)
 		}
 		conds = append(conds, "short_descriptionLIKE"+in.TitleContains)
 	}
