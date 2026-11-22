@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/zeroroot-ai/connectors/compare/v0.3.0...v0.4.0) (2026-11-22)
+
+
+### Features
+
+* **ticket:** search_tickets finds a ticket by dedup_key ([#25](https://github.com/zeroroot-ai/connectors/issues/25)) ([1b3a881](https://github.com/zeroroot-ai/connectors/commit/1b3a88167bfa1b2a61e5db22e285298a69f8f444))
+
 ## [0.3.0](https://github.com/zeroroot-ai/connectors/compare/v0.2.0...v0.3.0) (2026-11-22)
 
 
