@@ -4,34 +4,44 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/url"
-	"strconv"
 
 	"github.com/zeroroot-ai/connectors/internal/fixloop"
 	"github.com/zeroroot-ai/connectors/internal/kit"
 )
 
-// changedFiles reads the files of a pull request:
+// changedFiles reads the files of a pull request at two commits that the
+// caller names, with
 //
-//	GET /repos/{owner}/{repo}/pulls/{n}/files?per_page=100
+//	GET /repos/{owner}/{repo}/compare/{base sha}...{head sha}
 //
-// https://docs.github.com/en/rest/pulls/pulls#list-pull-requests-files
+// https://docs.github.com/en/rest/commits/commits#compare-two-commits
+// The pull request files endpoint reads the pull request as it is when the call
+// runs. It can lag behind a push, and a head that goes from A to B and back to A
+// between two reads passes a check of the head. A compare of two commit shas
+// names the head, so the files are the files of the head that the state returned.
 // Each file has filename, status (added, removed, modified, renamed, copied,
-// changed, unchanged), sha (the blob sha) and previous_filename. The status
-// changed is a change of the file mode, and the tool maps it to mode_changed. The list has
-// at most 3000 files. The tool reads the first 100. To tell whether more
-// exist, it reads file number 101 with per_page=1.
-func (v *service) changedFiles(ctx context.Context, r prRef) ([]fixloop.ChangedFile, bool, error) {
-	var list []struct {
-		Filename string `json:"filename"`
-		Status   string `json:"status"`
-		SHA      string `json:"sha"`
-		Previous string `json:"previous_filename"`
+// changed, unchanged), sha (the blob sha at the head) and previous_filename. The
+// status changed is a change of the file mode or the type, and the tool maps it
+// to mode_changed. GitHub gives at most 300 files in one answer. The tool returns
+// the first 100, and truncated is true when the answer has more than 100 files.
+// An answer with 300 files can be cut, so it is truncated too.
+func (v *service) changedFiles(ctx context.Context, r prRef, base, head string) ([]fixloop.ChangedFile, bool, error) {
+	var cmp struct {
+		Files []struct {
+			Filename string `json:"filename"`
+			Status   string `json:"status"`
+			SHA      string `json:"sha"`
+			Previous string `json:"previous_filename"`
+		} `json:"files"`
 	}
-	path := repoPath(r, "pulls", strconv.Itoa(r.number), "files")
-	err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: path, Query: url.Values{"per_page": {strconv.Itoa(fixloop.MaxChangedFiles)}}}, &list)
+	err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: repoPath(r, "compare", base+"..."+head)}, &cmp)
 	if err != nil {
-		return nil, false, fmt.Errorf("read the files of the pull request: %w", err)
+		return nil, false, fmt.Errorf("compare the base and the head of the pull request: %w", err)
+	}
+	truncated := len(cmp.Files) > fixloop.MaxChangedFiles || len(cmp.Files) >= githubCompareFileLimit
+	list := cmp.Files
+	if len(list) > fixloop.MaxChangedFiles {
+		list = list[:fixloop.MaxChangedFiles]
 	}
 	out := make([]fixloop.ChangedFile, 0, len(list))
 	for _, f := range list {
@@ -48,19 +58,9 @@ func (v *service) changedFiles(ctx context.Context, r prRef) ([]fixloop.ChangedF
 		}
 		out = append(out, c)
 	}
-	truncated := false
-	if len(list) >= fixloop.MaxChangedFiles {
-		var more []struct {
-			Filename string `json:"filename"`
-		}
-		err := v.client.Do(ctx, kit.Request{
-			Method: http.MethodGet, Path: path,
-			Query: url.Values{"per_page": {"1"}, "page": {strconv.Itoa(fixloop.MaxChangedFiles + 1)}},
-		}, &more)
-		if err != nil {
-			return nil, false, fmt.Errorf("read the files of the pull request: %w", err)
-		}
-		truncated = len(more) > 0
-	}
 	return out, truncated, nil
 }
+
+// githubCompareFileLimit is the largest number of files that GitHub gives in a
+// compare answer.
+const githubCompareFileLimit = 300

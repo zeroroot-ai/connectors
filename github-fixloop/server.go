@@ -611,32 +611,16 @@ func (v *service) mergeRequestState(ctx context.Context, _ *mcp.CallToolRequest,
 		return nil, st, err
 	}
 	st.ChangedFiles = []fixloop.ChangedFile{}
-	files, truncated, ferr := v.changedFiles(ctx, r)
-	if ferr == nil {
-		// The files come from a second read, so the head can have moved between
-		// the two. The tool reads the pull request again after the files, and
-		// gives the files only when the head is the head that it returned.
-		ferr = v.sameHeadAfter(ctx, r, pr.Head.SHA)
-	}
+	// The files are those of the commits that the state names: the base sha and
+	// the head sha of the pull request that this call read. A push between the
+	// two reads cannot change them.
+	files, truncated, ferr := v.changedFiles(ctx, r, pr.Base.SHA, pr.Head.SHA)
 	if ferr != nil {
 		st.ChangedFilesError = ferr.Error()
 	} else {
 		st.ChangedFiles, st.ChangedFilesTruncated = files, truncated
 	}
 	return nil, st, nil
-}
-
-// sameHeadAfter reads the pull request again and fails when its head is not
-// the head that the state returned.
-func (v *service) sameHeadAfter(ctx context.Context, r prRef, head string) error {
-	again, err := v.getPR(ctx, r)
-	if err != nil {
-		return fmt.Errorf("check the head after the files: %w", err)
-	}
-	if !strings.EqualFold(again.Head.SHA, head) {
-		return fmt.Errorf("the head of the pull request moved from %s to %s while the files were read, so the files may belong to another commit", head, again.Head.SHA)
-	}
-	return nil
 }
 
 // ---- merge_merge_request ----

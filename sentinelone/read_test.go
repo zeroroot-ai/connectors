@@ -75,6 +75,7 @@ func TestListThreats(t *testing.T) {
 	m, call, _ := readSetup(t, "tok")
 	isErr, text, res := call("list_threats", map[string]any{
 		"agent_id": agent, "incident_status": "unresolved", "created_after": "2026-11-20T00:00:00Z", "limit": 10,
+		"threat_id": "1234567890", "mitigation_status": "mitigated", "created_before": "2026-11-21T00:00:00Z",
 	})
 	if isErr {
 		t.Fatal(text)
@@ -85,7 +86,8 @@ func TestListThreats(t *testing.T) {
 		out.Threats[0].AgentRealtimeInfo.AgentComputerName != "host-1" || out.NextCursor != "cur123" || out.TotalItems != 42 {
 		t.Errorf("out = %+v", out)
 	}
-	for _, want := range []string{"agentIds=" + agent, "incidentStatuses=unresolved", "limit=10", "createdAt__gte=2026-11-20T00%3A00%3A00Z"} {
+	for _, want := range []string{"agentIds=" + agent, "incidentStatuses=unresolved", "limit=10", "createdAt__gte=2026-11-20T00%3A00%3A00Z",
+		"ids=1234567890", "mitigationStatuses=mitigated", "createdAt__lte=2026-11-21T00%3A00%3A00Z"} {
 		if !strings.Contains(m.queries[0], want) {
 			t.Errorf("query %q lacks %q", m.queries[0], want)
 		}
