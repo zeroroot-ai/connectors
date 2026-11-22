@@ -251,7 +251,7 @@ func (v *service) listCatalog(ctx context.Context, _ *mcp.CallToolRequest, in ca
 			return nil, out, kit.GraphError("list catalog entries", err)
 		}
 		for _, e := range resp.Value {
-			// The server filters. An entry of another kind is dropped as a second defence.
+			// The server filters. An entry of another kind is dropped as a second defense.
 			if e.OdataType != typ {
 				continue
 			}

@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -81,24 +81,9 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	const qualityType = "#microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry"
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == base+"catalog/entries":
-		// The server filters by type, as Graph does with $filter=isof(...).
-		filter := r.URL.Query().Get("$filter")
-		quality := `{"@odata.type":"` + qualityType + `","id":"` + entryID + `","displayName":"2026.11 B","catalogName":"cu","qualityUpdateClassification":"security"}`
-		feature := `{"@odata.type":"#microsoft.graph.windowsUpdates.featureUpdateCatalogEntry","id":"c1dec151-c151-c1de-51c1-dec151c1dec1","displayName":"Win 11","version":"24H2"}`
-		switch {
-		case strings.Contains(filter, "qualityUpdateCatalogEntry") && r.URL.Query().Get("$skiptoken") == "tok2":
-			_, _ = w.Write([]byte(`{"value":[` + strings.Replace(quality, entryID, "0c1d2e3f-0000-4000-8000-0000000000aa", 1) + `]}`))
-		case strings.Contains(filter, "qualityUpdateCatalogEntry") && m.nextPage:
-			_, _ = w.Write([]byte(`{"value":[` + quality + `],"@odata.nextLink":"https://graph.microsoft.com/beta/admin/windows/updates/catalog/entries?$skiptoken=tok2&$top=1"}`))
-		case strings.Contains(filter, "qualityUpdateCatalogEntry"):
-			_, _ = w.Write([]byte(`{"value":[` + quality + `]}`))
-		case strings.Contains(filter, "featureUpdateCatalogEntry"):
-			_, _ = w.Write([]byte(`{"value":[` + feature + `]}`))
-		default:
-			_, _ = w.Write([]byte(`{"value":[` + feature + `,` + quality + `]}`))
-		}
+		m.serveCatalog(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == base+"catalog/entries/"+entryID:
-		_, _ = w.Write([]byte(`{"@odata.type":"` + qualityType + `","id":"` + entryID + `","isExpeditable":` + fmt.Sprint(!m.notExpedite) + `}`))
+		_, _ = w.Write([]byte(`{"@odata.type":"` + qualityType + `","id":"` + entryID + `","isExpeditable":` + strconv.FormatBool(!m.notExpedite) + `}`))
 	case r.Method == http.MethodGet && r.URL.Path == base+"catalog/entries/c1dec151-c151-c1de-51c1-dec151c1dec1":
 		_, _ = w.Write([]byte(`{"@odata.type":"#microsoft.graph.windowsUpdates.featureUpdateCatalogEntry","id":"c1dec151-c151-c1de-51c1-dec151c1dec1"}`))
 	case r.Method == http.MethodPost && r.URL.Path == base+"deployments":
@@ -492,5 +477,26 @@ func TestAnnotationsAndReadOnly(t *testing.T) {
 func TestConfig(t *testing.T) {
 	if _, err := build(kit.NewEnvFrom(nil), slog.New(slog.DiscardHandler)); err == nil {
 		t.Error("empty environment accepted")
+	}
+}
+
+// serveCatalog answers the list of catalog entries. The server filters by type,
+// as Graph does with $filter=isof(...), and pages with $skiptoken.
+func (m *mock) serveCatalog(w http.ResponseWriter, r *http.Request) {
+	const qualityType = "#microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry"
+	filter := r.URL.Query().Get("$filter")
+	quality := `{"@odata.type":"` + qualityType + `","id":"` + entryID + `","displayName":"2026.11 B","catalogName":"cu","qualityUpdateClassification":"security"}`
+	feature := `{"@odata.type":"#microsoft.graph.windowsUpdates.featureUpdateCatalogEntry","id":"c1dec151-c151-c1de-51c1-dec151c1dec1","displayName":"Win 11","version":"24H2"}`
+	switch {
+	case strings.Contains(filter, "qualityUpdateCatalogEntry") && r.URL.Query().Get("$skiptoken") == "tok2":
+		_, _ = w.Write([]byte(`{"value":[` + strings.Replace(quality, entryID, "0c1d2e3f-0000-4000-8000-0000000000aa", 1) + `]}`))
+	case strings.Contains(filter, "qualityUpdateCatalogEntry") && m.nextPage:
+		_, _ = w.Write([]byte(`{"value":[` + quality + `],"@odata.nextLink":"https://graph.microsoft.com/beta/admin/windows/updates/catalog/entries?$skiptoken=tok2&$top=1"}`))
+	case strings.Contains(filter, "qualityUpdateCatalogEntry"):
+		_, _ = w.Write([]byte(`{"value":[` + quality + `]}`))
+	case strings.Contains(filter, "featureUpdateCatalogEntry"):
+		_, _ = w.Write([]byte(`{"value":[` + feature + `]}`))
+	default:
+		_, _ = w.Write([]byte(`{"value":[` + feature + `,` + quality + `]}`))
 	}
 }
