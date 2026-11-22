@@ -41,6 +41,6 @@ The server has no second authentication scheme, by design. The proxy and the Net
 
 ## Vendor permission
 
-Create a service user for this server in SentinelOne. Give it a custom role that holds only the permissions to view threats, to view endpoints, to disconnect an endpoint from the network and to connect it back, and scope it to the sites that the agent may act on. Create the API token for that service user. Do not use an Admin role.
+Create a service user for this server in SentinelOne. Give it a custom role that holds only four permissions: to view threats, to view endpoints, to disconnect an endpoint from the network and to connect it back, and scope it to the sites that the agent may act on. Create the API token for that service user. Do not use an Admin role.
 
-The exact names of the two role permissions are in the console, not in a public page that this repo can cite. Check them when you make the role.
+The exact names of the four role permissions are in the console, not in a public page that this repo can cite. Check them when you make the role.

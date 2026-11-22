@@ -158,6 +158,9 @@ func TestOpenRefusesABranchWithAForeignCommit(t *testing.T) {
 		"another content":  compareJS(1, cmpFile("src/db.go", "modified", "package evil\n"), good[1]),
 		"file not removed": compareJS(1, good[0], cmpFile("old/unused.go", "modified", "x")),
 		"renamed":          compareJS(1, cmpFile("src/db.go", "renamed", "package db\n"), good[1]),
+		// GitHub "changed" is a change of the mode or the type, for example a symlink.
+		// The blob matches, and the branch is still refused.
+		"status changed with the same blob": compareJS(1, cmpFile("src/db.go", "changed", "package db\n"), good[1]),
 	} {
 		routes := branchExists(openRoutes())
 		routes[compareKey] = reply(200, cmp)
@@ -438,8 +441,12 @@ func TestOpenRefusesAForeignModeInTheTree(t *testing.T) {
 		"symlink":           {entry("120000", "blob")},
 		"submodule":         {entry("160000", "commit")},
 		"a tree not a blob": {entry("040000", "tree")},
-		"path missing":      {},
-		"deleted file kept": {entry("100644", "blob"), `{"path":"old/unused.go","mode":"100644","type":"blob","sha":"` + blobSHA + `"}`},
+		// Each case below passes every other check, so it fails only when the
+		// check that it names is gone: the mode, the type or the blob sha.
+		"type commit with mode 100644": {entry("100644", "commit")},
+		"other blob with mode 100644":  {`{"path":"src/db.go","mode":"100644","type":"blob","sha":"` + fixloop.BlobSHA("package evil\n") + `"}`},
+		"path missing":                 {},
+		"deleted file kept":            {entry("100644", "blob"), `{"path":"old/unused.go","mode":"100644","type":"blob","sha":"` + blobSHA + `"}`},
 	}
 	for name, entries := range cases {
 		routes := branchExists(openRoutes())
