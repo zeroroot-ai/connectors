@@ -101,7 +101,7 @@ PagerDuty is class `paging` and has its own tools: `trigger_alert`, `acknowledge
 
 ## Not built
 
-- Trellix (gibson#1542): the API reference of Trellix did not load from the workstation of the author, and no public source gave the request and response of an isolate call.
+- Trellix isolate and release (gibson#1561): the isolate call is documented, and the release call is not confirmed. The `trellix` server has the read tools only. See its README.
 - Microsoft Intune (gibson#1543): Microsoft Graph v1.0 has no call that starts a patch for one device, reads its result or rolls it back. The update profiles are in the beta API and they target groups.
 
 ## License
