@@ -243,3 +243,15 @@ func TestHandlerHealth(t *testing.T) {
 		t.Errorf("health = %d %s", rr.Code, rr.Body)
 	}
 }
+
+func TestGraphError(t *testing.T) {
+	body := `{"error":{"code":"Request_ResourceNotFound","message":"Resource 'x' does not exist."}}`
+	got := GraphError("get thing", &APIError{Status: 404, Body: body}).Error()
+	if got != "get thing: Graph answered HTTP 404, Request_ResourceNotFound: Resource 'x' does not exist." {
+		t.Errorf("got %q", got)
+	}
+	// An answer with no Graph error object falls back to the plain error.
+	if got := GraphError("get thing", &APIError{Status: 500, Body: "oops"}).Error(); !strings.Contains(got, "HTTP 500") {
+		t.Errorf("got %q", got)
+	}
+}
