@@ -80,12 +80,8 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	base := "/beta/admin/windows/updates/"
 	const qualityType = "#microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry"
 	switch {
-	case r.Method == http.MethodGet && r.URL.Path == base+"catalog/entries":
-		m.serveCatalog(w, r)
-	case r.Method == http.MethodGet && r.URL.Path == base+"catalog/entries/"+entryID:
-		_, _ = w.Write([]byte(`{"@odata.type":"` + qualityType + `","id":"` + entryID + `","isExpeditable":` + strconv.FormatBool(!m.notExpedite) + `}`))
-	case r.Method == http.MethodGet && r.URL.Path == base+"catalog/entries/c1dec151-c151-c1de-51c1-dec151c1dec1":
-		_, _ = w.Write([]byte(`{"@odata.type":"#microsoft.graph.windowsUpdates.featureUpdateCatalogEntry","id":"c1dec151-c151-c1de-51c1-dec151c1dec1"}`))
+	case strings.HasPrefix(r.URL.Path, base+"catalog/entries"):
+		m.serveEntries(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == base+"deployments":
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(m.deployment))
@@ -158,7 +154,7 @@ func sameJSON(t *testing.T, got, golden string) {
 
 func TestStartPatchDeployment(t *testing.T) {
 	m, call, _ := setup(t)
-	isErr, text, res := call("start_patch_deployment", map[string]any{"entra_device_id": devID, "catalog_entry_id": entryID, "kind": "quality"})
+	isErr, text, res := call("start_patch_deployment", map[string]any{"entra_device_id": devID, "catalog_entry_id": entryID, "kind": "quality", "restart_allowed": true, "days_until_forced_reboot": 2})
 	if isErr {
 		t.Fatal(text)
 	}
@@ -190,7 +186,7 @@ func TestStartPatchDeployment(t *testing.T) {
 func TestStartDeletesTheDeploymentWhenTheAudienceFails(t *testing.T) {
 	m, call, _ := setup(t)
 	m.failAudience = true
-	isErr, text, _ := call("start_patch_deployment", map[string]any{"entra_device_id": devID, "catalog_entry_id": entryID, "kind": "quality"})
+	isErr, text, _ := call("start_patch_deployment", map[string]any{"entra_device_id": devID, "catalog_entry_id": entryID, "kind": "quality", "restart_allowed": true, "days_until_forced_reboot": 2})
 	if !isErr || !strings.Contains(text, "device not found") || !m.deleted {
 		t.Errorf("isErr=%v deleted=%v %s", isErr, m.deleted, text)
 	}
@@ -260,7 +256,7 @@ func TestShapeChange(t *testing.T) {
 	if isErr, text, _ := call("get_patch_deployment", map[string]any{"deployment_id": depID}); !isErr || !strings.Contains(text, "new shape") {
 		t.Errorf("get: isErr=%v %s", isErr, text)
 	}
-	if isErr, text, _ := call("start_patch_deployment", map[string]any{"entra_device_id": devID, "catalog_entry_id": entryID, "kind": "quality"}); !isErr || !strings.Contains(text, "new shape") {
+	if isErr, text, _ := call("start_patch_deployment", map[string]any{"entra_device_id": devID, "catalog_entry_id": entryID, "kind": "quality", "restart_allowed": true, "days_until_forced_reboot": 2}); !isErr || !strings.Contains(text, "new shape") {
 		t.Errorf("start: isErr=%v %s", isErr, text)
 	}
 	for _, c := range m.calls {
@@ -387,7 +383,7 @@ func TestStartFeatureUpdateHasNoSettings(t *testing.T) {
 func TestStartChecksTheCatalogEntry(t *testing.T) {
 	m, call, _ := setup(t)
 	m.notExpedite = true
-	args := map[string]any{"entra_device_id": devID, "catalog_entry_id": entryID, "kind": "quality"}
+	args := map[string]any{"entra_device_id": devID, "catalog_entry_id": entryID, "kind": "quality", "restart_allowed": true, "days_until_forced_reboot": 2}
 	if isErr, text, _ := call("start_patch_deployment", args); !isErr || !strings.Contains(text, "cannot be expedited") {
 		t.Errorf("not expeditable: isErr=%v %s", isErr, text)
 	}
@@ -434,7 +430,7 @@ func TestInputValidation(t *testing.T) {
 				t.Errorf("%s accepted %q", tool, b)
 			}
 		}
-		if isErr, _, _ := call("start_patch_deployment", map[string]any{"entra_device_id": b, "catalog_entry_id": entryID, "kind": "quality"}); !isErr {
+		if isErr, _, _ := call("start_patch_deployment", map[string]any{"entra_device_id": b, "catalog_entry_id": entryID, "kind": "quality", "restart_allowed": true, "days_until_forced_reboot": 2}); !isErr {
 			t.Errorf("start accepted device %q", b)
 		}
 		if isErr, _, _ := call("start_patch_deployment", map[string]any{"entra_device_id": devID, "catalog_entry_id": b, "kind": "quality"}); !isErr {
@@ -498,5 +494,75 @@ func (m *mock) serveCatalog(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"value":[` + feature + `]}`))
 	default:
 		_, _ = w.Write([]byte(`{"value":[` + feature + `,` + quality + `]}`))
+	}
+}
+
+// serveEntries answers the catalog calls: the list, and one entry by id.
+func (m *mock) serveEntries(w http.ResponseWriter, r *http.Request) {
+	const base = "/beta/admin/windows/updates/"
+	const qualityType = "#microsoft.graph.windowsUpdates.qualityUpdateCatalogEntry"
+	switch {
+	case r.URL.Path == base+"catalog/entries":
+		m.serveCatalog(w, r)
+	case r.URL.Path == base+"catalog/entries/"+entryID:
+		_, _ = w.Write([]byte(`{"@odata.type":"` + qualityType + `","id":"` + entryID + `","isExpeditable":` + strconv.FormatBool(!m.notExpedite) + `}`))
+	case r.URL.Path == base+"catalog/entries/c1dec151-c151-c1de-51c1-dec151c1dec1":
+		_, _ = w.Write([]byte(`{"@odata.type":"#microsoft.graph.windowsUpdates.featureUpdateCatalogEntry","id":"c1dec151-c151-c1de-51c1-dec151c1dec1"}`))
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// The restart constraint of the mission: kind quality needs both inputs, a false
+// restart_allowed is refused before any call, and days go to the user experience
+// settings. Kind feature takes neither input.
+func TestStartQualityNeedsTheRestartInputs(t *testing.T) {
+	m, call, _ := setup(t)
+	base := func() map[string]any {
+		return map[string]any{"entra_device_id": devID, "catalog_entry_id": entryID, "kind": "quality"}
+	}
+	for name, mutate := range map[string]func(map[string]any){
+		"no inputs":          func(a map[string]any) {},
+		"no days":            func(a map[string]any) { a["restart_allowed"] = true },
+		"no restart_allowed": func(a map[string]any) { a["days_until_forced_reboot"] = 2 },
+		"days too high":      func(a map[string]any) { a["restart_allowed"], a["days_until_forced_reboot"] = true, 8 },
+		"days negative":      func(a map[string]any) { a["restart_allowed"], a["days_until_forced_reboot"] = true, -1 },
+	} {
+		a := base()
+		mutate(a)
+		if isErr, _, _ := call("start_patch_deployment", a); !isErr {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// restart_allowed false is refused with a clear reason, and nothing is written.
+	a := base()
+	a["restart_allowed"], a["days_until_forced_reboot"] = false, 2
+	isErr, text, _ := call("start_patch_deployment", a)
+	if !isErr || !strings.Contains(text, "does not allow a restart") || !strings.Contains(text, "Nothing was deployed") {
+		t.Errorf("restart_allowed false: isErr=%v %s", isErr, text)
+	}
+	feature := map[string]any{"entra_device_id": devID, "catalog_entry_id": "c1dec151-c151-c1de-51c1-dec151c1dec1", "kind": "feature", "restart_allowed": true}
+	if isErr, _, _ := call("start_patch_deployment", feature); !isErr {
+		t.Error("kind feature accepted a restart input")
+	}
+	for _, c := range m.calls {
+		if strings.HasPrefix(c, "POST") {
+			t.Errorf("a write reached Graph: %s", c)
+		}
+	}
+	// With restart allowed, 0 and 7 days pass and go in the settings.
+	for _, days := range []int{0, 7} {
+		m.calls, m.bodies = nil, nil
+		a := base()
+		a["restart_allowed"], a["days_until_forced_reboot"] = true, days
+		if isErr, text, _ := call("start_patch_deployment", a); isErr {
+			t.Fatalf("days %d: %s", days, text)
+		}
+		var body map[string]any
+		_ = json.Unmarshal([]byte(m.bodies[1]), &body)
+		ux := body["settings"].(map[string]any)["userExperience"].(map[string]any)
+		if ux["daysUntilForcedReboot"] != float64(days) {
+			t.Errorf("days %d: userExperience = %v", days, ux)
+		}
 	}
 }

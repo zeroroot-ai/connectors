@@ -47,7 +47,16 @@ A deployment that Intune created can fail on the audience calls. Microsoft lists
 
 `list_catalog_entries` filters on the server with `$filter=isof('microsoft.graph.windowsUpdates.<kind>UpdateCatalogEntry')`, which the Microsoft page https://learn.microsoft.com/en-us/graph/windowsupdates-deploy-expedited-update shows for this call. It sends `$top` with the limit. When Graph answers with an `@odata.nextLink`, the tool follows it for at most 5 pages. It never uses the link as a URL. It takes the paging parameter (`$skiptoken` or `$skip`) and sends it to the fixed base URL. The result has `has_more`, which is true when more entries exist than the limit. The tool drops an entry of another type as a second defense.
 
+## Restart constraint
+
 A quality update is deployed as an expedited update. The Microsoft page "Deploy an expedited quality update using Windows Autopatch" shows a quality deployment with `settings.expedite` (`isExpedited: true`, `isReadinessTest: false`) and shows no quality deployment without it. So `start_patch_deployment` with `kind: quality` sends that setting. An expedited update installs as fast as possible and overrides the restart settings of the device policy. Before it creates anything, the tool reads the catalog entry and refuses an entry whose type is not the kind, and a quality entry with `isExpeditable` false. A feature update has no settings.
+
+An expedited update overrides the restart policy of the device. The owner decided that the restart must be configurable, as the mission restart constraint (`mission_definition.proto` of the SDK). So `start_patch_deployment` with `kind: quality` has two required inputs. The agent sets them from the restart constraint of the mission.
+
+- `restart_allowed` (bool). When it is false, the tool refuses the deployment with the reason "the restart constraint of the mission does not allow a restart", before any call to Graph. Nothing is deployed.
+- `days_until_forced_reboot` (0 to 7). The tool sends it as `settings.userExperience.daysUntilForcedReboot`. It is the number of days after the install in which the user controls the restart. Windows restarts the device when the days end. The Graph page (https://learn.microsoft.com/en-us/graph/api/resources/windowsupdates-userexperiencesettings) types the field as Int32 and states no range. The example of the expedite page uses 2. The range of 0 to 7 is the bound of this tool.
+
+A call with `kind: quality` and a missing input is refused. A call with `kind: feature` and one of these inputs is refused, because a feature update has no restart input here.
 
 Each deployment tool that changes or reads a deployment first reads the audience, and then changes the deployment. Another person or tool can change the audience between the two calls. The check is a read followed by a change, not a lock. The member must be of the type `#microsoft.graph.windowsUpdates.azureADDevice`. A member of the type `updatableAssetGroup`, or an answer with no type, is refused, because a group counts as one member and can hold many devices. The shape check also needs `@odata.type` in the answer of a deployment, which the examples of the reference show. When Graph leaves it out, the tool stops with the shape error, which is the safe side.
 

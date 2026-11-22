@@ -99,6 +99,9 @@ func (v *service) register(s *mcp.Server, log *slog.Logger) {
 		Description: "Patch action. Start a Windows Update deployment of one catalog update for exactly one device. " +
 			"The audience of the deployment holds that device and no other. Windows Update offers the update to " +
 			"the device. The device installs it when it applies the offer. " +
+			"Kind quality is an expedited update: Windows installs it as fast as possible and overrides the restart policy of the device. " +
+			"So kind quality needs restart_allowed and days_until_forced_reboot (0 to 7), from the restart constraint of the mission. " +
+			"When restart_allowed is false, the tool refuses and deploys nothing. Kind feature takes neither input. " +
 			"No tool undoes this action: an installed update stays installed. " +
 			"pause_patch_deployment stops the offer before the device applies it, and it does not uninstall anything. " +
 			"Read the result with get_patch_deployment.",
@@ -307,6 +310,41 @@ type startInput struct {
 	DeviceID       string `json:"entra_device_id" jsonschema:"Microsoft Entra device id of the one device: a GUID. It is the device id and not the object id."`
 	CatalogEntryID string `json:"catalog_entry_id" jsonschema:"id of the update, from list_catalog_entries: a GUID"`
 	Kind           string `json:"kind" jsonschema:"quality or feature. It must match the kind of the catalog entry."`
+	// RestartAllowed and DaysUntilForcedReboot come from the mission restart
+	// constraint. They are required for kind quality and refused for kind
+	// feature. A quality update is an expedited update, and it overrides the
+	// restart policy of the device.
+	RestartAllowed        *bool `json:"restart_allowed,omitempty" jsonschema:"required for kind quality: true when the mission allows a restart of the device. When it is false, the tool refuses a quality deployment."`
+	DaysUntilForcedReboot *int  `json:"days_until_forced_reboot,omitempty" jsonschema:"required for kind quality: the days after the install in which the user controls the restart, 0 to 7. Windows restarts the device when the days end."`
+}
+
+// maxRebootDays is the largest days_until_forced_reboot that the tool sends.
+// The Graph page gives the field as an Int32 and states no range. The example
+// uses 2. The tool allows 0 to 7 as its own bound.
+const maxRebootDays = 7
+
+// checkRestart enforces the restart constraint of the mission. An expedited
+// quality update overrides the restart policy of the device, so the caller
+// must say that a restart is allowed and give the grace period. Kind feature
+// has no restart input.
+func checkRestart(in startInput) error {
+	if in.Kind != "quality" {
+		if in.RestartAllowed != nil || in.DaysUntilForcedReboot != nil {
+			return fmt.Errorf("%w: restart_allowed and days_until_forced_reboot are for kind quality only", kit.ErrInvalidInput)
+		}
+		return nil
+	}
+	if in.RestartAllowed == nil || in.DaysUntilForcedReboot == nil {
+		return fmt.Errorf("%w: kind quality needs restart_allowed and days_until_forced_reboot, from the restart constraint of the mission", kit.ErrInvalidInput)
+	}
+	if !*in.RestartAllowed {
+		return fmt.Errorf("%w: refused: the restart constraint of the mission does not allow a restart (restart_allowed is false), "+
+			"and an expedited quality update overrides the restart policy of the device. Nothing was deployed", kit.ErrInvalidInput)
+	}
+	if err := kit.CheckRange("days_until_forced_reboot", *in.DaysUntilForcedReboot, 0, maxRebootDays); err != nil {
+		return fmt.Errorf("check days_until_forced_reboot: %w", err)
+	}
+	return nil
 }
 
 type deploymentOutput struct {
@@ -331,7 +369,7 @@ func (o *deploymentOutput) fill(d *deployment) {
 
 // createBody is the body of the create call. The audience stays empty until
 // the second call adds the one device. An empty audience gets no offer.
-func createBody(kind, entryID string) map[string]any {
+func createBody(kind, entryID string, rebootDays int) map[string]any {
 	typ := entryTypes[kind]
 	body := map[string]any{
 		"@odata.type": typeDeployment,
@@ -348,6 +386,8 @@ func createBody(kind, entryID string) map[string]any {
 		body["settings"] = map[string]any{
 			"@odata.type": typeDeploySettings,
 			"expedite":    map[string]any{"isExpedited": true, "isReadinessTest": false},
+			// The restart grace period. Windows restarts the device when it ends.
+			"userExperience": map[string]any{"daysUntilForcedReboot": rebootDays},
 		}
 	}
 	return body
@@ -380,6 +420,9 @@ func (v *service) start(ctx context.Context, _ *mcp.CallToolRequest, in startInp
 	if err := kit.CheckString("catalog_entry_id", in.CatalogEntryID, 36, kit.UUID); err != nil {
 		return nil, out, err
 	}
+	if err := checkRestart(in); err != nil {
+		return nil, out, err
+	}
 	if err := v.checkEntry(ctx, in, typ); err != nil {
 		return nil, out, err
 	}
@@ -387,7 +430,7 @@ func (v *service) start(ctx context.Context, _ *mcp.CallToolRequest, in startInp
 	// A create call is not repeated: a repeat would make a second deployment.
 	err := v.client.Do(ctx, kit.Request{
 		Method: http.MethodPost, Path: kit.Path("admin", "windows", "updates", "deployments"),
-		JSON: createBody(in.Kind, in.CatalogEntryID),
+		JSON: createBody(in.Kind, in.CatalogEntryID, rebootDays(in)),
 	}, &d)
 	if err != nil {
 		return nil, out, kit.GraphError("create deployment", err)
@@ -559,4 +602,11 @@ func (v *service) checkEntry(ctx context.Context, in startInput, typ string) err
 		return fmt.Errorf("%w: this quality update cannot be expedited (isExpeditable is false), and the tool deploys a quality update as an expedited update", kit.ErrInvalidInput)
 	}
 	return nil
+}
+
+func rebootDays(in startInput) int {
+	if in.DaysUntilForcedReboot == nil {
+		return 0
+	}
+	return *in.DaysUntilForcedReboot
 }
