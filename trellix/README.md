@@ -15,7 +15,7 @@ The isolate call is documented: `POST /edr/v2/remediation/host` with the action 
 | `TRELLIX_API_KEY` | Required. The API key. The server sends it as `x-api-key`. It comes from the onboarding e-mail or the API Access Management page. |
 | `TRELLIX_API_URL` | Optional. The gateway. The default is `https://api.manage.trellix.com`. The onboarding e-mail gives the gateway of your tenant. |
 | `TRELLIX_IAM_URL` | Optional. The default is `https://iam.mcafee-cloud.com/iam/v1.1/token`. |
-| `TRELLIX_SCOPES` | Optional. The scopes of the token. The default is the list of the Trellix page: `epo.evt.r,epo.device.r,mi.user.investigate,soc.rts.c,soc.rts.r,soc.hts.r`. |
+| `TRELLIX_SCOPES` | Optional. The scopes of the token. The default is the list of the Trellix page: `epo.evt.r,epo.device.r,mi.user.investigate,soc.rts.r,soc.hts.r`. It is the list of the Trellix page without `soc.rts.c`, which creates. |
 | `TRELLIX_TIMEOUT` | Optional. Time limit of one vendor call. The default is `20s`. |
 | `LISTEN_ADDR` | Optional. The default is `:8080`. |
 
@@ -40,7 +40,7 @@ References: https://docs.trellix.com/docs/get-alerts-1.md, https://docs.trellix.
 
 No call to a live Trellix tenant. The tests use an `httptest` mock that follows the pages above. The mock does not prove these points:
 
-- Which scopes the two reads need. The Trellix page says to select all EDR scopes. The default list includes `soc.rts.c`, which can create. Cut the list to the least that works on your tenant.
+- Which scopes the two reads need. The Trellix page says to select all EDR scopes. The default list is the Trellix list without `soc.rts.c`, which can create. Cut the list to the least that works on your tenant, and set `TRELLIX_SCOPES`.
 - That a comma between scopes is accepted by the token endpoint. The page of Trellix writes the list with commas, and the OAuth standard uses a space.
 - The maximum value of `page[limit]`. The tool allows 100.
 - The format of an error body. The tool shows the HTTP status and the start of the body.

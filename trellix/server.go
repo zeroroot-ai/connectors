@@ -36,7 +36,7 @@ import (
 const (
 	defaultAPI    = "https://api.manage.trellix.com"
 	defaultIAMURL = "https://iam.mcafee-cloud.com/iam/v1.1/token"
-	defaultScopes = "epo.evt.r,epo.device.r,mi.user.investigate,soc.rts.c,soc.rts.r,soc.hts.r"
+	defaultScopes = "epo.evt.r,epo.device.r,mi.user.investigate,soc.rts.r,soc.hts.r"
 	maxLimit      = 100
 	defaultLimit  = 25
 	maxOffset     = 100000
@@ -257,6 +257,14 @@ type hostsInput struct {
 	page
 }
 
+// vendorIface is a network interface as host-info shows it. The page names the
+// key macAddress.
+type vendorIface struct {
+	Name       string `json:"name"`
+	MACAddress string `json:"macAddress"`
+	IP         string `json:"ip"`
+}
+
 type iface struct {
 	Name string `json:"name,omitempty"`
 	MAC  string `json:"mac,omitempty"`
@@ -308,7 +316,7 @@ func (v *service) listHosts(ctx context.Context, _ *mcp.CallToolRequest, in host
 				OS           struct {
 					Desc string `json:"desc"`
 				} `json:"os"`
-				NetInterfaces []iface `json:"netInterfaces"`
+				NetInterfaces []vendorIface `json:"netInterfaces"`
 			} `json:"attributes"`
 		} `json:"data"`
 	}
@@ -317,8 +325,12 @@ func (v *service) listHosts(ctx context.Context, _ *mcp.CallToolRequest, in host
 	}
 	for _, d := range resp.Data {
 		a := d.Attributes
+		ifaces := make([]iface, 0, len(a.NetInterfaces))
+		for _, n := range a.NetInterfaces {
+			ifaces = append(ifaces, iface{Name: n.Name, MAC: n.MACAddress, IP: n.IP})
+		}
 		out.Hosts = append(out.Hosts, host{
-			AgentGUID: a.AGuid, HostName: a.Hostname, HostOS: a.HostOS, OSDesc: a.OS.Desc, LastBootTime: a.LastBootTime, Interfaces: a.NetInterfaces,
+			AgentGUID: a.AGuid, HostName: a.Hostname, HostOS: a.HostOS, OSDesc: a.OS.Desc, LastBootTime: a.LastBootTime, Interfaces: ifaces,
 		})
 	}
 	out.Count, out.Total = len(out.Hosts), resp.Meta.TotalResourceCount

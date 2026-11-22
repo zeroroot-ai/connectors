@@ -41,7 +41,7 @@ const alertsJS = `{"jsonapi":{"version":"1.0"},"meta":{},"data":[{"type":"alerts
 
 const hostsJS = `{"jsonapi":{"version":"1.0"},"meta":{"totalResourceCount":3},"data":[{"type":"hostInfo","attributes":{` +
 	`"aGuid":"` + agent + `","hostname":"3M4W10RS5X64","os":{"major":10,"minor":0,"build":17763,"sp":"","desc":"Windows 10"},` +
-	`"lastBootTime":"2024-10-10T11:51:04Z","netInterfaces":[{"name":"Ethernet0","macAddress":"00:50:56:a4:31:d9","mac":"00:50:56:a4:31:d9","ip":"10.26.22.121","type":6}],` +
+	`"lastBootTime":"2024-10-10T11:51:04Z","netInterfaces":[{"name":"Ethernet0","macAddress":"00:50:56:a4:31:d9","ip":"10.26.22.121","type":6}],` +
 	`"traceExtendedVisibility":0,"hostOs":"windows"}}],"links":{"next":"/x"}}`
 
 func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -152,7 +152,7 @@ func TestListHosts(t *testing.T) {
 	var out hostsOutput
 	kittest.Structured(t, res, &out)
 	if out.Count != 1 || out.Total != 3 || !out.HasMore || out.Hosts[0].AgentGUID != agent || out.Hosts[0].OSDesc != "Windows 10" ||
-		out.Hosts[0].HostOS != "windows" || len(out.Hosts[0].Interfaces) != 1 || out.Hosts[0].Interfaces[0].IP != "10.26.22.121" {
+		out.Hosts[0].HostOS != "windows" || len(out.Hosts[0].Interfaces) != 1 || out.Hosts[0].Interfaces[0].IP != "10.26.22.121" || out.Hosts[0].Interfaces[0].MAC != "00:50:56:a4:31:d9" {
 		t.Errorf("out = %+v", out)
 	}
 	q := m.queries[0]
@@ -249,5 +249,20 @@ func TestConfig(t *testing.T) {
 		if _, err := build(kit.NewEnvFrom(env), log); err == nil {
 			t.Errorf("%s accepted", name)
 		}
+	}
+}
+
+// The default scopes hold no scope that creates something. A scope that ends
+// with .c is a create scope on the Trellix page.
+func TestDefaultScopesAreRead(t *testing.T) {
+	for _, sc := range strings.Split(defaultScopes, ",") {
+		if strings.HasSuffix(sc, ".c") || strings.HasSuffix(sc, ".w") {
+			t.Errorf("the default scopes hold %s", sc)
+		}
+	}
+	m, call, _ := setup(t)
+	call("list_hosts", map[string]any{})
+	if strings.Contains(m.tokenForm.Get("scope"), "soc.rts.c") {
+		t.Errorf("scope = %q", m.tokenForm.Get("scope"))
 	}
 }
