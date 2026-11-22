@@ -55,7 +55,7 @@ The input and the result follow `fixloop/connector.go`. Where GitLab differs, th
 1. The merge request is open.
 2. The head pipeline has the status `success` and ran for the current head commit.
 3. `detailed_merge_status` is `mergeable`.
-4. The `sha` argument, when given, is the head commit.
+4. The argument `expected_head_sha`, when given, is the head commit that the caller tested. `head_sha` of `merge_request_state` and of `open_merge_request` gives it. When the head is another commit, the tool merges nothing and the reason says `the head ... moved: expected <sha>, now <sha>`. The tool sends the head sha that it checked to the host.
 
 The tool sends the head sha that it checked in the merge call. GitLab refuses the merge with HTTP 409 when a push changed the head after the check. The result then has `merged: false` and the state `open`.
 

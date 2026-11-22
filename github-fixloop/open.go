@@ -164,7 +164,7 @@ func (v *service) openMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 func (v *service) openResult(r prRef, pr *ghPR, in fixloop.OpenInput, existing bool) fixloop.OpenResult {
 	return fixloop.OpenResult{
 		MergeRequest: prRef{r.owner, r.repo, pr.Number}.key(), URL: pr.HTMLURL,
-		SourceBranch: in.SourceBranch, TargetBranch: in.TargetBranch,
+		SourceBranch: in.SourceBranch, TargetBranch: in.TargetBranch, HeadSHA: pr.Head.SHA,
 		CreatedAt: fixloop.Time(fixloop.ParseTime(pr.CreatedAt)), Existing: existing,
 	}
 }

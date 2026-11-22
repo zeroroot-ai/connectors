@@ -57,7 +57,7 @@ The input and the result follow `fixloop/connector.go`. Where GitHub differs, th
 1. The pull request is open.
 2. The head commit has `pipeline_green`.
 3. `mergeable_state` is `clean` or `has_hooks`. When GitHub has not computed it yet, the tool reads the pull request again after one second. When that second read shows a different head, the tool does not merge.
-4. The `sha` argument, when given, is the head commit.
+4. The argument `expected_head_sha`, when given, is the head commit that the caller tested. `head_sha` of `merge_request_state` and of `open_merge_request` gives it. When the head is another commit, the tool merges nothing and the reason says `the head ... moved: expected <sha>, now <sha>`. The tool sends the head sha that it checked to the host.
 
 The tool sends the head sha that it checked in the merge call. GitHub refuses the merge with HTTP 409 when a push changed the head after the check. The result then has `merged: false` and the state `open`. The optional `merge_method` is `merge` or `squash`. Without it, the tool uses the first method that the repository allows: `merge`, then `squash`. It reads `allow_merge_commit` and `allow_squash_merge` of the repository before each merge. The tool does not offer a rebase merge, because `revert_merge_request` cannot revert one.
 

@@ -177,7 +177,7 @@ func (v *service) action(ctx context.Context, project, target string, c fixloop.
 func (v *service) openResult(project string, mr *glMR, in fixloop.OpenInput, existing bool) fixloop.OpenResult {
 	return fixloop.OpenResult{
 		MergeRequest: refKey(project, mr.IID), URL: mr.WebURL,
-		SourceBranch: in.SourceBranch, TargetBranch: in.TargetBranch,
+		SourceBranch: in.SourceBranch, TargetBranch: in.TargetBranch, HeadSHA: mr.SHA,
 		CreatedAt: fixloop.Time(fixloop.ParseTime(mr.CreatedAt)), Existing: existing,
 	}
 }

@@ -253,7 +253,7 @@ func TestMergeRefusesAFork(t *testing.T) {
 			"GET " + api + mr7:            reply(200, body),
 			"PUT " + api + mr7 + "/merge": reply(200, mergedMR),
 		})
-		isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "sha": headSHA})
+		isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 		if isErr {
 			t.Fatalf("%s: %s", name, text)
 		}
@@ -357,7 +357,7 @@ func TestMergeSendsHeadSHA(t *testing.T) {
 		"GET " + api + mr7:            reply(200, openMR("success", "mergeable")),
 		"PUT " + api + mr7 + "/merge": reply(200, mergedMR),
 	})
-	isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "sha": headSHA})
+	isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
 	if isErr {
 		t.Fatal(text)
 	}
@@ -391,7 +391,7 @@ func TestMergeNotAttempted(t *testing.T) {
 		})
 		args := map[string]any{"merge_request": ref}
 		if c.sha != "" {
-			args["sha"] = c.sha
+			args["expected_head_sha"] = c.sha
 		}
 		isErr, text, out := call("merge_merge_request", args)
 		if isErr || out["merged"] != false || out["state"] != c.wantState || !strings.Contains(out["reason"].(string), c.reason) {
@@ -853,7 +853,7 @@ func TestInputValidationNeverReachesGitLab(t *testing.T) {
 			}
 		}
 	}
-	if isErr, _, _ := call("merge_merge_request", map[string]any{"merge_request": ref, "sha": "xyz"}); !isErr {
+	if isErr, _, _ := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": "xyz"}); !isErr {
 		t.Error("accepted a bad sha")
 	}
 	if len(m.calls) != 0 {
@@ -1000,7 +1000,7 @@ func TestMergeChecksTheHeadBeforeTheRefusal(t *testing.T) {
 	_, call := setup(t, map[string]func(http.ResponseWriter, *http.Request, map[string]any){
 		"GET " + api + mr7: reply(200, openMR("success", "not_approved")),
 	})
-	_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref, "sha": "cccccccccccccccccccccccccccccccccccccccc"})
+	_, _, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": "cccccccccccccccccccccccccccccccccccccccc"})
 	reason, _ := out["reason"].(string)
 	if !strings.Contains(reason, "A push changed it") {
 		t.Errorf("out = %v", out)

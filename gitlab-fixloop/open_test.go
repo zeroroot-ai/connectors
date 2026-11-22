@@ -51,7 +51,7 @@ func TestOpenMergeRequest(t *testing.T) {
 		t.Fatal(text)
 	}
 	if out["merge_request"] != ref || out["url"] != "https://gitlab.example.com/acme/shop/-/merge_requests/7" ||
-		out["source_branch"] != srcBranch || out["created_at"] != "2026-11-20T07:30:00Z" || out["existing"] != nil {
+		out["source_branch"] != srcBranch || out["created_at"] != "2026-11-20T07:30:00Z" || out["head_sha"] != headSHA || out["existing"] != nil {
 		t.Errorf("out = %v", out)
 	}
 	checkOpenWrites(t, m)
@@ -233,5 +233,30 @@ func TestCloseAnnotations(t *testing.T) {
 	kittest.AssertReversible(t, tools, "open_merge_request", "close_merge_request")
 	if a := tools["close_merge_request"].Annotations; a == nil || a.ReadOnlyHint || a.DestructiveHint == nil || *a.DestructiveHint {
 		t.Errorf("close annotations = %+v", a)
+	}
+}
+
+// TestMergeRefusesAMovedHead makes sure that the sha from open_merge_request
+// pins the merge: when a push moved the head, nothing is merged and the reason
+// names both shas. When the head is the same, GitLab gets that sha.
+func TestMergeRefusesAMovedHead(t *testing.T) {
+	const moved = "cccccccccccccccccccccccccccccccccccccccc"
+	movedMR := strings.Replace(openMR("success", "mergeable"), `"sha":"`+headSHA+`","merge_commit_sha"`, `"sha":"`+moved+`","merge_commit_sha"`, 1)
+	m, call := setup(t, routeMap{"GET " + api + mr7: reply(200, movedMR)})
+	isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
+	reason, _ := out["reason"].(string)
+	if isErr || out["merged"] != false || !strings.Contains(reason, "moved: expected "+headSHA+", now "+moved) {
+		t.Fatalf("isErr=%v out=%v %s", isErr, out, text)
+	}
+	if m.called("PUT "+api+mr7+"/merge") != 0 {
+		t.Error("the tool merged a moved head")
+	}
+	m, call = setup(t, routeMap{
+		"GET " + api + mr7:            reply(200, openMR("success", "mergeable")),
+		"PUT " + api + mr7 + "/merge": reply(200, mergedMR),
+	})
+	call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
+	if got := m.bodies["PUT "+api+mr7+"/merge"]["sha"]; got != headSHA {
+		t.Errorf("GitLab got sha %v", got)
 	}
 }

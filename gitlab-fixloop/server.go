@@ -381,7 +381,7 @@ func (v *service) mergeRequestState(ctx context.Context, _ *mcp.CallToolRequest,
 
 type mergeInput struct {
 	MergeRequest string `json:"merge_request" jsonschema:"URL of the merge request, or its reference group/project!12"`
-	SHA          string `json:"sha,omitempty" jsonschema:"the head sha that the pipeline tested. The tool refuses the merge when the head is another commit."`
+	SHA          string `json:"expected_head_sha,omitempty" jsonschema:"the head sha that the pipeline tested, from head_sha of merge_request_state or open_merge_request. The tool refuses the merge when the head is another commit, and sends the head sha to GitLab."`
 }
 
 func (v *service) mergeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in mergeInput) (*mcp.CallToolResult, fixloop.MergeResult, error) {
@@ -433,7 +433,7 @@ func (v *service) tryMerge(ctx context.Context, project string, iid int, mr *glM
 		st.Reason = "the merge request is closed"
 		return st, false, nil
 	case wantSHA != "" && !strings.EqualFold(wantSHA, mr.SHA):
-		st.Reason = "the head of the merge request is not the sha that was tested. A push changed it."
+		st.Reason = "the head of the merge request moved: expected " + wantSHA + ", now " + mr.SHA + ". A push changed it."
 		return st, false, nil
 	case st.State == fixloop.Refused:
 		return st, false, nil

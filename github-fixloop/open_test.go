@@ -57,7 +57,7 @@ func TestOpenMergeRequest(t *testing.T) {
 		t.Fatal(text)
 	}
 	if out["merge_request"] != ref || out["url"] != "https://github.com/acme/shop/pull/7" || out["source_branch"] != srcBranch ||
-		out["created_at"] != "2026-11-20T06:30:00Z" || out["existing"] != nil {
+		out["created_at"] != "2026-11-20T06:30:00Z" || out["head_sha"] != headSHA || out["existing"] != nil {
 		t.Errorf("out = %v", out)
 	}
 	checkOpenWrites(t, m)
@@ -241,5 +241,32 @@ func TestCloseAnnotations(t *testing.T) {
 	kittest.AssertReversible(t, tools, "open_merge_request", "close_merge_request")
 	if a := tools["close_merge_request"].Annotations; a == nil || a.ReadOnlyHint || a.DestructiveHint == nil || *a.DestructiveHint {
 		t.Errorf("close annotations = %+v", a)
+	}
+}
+
+// TestMergeRefusesAMovedHead makes sure that the sha from open_merge_request
+// pins the merge: when a push moved the head, nothing is merged and the reason
+// names both shas. When the head is the same, GitHub gets that sha.
+func TestMergeRefusesAMovedHead(t *testing.T) {
+	const moved = "dddddddddddddddddddddddddddddddddddddddd"
+	m, call := setup(t, merge(repoRules(), map[string]handler{
+		"GET " + pr7: reply(200, pullJSON("open", false, "true", "clean", moved)),
+		"GET " + repo + "/commits/" + moved + "/check-runs": reply(200, `{"total_count":1,"check_runs":[`+greenRun+`]}`),
+		"GET " + repo + "/commits/" + moved + "/status":     reply(200, combinedJSON("pending", 0, 0, 0)),
+	}))
+	isErr, text, out := call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
+	reason, _ := out["reason"].(string)
+	if isErr || out["merged"] != false || out["head_sha"] != moved || !strings.Contains(reason, "moved: expected "+headSHA+", now "+moved) {
+		t.Fatalf("isErr=%v out=%v %s", isErr, out, text)
+	}
+	if m.called("PUT "+pr7+"/merge") != 0 {
+		t.Error("the tool merged a moved head")
+	}
+	m, call = setup(t, merge(checks(greenRun, "success", 1), map[string]handler{
+		"GET " + pr7: reply(200, openPR("clean")), "PUT " + pr7 + "/merge": reply(200, `{"merged":true}`),
+	}))
+	call("merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
+	if got := m.bodies["PUT "+pr7+"/merge"]["sha"]; got != headSHA {
+		t.Errorf("GitHub got sha %v", got)
 	}
 }

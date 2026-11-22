@@ -53,6 +53,10 @@ type OpenResult struct {
 	SourceBranch string `json:"source_branch"`
 	TargetBranch string `json:"target_branch"`
 	CreatedAt    string `json:"created_at"`
+	// HeadSHA is the head commit of the merge request. A caller passes it as
+	// expected_head_sha to merge_merge_request, so the host refuses the merge
+	// when the head moved.
+	HeadSHA string `json:"head_sha"`
 	// Existing is true when the tool found an open merge request for the
 	// branch and changed nothing.
 	Existing bool `json:"existing,omitempty"`
