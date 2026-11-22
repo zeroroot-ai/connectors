@@ -46,10 +46,10 @@ const (
 )
 
 var (
-	incidentFormat = regexp.MustCompile(`^[0-9]{1,20}$`)
+	incidentFormat = regexp.MustCompile(`^\d{1,20}$`)
 	endpointFormat = regexp.MustCompile(`^[A-Za-z0-9-]{8,64}$`)
 	hostFormat     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$`)
-	keyIDFormat    = regexp.MustCompile(`^[0-9]{1,10}$`)
+	keyIDFormat    = regexp.MustCompile(`^\d{1,10}$`)
 )
 
 var (

@@ -96,8 +96,9 @@ func setup(t *testing.T) (srv *mock, call func(string, map[string]any) (isErr bo
 
 func filters(t *testing.T, d map[string]any) []map[string]any {
 	t.Helper()
-	var out []map[string]any
-	for _, f := range d["filters"].([]any) {
+	raw := d["filters"].([]any)
+	out := make([]map[string]any, 0, len(raw))
+	for _, f := range raw {
 		out = append(out, f.(map[string]any))
 	}
 	return out
@@ -116,6 +117,11 @@ func TestListIncidents(t *testing.T) {
 	if out.Count != 1 || out.Total != 60 || !out.HasMore || out.Incidents[0].ID != "42" || out.Incidents[0].Severity != "high" || out.Incidents[0].HostCount != 3 {
 		t.Errorf("out = %+v", out)
 	}
+	checkIncidentRequest(t, m)
+}
+
+func checkIncidentRequest(t *testing.T, m *mock) {
+	t.Helper()
 	d := m.data[0]
 	if d["search_from"] != float64(20) || d["search_to"] != float64(30) {
 		t.Errorf("window = %v %v", d["search_from"], d["search_to"])
