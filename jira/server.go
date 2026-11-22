@@ -574,6 +574,10 @@ func buildJQL(in ticket.SearchInput, now time.Time) (string, error) {
 	if in.Label != "" {
 		conds = append(conds, "labels = "+jqlString(in.Label))
 	}
+	if in.DedupKey != "" {
+		// The key has a fixed pattern, and jqlString quotes it.
+		conds = append(conds, "labels = "+jqlString(dedupLabel(in.DedupKey)))
+	}
 	if in.CreatedAfter != "" {
 		t, err := time.Parse(time.RFC3339, in.CreatedAfter)
 		if err != nil {
@@ -591,7 +595,11 @@ func buildJQL(in ticket.SearchInput, now time.Time) (string, error) {
 	if len(conds) == 0 {
 		return "", fmt.Errorf("%w: give at least one filter. Jira refuses an unbounded search", kit.ErrInvalidInput)
 	}
-	return strings.Join(conds, " AND ") + " ORDER BY created DESC", nil
+	order := " ORDER BY created DESC"
+	if in.DedupKey != "" {
+		order = " ORDER BY created ASC" // the oldest ticket is the first one that create_ticket made
+	}
+	return strings.Join(conds, " AND ") + order, nil
 }
 
 func (v *service) search(ctx context.Context, _ *mcp.CallToolRequest, in ticket.SearchInput) (*mcp.CallToolResult, ticket.SearchOutput, error) {

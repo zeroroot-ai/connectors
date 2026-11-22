@@ -113,7 +113,10 @@ type SearchInput struct {
 	TitleContains string `json:"title_contains,omitempty" jsonschema:"text that the title holds, at most 200 characters"`
 	Label         string `json:"label,omitempty"`
 	CreatedAfter  string `json:"created_after,omitempty" jsonschema:"RFC 3339 time"`
-	Limit         int    `json:"limit,omitempty" jsonschema:"number of tickets, 1 to 50. The default is 20."`
+	// DedupKey finds the tickets that create_ticket made with this dedup_key. The
+	// result is oldest first, and the status filter defaults to any.
+	DedupKey string `json:"dedup_key,omitempty" jsonschema:"the dedup_key of create_ticket. The result holds the tickets with this key, oldest first, and the status defaults to any."`
+	Limit    int    `json:"limit,omitempty" jsonschema:"number of tickets, 1 to 50. The default is 20."`
 }
 
 // Ticket is the result of get_ticket and the item of search_tickets.
@@ -246,6 +249,11 @@ func CheckSearch(in SearchInput) (limit int, err error) {
 	if in.Label != "" && !labelFormat.MatchString(in.Label) {
 		return 0, fmt.Errorf("%w: label has the wrong format", kit.ErrInvalidInput)
 	}
+	if in.DedupKey != "" {
+		if err := kit.CheckString("dedup_key", in.DedupKey, MaxDedupKey, dedupFormat); err != nil {
+			return 0, fmt.Errorf("check dedup_key: %w", err)
+		}
+	}
 	if in.CreatedAfter != "" {
 		if _, perr := time.Parse(time.RFC3339, in.CreatedAfter); perr != nil {
 			return 0, fmt.Errorf("%w: created_after is not an RFC 3339 time", kit.ErrInvalidInput)
@@ -261,9 +269,14 @@ func CheckSearch(in SearchInput) (limit int, err error) {
 	return limit, nil
 }
 
-// StatusOf returns the status filter with its default.
+// StatusOf returns the status filter with its default. The default is open.
+// A search by dedup_key defaults to any, because a client must find its ticket
+// after someone closed it.
 func StatusOf(in SearchInput) string {
 	if in.Status == "" {
+		if in.DedupKey != "" {
+			return StatusAny
+		}
 		return StatusOpen
 	}
 	return in.Status

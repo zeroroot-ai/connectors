@@ -532,3 +532,38 @@ func (m *mock) serveSearch(w http.ResponseWriter, body map[string]any) {
 	}
 	_, _ = w.Write([]byte(`{"issues":[` + issueJSON + `],"isLast":true}`))
 }
+
+// A search by dedup_key looks for the dedup label, with the oldest issue first.
+// The status defaults to any, so a closed issue is found, and the other
+// filters still apply.
+func TestSearchByDedupKey(t *testing.T) {
+	m, call, _ := setup(t)
+	m.dedup = key // the issue has the dedup label
+	isErr, text, res := call(ticket.ToolSearch, map[string]any{"dedup_key": "finding/42:disk-full"})
+	if isErr {
+		t.Fatal(text)
+	}
+	want := `labels = "zeroroot-dedup-finding/42:disk-full" ORDER BY created ASC`
+	if got := m.bodies[0]["jql"]; got != want {
+		t.Errorf("jql = %v", got)
+	}
+	var out ticket.SearchOutput
+	kittest.Structured(t, res, &out)
+	if out.Count != len(out.Tickets) || out.Count != 1 {
+		t.Errorf("out = %+v", out)
+	}
+	call(ticket.ToolSearch, map[string]any{"dedup_key": "k1", "status": "open", "queue": "SEC"})
+	want = `statusCategory != Done AND project = "SEC" AND labels = "zeroroot-dedup-k1" ORDER BY created ASC`
+	if got := m.bodies[1]["jql"]; got != want {
+		t.Errorf("jql = %v", got)
+	}
+	// A key that is not in the contract format never reaches Jira.
+	for _, k := range []string{`x" OR project = "SEC`, "a b", strings.Repeat("a", 101), "-x"} {
+		if isErr, _, _ := call(ticket.ToolSearch, map[string]any{"dedup_key": k}); !isErr {
+			t.Errorf("accepted dedup_key %q", k)
+		}
+	}
+	if len(m.bodies) != 2 {
+		t.Errorf("a bad key reached Jira: %d calls", len(m.bodies))
+	}
+}
