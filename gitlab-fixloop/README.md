@@ -23,6 +23,7 @@ The argument `merge_request` is the URL of the merge request on the server of `G
 | `merge_request_state` | `GET /projects/:id/merge_requests/:iid`. For an open merge request with a green pipeline also `GET /projects/:id` (the merge method) unless the merge request squashes, and `GET .../status_checks` when the status is `status_checks_must_pass` | Not needed. It reads. | `readOnlyHint: true` |
 | `merge_merge_request` | the reads above, then `PUT .../merge` with `sha` | `revert_merge_request` | `destructiveHint: false`, `idempotentHint: true` |
 | `revert_merge_request` | list and create merge requests, create a branch, `POST /repository/commits/:sha/revert`, then the merge call above | `revert_merge_request` on the revert merge request | `destructiveHint: false`, `idempotentHint: true` |
+| `open_merge_request` | `GET /projects/:id/merge_requests`, `HEAD /projects/:id/repository/files/:path` for each file, `POST /projects/:id/repository/commits` with `start_branch`, then `POST /projects/:id/merge_requests` | Close the merge request. No tool of this server closes it. | `destructiveHint: false`, `idempotentHint: true` |
 | `deployment_state` | `GET` the merge request, `GET /projects/:id/deployments`, `GET /repository/merge_base` | Not needed. It reads. | `readOnlyHint: true` |
 
 ### Mapping to the daemon shape
@@ -86,6 +87,18 @@ Limits:
 - GitLab refuses the revert (HTTP 400) when the revert conflicts with later commits. The tool shows the error. A person must revert by hand.
 - A project without a pipeline has no head pipeline. The tool opens the revert merge request and never merges it.
 - The tool does not wait for the pipeline. The caller calls it again.
+
+## open_merge_request
+
+The input is `repo` (the project path, for example `group/project`), `source_branch`, `target_branch`, `title`, `body` and `changes`. A change is a `path` with `content` (the new text of the file) or `delete: true`. One call makes one commit with all changes, on the new source branch, from the target branch, and opens the merge request. The result holds `merge_request` (`group/project!12`), `url`, `source_branch`, `target_branch` and `created_at`.
+
+GitLab has no commit action that writes a file whether it exists or not. For each file with content, the tool sends `HEAD` for the path on the target branch. It uses the action `update` when GitLab answers 200 and `create` when it answers 404. A change with `delete: true` uses the action `delete`.
+
+The tool never writes to the target branch and never merges. It refuses a source branch that exists, unless an open merge request goes from that branch into the target branch. It then returns that merge request with `existing: true` and writes nothing. It does not compare the content of that branch with the input. A person undoes the action by closing the merge request. No tool of this server closes it. The merge request asks GitLab to remove the source branch after a merge.
+
+The input has these limits: 100 files, 1 MiB for one file, 8 MiB for all files, a title of 256 bytes, a branch name of plain characters, and a path with no `..`, no empty folder name and no `.git` folder.
+
+References: https://docs.gitlab.com/api/repository_files/, https://docs.gitlab.com/api/commits/#create-a-commit-with-multiple-files-and-actions and https://docs.gitlab.com/api/merge_requests/.
 
 ## Deployment requirement
 

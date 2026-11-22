@@ -103,6 +103,7 @@ type service struct {
 }
 
 func (v *service) register(s *mcp.Server, log *slog.Logger) {
+	v.registerOpen(s, log)
 	kit.AddTool(s, log, &mcp.Tool{
 		Name: "merge_request_state",
 		Description: "Read the state of one GitLab merge request: open, merged, closed or refused, the status of its head " +
