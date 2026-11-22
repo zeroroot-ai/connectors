@@ -179,3 +179,33 @@ func TestReadToolsOnlyRead(t *testing.T) {
 		}
 	}
 }
+
+// truncated says that the result is a part of the list. It is true when
+// SentinelOne gives a next cursor, or when the first page has fewer items than
+// the total. An agent must not take such a result for the whole list.
+func TestReadsSayWhenTheListIsTruncated(t *testing.T) {
+	_, call, _ := readSetup(t, "tok")
+	_, _, res := call("list_threats", map[string]any{})
+	var th threatsOutput
+	kittest.Structured(t, res, &th)
+	if !th.Truncated || th.NextCursor != "cur123" || th.TotalItems != 42 {
+		t.Errorf("threats = %+v", th)
+	}
+	// A complete answer: no cursor, and the total equals the count.
+	_, _, res = call("list_agents", map[string]any{})
+	var ag agentsOutput
+	kittest.Structured(t, res, &ag)
+	if ag.Truncated || ag.NextCursor != "" {
+		t.Errorf("agents = %+v", ag)
+	}
+	// A later page with no cursor is the last page, even when the total is higher.
+	if got := newPage(pagination{NextCursor: "", TotalItems: 42}, 5, "cur123"); got.Truncated {
+		t.Errorf("last page = %+v", got)
+	}
+	if got := newPage(pagination{NextCursor: "", TotalItems: 42}, 25, ""); !got.Truncated {
+		t.Errorf("first page with a larger total = %+v", got)
+	}
+	if got := newPage(pagination{NextCursor: "c", TotalItems: 0}, 25, "x"); !got.Truncated {
+		t.Errorf("a next cursor = %+v", got)
+	}
+}

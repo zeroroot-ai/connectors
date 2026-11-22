@@ -1,6 +1,6 @@
 # sentinelone
 
-MCP server for SentinelOne. It reads threats and agent state. It also runs response actions on agents. The vendor server `purple-mcp` is read only (ADR-0180). It serves streamable HTTP on `:8080` at `/mcp` and answers `/healthz`.
+MCP server for SentinelOne. It reads threats and agent state. It also runs response actions on agents. It serves streamable HTTP on `:8080` at `/mcp` and answers `/healthz`.
 
 ## Environment
 
@@ -20,7 +20,7 @@ MCP server for SentinelOne. It reads threats and agent state. It also runs respo
 | `disconnect_from_network` | `POST /web/api/v2.1/agents/actions/disconnect` | `reconnect_to_network` | `destructiveHint: false`, `idempotentHint: true` |
 | `reconnect_to_network` | `POST /web/api/v2.1/agents/actions/connect` | `disconnect_from_network` | `destructiveHint: false`, `idempotentHint: true` |
 
-The read tools return one page of at most 100 items. A result holds `next_cursor` and `total_items`. A caller gives `next_cursor` as `cursor` to read the next page. Each tool returns only the fields that a defender needs.
+The read tools return one page of at most 100 items. A result holds `next_cursor`, `total_items` and `truncated`. `truncated` is true when the result holds only a part of the list: SentinelOne gave a next cursor, or the first page has fewer items than the total. An agent must not take such a result for the whole list. A caller gives `next_cursor` as `cursor` to read the next page. Each tool returns only the fields that a defender needs.
 
 `list_threats` filters by threat id, agent id, incident status, mitigation status and creation time. It sends the query parameters `ids`, `agentIds`, `incidentStatuses`, `mitigationStatuses`, `createdAt__gte`, `createdAt__lte`, `limit` and `cursor`. `list_agents` filters by agent id, exact computer name, network status and activity. It sends `ids`, `computerName`, `networkStatuses`, `isActive`, `limit` and `cursor`.
 

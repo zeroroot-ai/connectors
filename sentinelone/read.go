@@ -50,7 +50,7 @@ func (v *service) registerRead(s *mcp.Server, log *slog.Logger) {
 			"Filter by threat_id, agent_id, incident_status (unresolved, in_progress or resolved), " +
 			"mitigation_status (for example mitigated, active, blocked, suspicious or pending) " +
 			"and by created_after and created_before (RFC 3339). Returns at most limit threats. " +
-			"Give next_cursor from a result as cursor to read the next page.",
+			"A result with truncated true holds only a part of the list. Give next_cursor from it as cursor to read the next page.",
 		Annotations: kit.ReadOnly("List SentinelOne threats"),
 	}, v.listThreats)
 	kit.AddTool(s, log, &mcp.Tool{
@@ -59,14 +59,24 @@ func (v *service) registerRead(s *mcp.Server, log *slog.Logger) {
 			"version and last activity. Read only. All inputs are optional. " +
 			"Filter by agent_id, computer_name (exact), network_status (connected, connecting, disconnected or " +
 			"disconnecting) and is_active. Returns at most limit agents. " +
-			"Give next_cursor from a result as cursor to read the next page.",
+			"A result with truncated true holds only a part of the list. Give next_cursor from it as cursor to read the next page.",
 		Annotations: kit.ReadOnly("List SentinelOne agents"),
 	}, v.listAgents)
 }
 
+// page is the paging part of a result. Truncated is true when more items
+// exist than this result holds. The caller gives next_cursor as cursor to
+// read them. An agent must not take a result with truncated true for the
+// whole list.
 type page struct {
 	NextCursor string `json:"next_cursor,omitempty"`
 	TotalItems int    `json:"total_items"`
+	Truncated  bool   `json:"truncated"`
+}
+
+func newPage(p pagination, count int, cursor string) page {
+	more := p.NextCursor != "" || (cursor == "" && p.TotalItems > count)
+	return page{NextCursor: p.NextCursor, TotalItems: p.TotalItems, Truncated: more}
 }
 
 type pagination struct {
@@ -144,7 +154,7 @@ func (v *service) listThreats(ctx context.Context, _ *mcp.CallToolRequest, in th
 	if resp.Data != nil {
 		out.Threats = resp.Data
 	}
-	out.NextCursor, out.TotalItems = resp.Pagination.NextCursor, resp.Pagination.TotalItems
+	out.page = newPage(resp.Pagination, len(out.Threats), in.Cursor)
 	return nil, out, nil
 }
 
@@ -208,7 +218,7 @@ func (v *service) listAgents(ctx context.Context, _ *mcp.CallToolRequest, in age
 	if resp.Data != nil {
 		out.Agents = resp.Data
 	}
-	out.NextCursor, out.TotalItems = resp.Pagination.NextCursor, resp.Pagination.TotalItems
+	out.page = newPage(resp.Pagination, len(out.Agents), in.Cursor)
 	return nil, out, nil
 }
 
