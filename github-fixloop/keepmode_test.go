@@ -10,7 +10,6 @@ import (
 	"github.com/zeroroot-ai/connectors/internal/kit"
 	"github.com/zeroroot-ai/connectors/internal/kit/kittest"
 	"github.com/zeroroot-ai/connectors/internal/mockforge/mocktest"
-
 )
 
 // execTree makes the base tree show src/db.go as an executable file.
