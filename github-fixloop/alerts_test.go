@@ -50,8 +50,9 @@ func alertForge(t *testing.T) (*mocktest.Server, forgeCall) {
 
 func alertsOf(t *testing.T, out map[string]any) []map[string]any {
 	t.Helper()
-	var list []map[string]any
-	for _, a := range out["alerts"].([]any) {
+	raw := out["alerts"].([]any)
+	list := make([]map[string]any, 0, len(raw))
+	for _, a := range raw {
 		list = append(list, a.(map[string]any))
 	}
 	return list
@@ -79,7 +80,13 @@ func TestAlertsOpenThenFixedAfterMergedFix(t *testing.T) {
 		t.Errorf("ids %s url %v", ids, a["url"])
 	}
 
-	// A pull request that moves go.mod to the patched version closes the alert.
+	checkFixClosesAlert(t, srv, call)
+}
+
+// checkFixClosesAlert merges a change of go.mod to the patched version and reads
+// the alerts again.
+func checkFixClosesAlert(t *testing.T, srv *mocktest.Server, call forgeCall) {
+	t.Helper()
 	srv.Post("/_mock/repos/acme/shop/commits", map[string]any{"branch": "fix", "files": map[string]any{"go.mod": fixedGoMod}})
 	_, _, open := call("list_dependency_alerts", map[string]any{"project": "acme/shop"})
 	if n := len(alertsOf(t, open)); n != 1 {
@@ -182,7 +189,7 @@ func TestAlertsPagesByCursor(t *testing.T) {
 func TestAlertsCutList(t *testing.T) {
 	m, call := setup(t, map[string]handler{
 		"GET " + repo: reply(200, allMethods[:len(allMethods)-1]+`,"default_branch":"main"}`),
-		"GET " + alertsPath: func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+		"GET " + alertsPath: func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
 			w.Header().Set("Link", `<https://api.github.com`+alertsPath+`?after=NEXT>; rel="next"`)
 			_, _ = w.Write([]byte(alertPage(1, 100)))
 		},

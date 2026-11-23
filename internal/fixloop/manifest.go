@@ -79,7 +79,7 @@ func normalizePip(s string) string {
 
 func requirementsVersion(content, name string) string {
 	for _, line := range strings.Split(content, "\n") {
-		if m := requirementLine.FindStringSubmatch(strings.TrimSpace(line)); m != nil && normalizePip(m[1]) == normalizePip(name) {
+		if m := requirementLine.FindStringSubmatch(strings.TrimSpace(line)); len(m) == 3 && normalizePip(m[1]) == normalizePip(name) {
 			return m[2]
 		}
 	}

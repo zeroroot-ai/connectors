@@ -102,75 +102,12 @@ func (v *service) listDependencyAlerts(ctx context.Context, _ *mcp.CallToolReque
 	}
 	out.Ref = info.DefaultBranch
 
-	q := url.Values{"per_page": {"100"}}
-	switch state {
-	case fixloop.AlertDismissed:
-		q.Set("state", "dismissed,auto_dismissed")
-	case fixloop.AlertOpen, fixloop.AlertFixed:
-		q.Set("state", state)
+	raw, truncated, err := v.fetchAlerts(ctx, r, state)
+	if err != nil {
+		return nil, out, err
 	}
-	var raw []ghAlert
-	for page := 0; ; page++ {
-		if page == fixloop.MaxAlertPages {
-			out.Truncated = true
-			break
-		}
-		var list []ghAlert
-		var hdr http.Header
-		err := v.client.Do(ctx, kit.Request{
-			Method: http.MethodGet, Path: repoPath(r, "dependabot", "alerts"), Query: q, ResponseHeader: &hdr,
-		}, &list)
-		if err != nil {
-			return nil, out, fmt.Errorf("list the dependency alerts (the token needs the Dependabot alerts read permission): %w", err)
-		}
-		raw = append(raw, list...)
-		after := nextCursor(hdr.Get("Link"))
-		if after == "" || len(list) == 0 {
-			break
-		}
-		q.Set("after", after)
-	}
-
-	manifests := map[string]string{}
-	reads := 0
-	for _, a := range raw {
-		al := fixloop.Alert{
-			ID: fmt.Sprintf("dependabot:%d", a.Number), State: a.State, Package: a.Dependency.Package.Name,
-			Ecosystem: a.Dependency.Package.Ecosystem, VulnerableRange: a.Vulnerability.Range,
-			Severity: a.Vulnerability.Severity, ManifestPath: a.Dependency.ManifestPath, URL: a.HTMLURL,
-		}
-		if al.State == "auto_dismissed" {
-			al.State = fixloop.AlertDismissed
-		}
-		if al.Severity == "" {
-			al.Severity = a.Advisory.Severity
-		}
-		if a.Vulnerability.FirstPatched != nil {
-			al.FirstPatched = a.Vulnerability.FirstPatched.Identifier
-		}
-		ids := []string{a.Advisory.GHSAID, a.Advisory.CVEID}
-		for _, i := range a.Advisory.Identifiers {
-			ids = append(ids, i.Value)
-		}
-		al.AdvisoryIDs = fixloop.AdvisoryIDs(ids...)
-		al.PurlType = fixloop.PurlType(al.Ecosystem)
-		if p := al.ManifestPath; p != "" {
-			content, known := manifests[p]
-			if !known && reads < fixloop.MaxManifestReads {
-				reads++
-				// A manifest that the tool cannot read leaves the version empty.
-				if _, res, rerr := v.readFile(ctx, nil, fixloop.FileInput{Repo: in.Repo, Ref: info.DefaultBranch, Path: p}); rerr == nil {
-					content = res.Content
-				}
-				manifests[p] = content
-			}
-			if ver := fixloop.InstalledVersion(p, content, al.Package); ver != "" {
-				al.Version, al.VersionSource = ver, fixloop.VersionFromManifest
-				al.Purl = fixloop.Purl(al.Ecosystem, al.Package, ver)
-			}
-		}
-		out.Alerts = append(out.Alerts, al)
-	}
+	out.Truncated = truncated
+	out.Alerts = v.convertAlerts(ctx, in.Repo, info.DefaultBranch, raw)
 	return nil, out, nil
 }
 
@@ -188,4 +125,87 @@ func nextCursor(link string) string {
 		}
 	}
 	return ""
+}
+
+// convertAlerts makes the result alerts. It reads each manifest at most once.
+func (v *service) convertAlerts(ctx context.Context, project, branch string, raw []ghAlert) []fixloop.Alert {
+	out := make([]fixloop.Alert, 0, len(raw))
+	manifests := map[string]string{}
+	reads := 0
+	for _, a := range raw {
+		al := toAlert(a)
+		if p := al.ManifestPath; p != "" {
+			content, known := manifests[p]
+			if !known && reads < fixloop.MaxManifestReads {
+				reads++
+				// A manifest that the tool cannot read leaves the version empty.
+				if _, res, rerr := v.readFile(ctx, nil, fixloop.FileInput{Repo: project, Ref: branch, Path: p}); rerr == nil {
+					content = res.Content
+				}
+				manifests[p] = content
+			}
+			if ver := fixloop.InstalledVersion(p, content, al.Package); ver != "" {
+				al.Version, al.VersionSource = ver, fixloop.VersionFromManifest
+				al.Purl = fixloop.Purl(al.Ecosystem, al.Package, ver)
+			}
+		}
+		out = append(out, al)
+	}
+	return out
+}
+
+func toAlert(a ghAlert) fixloop.Alert {
+	al := fixloop.Alert{
+		ID: fmt.Sprintf("dependabot:%d", a.Number), State: a.State, Package: a.Dependency.Package.Name,
+		Ecosystem: a.Dependency.Package.Ecosystem, VulnerableRange: a.Vulnerability.Range,
+		Severity: a.Vulnerability.Severity, ManifestPath: a.Dependency.ManifestPath, URL: a.HTMLURL,
+	}
+	if al.State == "auto_dismissed" {
+		al.State = fixloop.AlertDismissed
+	}
+	if al.Severity == "" {
+		al.Severity = a.Advisory.Severity
+	}
+	if a.Vulnerability.FirstPatched != nil {
+		al.FirstPatched = a.Vulnerability.FirstPatched.Identifier
+	}
+	ids := []string{a.Advisory.GHSAID, a.Advisory.CVEID}
+	for _, i := range a.Advisory.Identifiers {
+		ids = append(ids, i.Value)
+	}
+	al.AdvisoryIDs = fixloop.AdvisoryIDs(ids...)
+	al.PurlType = fixloop.PurlType(al.Ecosystem)
+	return al
+}
+
+// fetchAlerts reads the pages of alerts. It returns true when GitHub has more
+// pages than the tool reads.
+func (v *service) fetchAlerts(ctx context.Context, r prRef, state string) ([]ghAlert, bool, error) {
+	q := url.Values{"per_page": {"100"}}
+	switch state {
+	case fixloop.AlertDismissed:
+		q.Set("state", "dismissed,auto_dismissed")
+	case fixloop.AlertOpen, fixloop.AlertFixed:
+		q.Set("state", state)
+	}
+	var raw []ghAlert
+	for page := 0; ; page++ {
+		if page == fixloop.MaxAlertPages {
+			return raw, true, nil
+		}
+		var list []ghAlert
+		var hdr http.Header
+		err := v.client.Do(ctx, kit.Request{
+			Method: http.MethodGet, Path: repoPath(r, "dependabot", "alerts"), Query: q, ResponseHeader: &hdr,
+		}, &list)
+		if err != nil {
+			return nil, false, fmt.Errorf("list the dependency alerts (the token needs the Dependabot alerts read permission): %w", err)
+		}
+		raw = append(raw, list...)
+		after := nextCursor(hdr.Get("Link"))
+		if after == "" || len(list) == 0 {
+			return raw, false, nil
+		}
+		q.Set("after", after)
+	}
 }

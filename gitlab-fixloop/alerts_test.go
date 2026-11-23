@@ -30,8 +30,9 @@ func vuln(id int, name, sev string) string {
 
 func alertList(t *testing.T, out map[string]any) []map[string]any {
 	t.Helper()
-	var l []map[string]any
-	for _, a := range out["alerts"].([]any) {
+	raw := out["alerts"].([]any)
+	l := make([]map[string]any, 0, len(raw))
+	for _, a := range raw {
 		l = append(l, a.(map[string]any))
 	}
 	return l

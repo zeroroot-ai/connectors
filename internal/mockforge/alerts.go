@@ -266,7 +266,7 @@ func inRange(version, rng string) bool {
 // prefix and a suffix after - or +.
 func compareVersions(a, b string) int {
 	pa, pb := versionParts(a), versionParts(b)
-	for i := 0; i < max(len(pa), len(pb)); i++ {
+	for i := range max(len(pa), len(pb)) {
 		var x, y int
 		if i < len(pa) {
 			x = pa[i]
@@ -289,8 +289,9 @@ func versionParts(v string) []int {
 	if i := strings.IndexAny(v, "-+"); i >= 0 {
 		v = v[:i]
 	}
-	var out []int
-	for _, s := range strings.Split(v, ".") {
+	parts := strings.Split(v, ".")
+	out := make([]int, 0, len(parts))
+	for _, s := range parts {
 		n, _ := strconv.Atoi(s)
 		out = append(out, n)
 	}
