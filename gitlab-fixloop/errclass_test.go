@@ -179,7 +179,7 @@ func checkStaysText(t *testing.T, name, text string, refusal bool) {
 // text names the open request and says that the branch stays. It does not say that
 // nothing was merged, because a request is open now.
 func TestOpenHeadMismatchNamesTheOpenRequest(t *testing.T) {
-	moved := strings.Replace(newMR(), headSHA, "9999999999999999999999999999999999999999", -1)
+	moved := strings.ReplaceAll(newMR(), headSHA, "9999999999999999999999999999999999999999")
 	routes := openRoutes()
 	routes["POST "+api+"/merge_requests"] = reply(201, moved)
 	_, text := classCall(t, routes, "open_merge_request", openArgs())
