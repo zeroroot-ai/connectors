@@ -101,13 +101,27 @@ func TestListTreeKeysetPages(t *testing.T) {
 			}
 		},
 	})
+	bind := fixloop.CursorBinding("acme/shop", "", "main")
 	_, _, p1 := call("list_tree", map[string]any{"project": "acme/shop"})
-	if p1["next_cursor"] != tok || len(p1["entries"].([]any)) != 2 || p1["truncated"] != false {
+	if p1["next_cursor"] != bind+":"+tok || len(p1["entries"].([]any)) != 2 || p1["truncated"] != false {
 		t.Fatalf("page 1 = %v", p1)
 	}
-	isErr, msg, p2 := call("list_tree", map[string]any{"project": "acme/shop", "cursor": tok})
+	isErr, msg, p2 := call("list_tree", map[string]any{"project": "acme/shop", "cursor": bind + ":" + tok})
 	if isErr || p2["next_cursor"] != nil || len(p2["entries"].([]any)) != 1 || p2["truncated"] != false {
 		t.Errorf("page 2 = %v %s", p2, msg)
+	}
+	// A cursor holds the project, the ref and the path of its listing.
+	cursor := bind + ":" + tok
+	for name, args := range map[string]map[string]any{
+		"another project": {"project": "acme/other", "ref": "main", "cursor": cursor},
+		"another path":    {"project": "acme/shop", "path": "src", "cursor": cursor},
+		"another ref":     {"project": "acme/shop", "ref": "dev", "cursor": cursor},
+		"a bare token":    {"project": "acme/shop", "cursor": tok},
+		"no token":        {"project": "acme/shop", "cursor": bind + ":"},
+	} {
+		if isErr, _, _ := call("list_tree", args); !isErr {
+			t.Errorf("%s: a bad cursor was accepted", name)
+		}
 	}
 }
 

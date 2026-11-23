@@ -25,8 +25,10 @@ import (
 // the next page in the Link header (rel="next") with a page_token. The page
 // does not describe the header, so a full page with no next link is not taken
 // for the last page: the tool reports truncated, because it cannot tell. The
-// cursor of the tool is the page_token. It is the base64 of a file name and an
-// object id (Gitaly), so it has the characters + / and =, and it grows with the path.
+// page_token is the base64 of a file name and an object id (Gitaly), so it has
+// the characters + / and =, and it grows with the path. The cursor of the tool is
+// "<hash>:<page_token>". The hash binds the cursor to the project, the path and
+// the ref, and the tool refuses a cursor of another listing.
 
 // treePage is the number of entries of one page. A test sets it.
 var treePage = fixloop.GitLabTreePage
@@ -82,8 +84,13 @@ func (v *service) listTree(ctx context.Context, _ *mcp.CallToolRequest, in fixlo
 	if path != "" {
 		q.Set("path", path)
 	}
+	bind := fixloop.CursorBinding(in.Repo, path, out.Ref)
 	if in.Cursor != "" {
-		q.Set("page_token", in.Cursor)
+		token, err := unwrapCursor(in.Cursor, bind)
+		if err != nil {
+			return nil, out, err
+		}
+		q.Set("page_token", token)
 	}
 	var list []glTreeEntry
 	var hdr http.Header
@@ -110,7 +117,7 @@ func (v *service) listTree(ctx context.Context, _ *mcp.CallToolRequest, in fixlo
 	case err != nil:
 		return nil, out, err
 	case more:
-		out.NextCursor = next
+		out.NextCursor = bind + ":" + next
 	case len(list) >= treePage:
 		// A full page and no next link: the tool cannot tell the last page from a cut.
 		out.Truncated = true
@@ -186,4 +193,17 @@ func (v *service) emptyFolderError(ctx context.Context, project, ref, path strin
 		token = next
 	}
 	return fmt.Errorf("%w: the tool could not find %s in the parent folder, so it cannot tell that it is a folder", kit.ErrInvalidInput, path)
+}
+
+// unwrapCursor reads "<hash>:<page_token>" and returns the page_token. It refuses
+// a cursor whose hash is not bind. A page_token is base64, so it has no colon.
+func unwrapCursor(cursor, bind string) (string, error) {
+	hash, token, ok := strings.Cut(cursor, ":")
+	if !ok || token == "" {
+		return "", fmt.Errorf("%w: the cursor is not a cursor of list_tree", kit.ErrInvalidInput)
+	}
+	if hash != bind {
+		return "", fmt.Errorf("%w: the cursor is of another project, another ref or another path. Start again without a cursor", kit.ErrInvalidInput)
+	}
+	return token, nil
 }
