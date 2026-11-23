@@ -160,6 +160,7 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 func (v *service) register(s *mcp.Server, log *slog.Logger) {
 	v.registerOpen(s, log)
 	v.registerReadFile(s, log)
+	v.registerTree(s, log)
 	v.registerAlerts(s, log)
 	kit.AddTool(s, log, &mcp.Tool{
 		Name: "merge_request_state",

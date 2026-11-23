@@ -69,6 +69,7 @@ type repo struct {
 	alerts    map[string]*alert // by GHSA id
 	nextAlert int
 	alertsOff bool
+	treeCap   int // cuts a recursive tree after this many entries, 0 for the GitHub limit
 }
 
 func newRepo(owner, name, branch string) *repo {

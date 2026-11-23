@@ -3,6 +3,7 @@ package mockforge
 import (
 	"encoding/base64"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -261,17 +262,79 @@ func (c *call) createTree() {
 	writeJSON(c.w, http.StatusCreated, map[string]string{"sha": c.r.putTree(entries)})
 }
 
-func (c *call) getTree(sha string) {
-	tree, ok := c.r.trees[sha]
+// treeLimit is the number of entries after which a recursive tree is cut. The
+// limit of GitHub is 100,000 entries or 7 MB.
+const treeLimit = 100000
+
+// treeID resolves the tree_sha of the call: a tree sha, a commit sha, or the
+// name of a branch.
+func (r *repo) treeID(name string) (string, bool) {
+	if _, ok := r.trees[name]; ok {
+		return name, true
+	}
+	if sha, ok := r.resolve(name); ok {
+		return r.commits[sha].Tree, true
+	}
+	return "", false
+}
+
+// getTree serves GET /git/trees/{tree_sha}, with the recursive parameter. The
+// mock keeps a tree as a flat map of paths, so it makes the entries of the
+// folders and their tree shas when it lists. As on GitHub, a blob entry has a
+// size, a mode 160000 is a commit, and a recursive answer holds the folders too.
+func (c *call) getTree(name string) {
+	id, ok := c.r.treeID(name)
 	if !ok {
 		notFound(c.w)
 		return
 	}
-	list := make([]map[string]string, 0, len(tree))
-	for _, p := range sortedKeys(tree) {
-		list = append(list, map[string]string{"path": p, "mode": tree[p].Mode, "type": "blob", "sha": tree[p].SHA})
+	tree := c.r.trees[id]
+	recursive := c.req.URL.Query().Has("recursive")
+	limit := treeLimit
+	if c.r.treeCap > 0 {
+		limit = c.r.treeCap
 	}
-	writeJSON(c.w, http.StatusOK, map[string]any{"sha": sha, "truncated": false, "tree": list})
+	dirs := map[string]map[string]entry{} // folder path to its entries, relative to it
+	var list []map[string]any
+	for _, p := range sortedKeys(tree) {
+		e := tree[p]
+		segs := strings.Split(p, "/")
+		for i := 1; i < len(segs); i++ {
+			d := strings.Join(segs[:i], "/")
+			if dirs[d] == nil {
+				dirs[d] = map[string]entry{}
+			}
+			dirs[d][strings.Join(segs[i:], "/")] = e
+		}
+		if len(segs) > 1 && !recursive {
+			continue
+		}
+		list = append(list, entryJSON(c.r, p, e))
+	}
+	for d, sub := range dirs {
+		if recursive || !strings.Contains(d, "/") {
+			list = append(list, map[string]any{"path": d, "mode": "040000", "type": "tree", "sha": c.r.putTree(sub)})
+		}
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i]["path"].(string) < list[j]["path"].(string) })
+	truncated := len(list) > limit
+	if truncated {
+		list = list[:limit]
+	}
+	if list == nil {
+		list = []map[string]any{}
+	}
+	writeJSON(c.w, http.StatusOK, map[string]any{"sha": id, "truncated": truncated, "tree": list})
+}
+
+func entryJSON(r *repo, path string, e entry) map[string]any {
+	out := map[string]any{"path": path, "mode": e.Mode, "type": "blob", "sha": e.SHA}
+	if e.Mode == "160000" {
+		out["type"] = "commit"
+		return out
+	}
+	out["size"] = len(r.blobs[e.SHA])
+	return out
 }
 
 // ---- compare ----

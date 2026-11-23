@@ -66,8 +66,8 @@ The servers have no second authentication scheme, by design. The README of each 
 | Directory | Tool class | Tools | Issue |
 |---|---|---|---|
 | `prometheus` | observability | `query_instant`, `query_range`, `list_alerts`, `health_signal` | gibson#1540 |
-| `gitlab-fixloop` | git-host | `open_merge_request`, `close_merge_request`, `read_file`, `list_dependency_alerts`, `merge_request_state`, `merge_merge_request`, `revert_merge_request`, `deployment_state` | gibson#1539 |
-| `github-fixloop` | git-host | `open_merge_request`, `close_merge_request`, `read_file`, `list_dependency_alerts`, `merge_request_state`, `merge_merge_request`, `revert_merge_request`, `deployment_state` | gibson#1539 |
+| `gitlab-fixloop` | git-host | `open_merge_request`, `close_merge_request`, `read_file`, `list_tree`, `list_dependency_alerts`, `merge_request_state`, `merge_merge_request`, `revert_merge_request`, `deployment_state` | gibson#1539 |
+| `github-fixloop` | git-host | `open_merge_request`, `close_merge_request`, `read_file`, `list_tree`, `list_dependency_alerts`, `merge_request_state`, `merge_merge_request`, `revert_merge_request`, `deployment_state` | gibson#1539 |
 | `okta` | identity, response | `list_log_events`, `list_users`, `get_user`, `revoke_user_sessions`, `suspend_user`, `unsuspend_user` | gibson#1548, gibson#1436 |
 | `entra-id` | identity, response | `revoke_sign_in_sessions`, `disable_account`, `enable_account` | gibson#1549 |
 | `crowdstrike` | edr, response | `contain_host`, `lift_containment` | gibson#1545 |
@@ -93,6 +93,7 @@ The two servers of class `git-host` (`github-fixloop` and `gitlab-fixloop`) have
 |---|---|---|---|
 | `open_merge_request` | `project`, `branch`, `base_branch`, `title`, `description`, `files` (each `path` with `content`, or `delete: true`) | `merge_request`, `url`, `source_branch`, `target_branch`, `created_at`, `head_sha`, `existing` | `close_merge_request` |
 | `close_merge_request` | `merge_request` | `merge_request`, `state`, `closed` | A person reopens it. |
+| `list_tree` | `project`, `ref` (optional, the default branch), `path` (optional folder), `cursor` (optional) | `project`, `ref`, `path`, `entries` (each: `path`, `type` file, dir, symlink or submodule, `sha`, `size`, `mode`), `next_cursor`, `truncated`, `reason` | Not a change. |
 | `list_dependency_alerts` | `project`, `state` (optional, default `open`), `ref` (optional, the default branch only) | `project`, `ref`, `state`, `alerts` (each: `id`, `state`, `package`, `ecosystem`, `purl_type`, `purl`, `version`, `version_source`, `versions`, `version_ambiguous`, `vulnerable_version_range`, `first_patched_version`, `advisory_ids`, `verifiable`, `severity`, `manifest_path`, `url`), `truncated` | Not a change. |
 | `read_file` | `project`, `ref`, `path` | `found`, `content`, `sha` (the blob sha), `size`, `path`, `ref` | Not a change. |
 | `merge_request_state` | `merge_request` | `state`, `pipeline_green`, `pipeline_status`, `reason`, `head_sha`, `source_branch`, `created_at`, `merge_commit`, `changed_files`, `changed_files_truncated`, `changed_files_error` | Not a change. |

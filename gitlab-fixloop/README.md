@@ -25,6 +25,7 @@ The argument `merge_request` is the URL of the merge request on the server of `G
 | `revert_merge_request` | list and create merge requests, create a branch, `POST /repository/commits/:sha/revert`, then the merge call above | `revert_merge_request` on the revert merge request | `destructiveHint: false`, `idempotentHint: true` |
 | `open_merge_request` | `GET /projects/:id/merge_requests`, `HEAD /projects/:id/repository/files/:path` for each file, `POST /projects/:id/repository/commits` with `start_branch`, then `POST /projects/:id/merge_requests` | `close_merge_request` | `destructiveHint: false`, `idempotentHint: true` |
 | `close_merge_request` | `GET /projects/:id/merge_requests/:iid`, then `PUT` it with `state_event: close` | A person reopens it. No tool reopens it. | `destructiveHint: false`, `idempotentHint: true` |
+| `list_tree` | `GET /projects/:id` (default branch only), `GET /projects/:id/repository/tree` | Not a change. | `readOnlyHint: true` |
 | `list_dependency_alerts` | `GET /projects/:id`, `GET /projects/:id/dependencies` | Not a change. | `readOnlyHint: true` |
 | `read_file` | `GET /projects/:id/repository/files/:path?ref=` | Not a change. | `readOnlyHint: true` |
 | `deployment_state` | `GET` the merge request, `GET /projects/:id/deployments`, `GET /repository/merge_base` | Not needed. It reads. | `readOnlyHint: true` |
@@ -162,3 +163,9 @@ Pages: the tool reads 100 vulnerabilities a page by cursor, at most 10 pages. Wh
 How to verify a fix: call the tool with `state` `all`. Treat an alert as fixed only when its `state` is `fixed`. A missing alert and a truncated list prove nothing.
 
 Test: the tests use the table mock of this package. `mock-forge` has no GitLab side.
+
+## list_tree
+
+The tool lists the entries of the repository tree, so a reader needs no git clone. Input: `project`, `ref` (a branch, a tag or a commit, the default branch when empty), `path` (a folder, optional) and `cursor` (optional). The tool lists every level below `path`. Each entry has `path` (the full path), `type` (`file`, `dir`, `symlink` or `submodule`), `sha` (the git object sha), `size` (bytes, files and symlinks), and `mode` (`100644`, `100755`, `120000`, `040000` or `160000`). The result has `next_cursor` (empty on the last page), `truncated` and `reason`. When `truncated` is true, the list is not complete, and the caller lists a smaller folder with `path`. The types and the limits are in `internal/fixloop/tree.go`.
+
+Endpoint: `GET /projects/:id/repository/tree` with `recursive=true` and keyset pagination (`pagination=keyset`, `per_page`, `page_token`). Reference: https://docs.gitlab.com/api/repositories/#list-repository-tree . A page has at most 100 entries. The cursor is the `page_token` of the `rel="next"` link of the answer. GitLab gives no size, so `size` is absent. A missing path is an error. The reference does not describe the pagination headers. So when a page is full and has no next link, the tool reports `truncated` true, because it cannot tell the last page from a cut. The token needs the `read_api` scope.
