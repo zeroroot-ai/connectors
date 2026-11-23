@@ -180,7 +180,7 @@ func connectTools(t *testing.T, log *slog.Logger, register func(*mcp.Server)) *m
 	return cs
 }
 
-func callClass(t *testing.T, cs *mcp.ClientSession, tool string) (class string, text string, res *mcp.CallToolResult) {
+func callClass(t *testing.T, cs *mcp.ClientSession, tool string) (class, text string, res *mcp.CallToolResult) {
 	t.Helper()
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: tool, Arguments: map[string]any{"secret": "hunter2-token"}})
 	if err != nil || !res.IsError {
@@ -269,11 +269,12 @@ func TestFailureAfterAWriteIsOutcomeUnknown(t *testing.T) {
 	post := func(ctx context.Context) error { return do(ctx, http.MethodPost, "/w") }
 	put := func(ctx context.Context) error { return do(ctx, http.MethodPut, "/w") }
 	get := func(ctx context.Context) error { return do(ctx, http.MethodGet, "/r") }
+	getAgain := func(ctx context.Context) error { return do(ctx, http.MethodGet, "/r2") }
 	badPost := func(ctx context.Context) error { return do(ctx, http.MethodPost, "/bad") }
 	opted := func(ctx context.Context) error { return Retryable(get(ctx)) }
 	cs := connectTools(t, log, func(srv *mcp.Server) {
 		for name, h := range map[string]mcp.ToolHandlerFor[in, out]{
-			"read_read":       tool(get, get),
+			"read_read":       tool(get, getAgain),
 			"post_then_get":   tool(post, get),
 			"put_then_get":    tool(put, get),
 			"post_then_400":   tool(post, badPost),
