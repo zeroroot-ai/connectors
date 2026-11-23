@@ -138,7 +138,7 @@ func falconError(op string, err error) error {
 	if errors.As(err, &ae) {
 		var body affected
 		if kit.DecodeErrorBody(ae, &body) == nil && len(body.Errors) > 0 {
-			return fmt.Errorf("%s: Falcon answered HTTP %d: %d %s", op, ae.Status, body.Errors[0].Code, body.Errors[0].Message)
+			return kit.Described(err, "%s: Falcon answered HTTP %d: %d %s", op, ae.Status, body.Errors[0].Code, body.Errors[0].Message)
 		}
 	}
 	return fmt.Errorf("%s: %w", op, err)

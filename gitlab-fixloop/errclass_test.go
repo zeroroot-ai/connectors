@@ -136,3 +136,29 @@ func TestErrorClassLostAnswerOfEachWriteTool(t *testing.T) {
 		t.Errorf("merge_merge_request: %+v %s", cl, text)
 	}
 }
+
+// GitLab refuses the create of a merge request with 409 or 422 when one exists, for
+// example from a create whose answer was lost. The tool lists the merge requests of
+// the branch again and returns the open one with existing true.
+func TestOpenReturnsTheExistingMergeRequestAfterAConflict(t *testing.T) {
+	for _, status := range []int{409, 422} {
+		routes := openRoutes()
+		routes["GET "+api+"/merge_requests"] = reply(200, `[`+newMR()+`]`)
+		routes["POST "+api+"/merge_requests"] = reply(status, `{"message":["Another open merge request already exists"]}`)
+		_, call := setup(t, routes)
+		isErr, text, out := call("open_merge_request", openArgs())
+		if isErr || out["existing"] != true {
+			t.Errorf("status %d: isErr=%v %s %v", status, isErr, text, out)
+		}
+	}
+}
+
+// A conflict with no merge request to find stays a refusal of the create.
+func TestOpenConflictWithNoMergeRequestToFindIsRefused(t *testing.T) {
+	routes := openRoutes()
+	routes["POST "+api+"/merge_requests"] = reply(422, `{"message":"Validation Failed"}`)
+	cl, text := classCall(t, routes, "open_merge_request", openArgs())
+	if cl.Class != kit.ClassRefused || !strings.Contains(text, "stays, call the tool again") {
+		t.Errorf("%+v %s", cl, text)
+	}
+}

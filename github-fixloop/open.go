@@ -159,12 +159,34 @@ func (v *service) openMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 		JSON: map[string]any{"title": in.Title, "head": in.SourceBranch, "base": in.TargetBranch, "body": in.Body},
 	}, &created)
 	if err != nil {
+		if pr := v.pullAfterConflict(ctx, r, in, err); pr != nil {
+			if herr := sameHead(pr, commit.SHA); herr != nil {
+				return nil, out, herr
+			}
+			return nil, v.openResult(r, pr, in, commit.SHA, true), nil
+		}
 		return nil, out, kit.Retryable(fmt.Errorf("open the pull request (the branch %s stays, call the tool again): %w", in.SourceBranch, err))
 	}
 	if err := sameHead(&created, commit.SHA); err != nil {
 		return nil, out, err
 	}
 	return nil, v.openResult(r, &created, in, commit.SHA, false), nil
+}
+
+// pullAfterConflict is called when the create of the pull request failed with err.
+// When GitHub answered 409 or 422, a pull request of the branch can exist already,
+// for example from a create whose answer was lost. The tool lists the pull requests
+// of the branch again and returns the open one into the target branch, or nil.
+func (v *service) pullAfterConflict(ctx context.Context, r prRef, in fixloop.OpenInput, err error) *ghPR {
+	var ae *kit.APIError
+	if !errors.As(err, &ae) || (ae.Status != http.StatusConflict && ae.Status != http.StatusUnprocessableEntity) {
+		return nil
+	}
+	pr, ferr := v.findPR(ctx, r, in.SourceBranch)
+	if ferr != nil || pr == nil || pr.State != "open" || pr.Base.Ref != in.TargetBranch || pr.fromFork() {
+		return nil
+	}
+	return pr
 }
 
 // sameHead refuses a pull request whose head is not the commit that the tool
@@ -398,6 +420,12 @@ func (v *service) resume(ctx context.Context, r prRef, in fixloop.OpenInput, out
 		JSON: map[string]any{"title": in.Title, "head": in.SourceBranch, "base": in.TargetBranch, "body": in.Body},
 	}, &created)
 	if err != nil {
+		if pr := v.pullAfterConflict(ctx, r, in, err); pr != nil {
+			if herr := sameHead(pr, commit); herr != nil {
+				return nil, out, herr
+			}
+			return nil, v.openResult(r, pr, in, commit, true), nil
+		}
 		return nil, out, kit.Retryable(fmt.Errorf("open the pull request (the branch %s stays, call the tool again): %w", in.SourceBranch, err))
 	}
 	if err := sameHead(&created, commit); err != nil {

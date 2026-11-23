@@ -117,7 +117,7 @@ func (v *service) act(ctx context.Context, in agentInput, op string) (*mcp.CallT
 		var ae *kit.APIError
 		if errors.As(err, &ae) && kit.DecodeErrorBody(ae, &resp) == nil && len(resp.Errors) > 0 {
 			e := resp.Errors[0]
-			return nil, out, fmt.Errorf("%s: SentinelOne answered HTTP %d: %s: %s", op, ae.Status, e.Title, e.Detail)
+			return nil, out, kit.Described(err, "%s: SentinelOne answered HTTP %d: %s: %s", op, ae.Status, e.Title, e.Detail)
 		}
 		return nil, out, fmt.Errorf("%s: %w", op, err)
 	}

@@ -239,3 +239,54 @@ func TestErrorClassRateLimitedBy403(t *testing.T) {
 		}
 	}
 }
+
+// GitHub refuses the create of a pull request with 409 or 422 when one exists, for
+// example from a create whose answer was lost. The tool lists the pull requests of
+// the branch again and returns the open one with existing true.
+func TestOpenReturnsTheExistingPullRequestAfterAConflict(t *testing.T) {
+	for _, status := range []int{409, 422} {
+		for _, resume := range []bool{false, true} {
+			routes := openRoutes()
+			if resume {
+				routes = branchExists(routes)
+				routes[compareKey] = reply(200, ownCompare())
+				// The first list shows nothing. The pull request exists when the tool lists again.
+				lists := 0
+				routes["GET "+repo+"/pulls"] = func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+					lists++
+					if lists == 1 {
+						_, _ = w.Write([]byte(`[]`))
+						return
+					}
+					_, _ = w.Write([]byte(`[` + ownPR(newComSHA) + `]`))
+				}
+			} else {
+				routes["GET "+repo+"/pulls"] = reply(200, `[`+ownPR(newComSHA)+`]`)
+			}
+			routes["POST "+repo+"/pulls"] = reply(status, `{"message":"A pull request already exists"}`)
+			_, call := setup(t, routes)
+			isErr, text, out := call("open_merge_request", openArgs())
+			if isErr || out["existing"] != true || out["merge_request"] != ref || out["head_sha"] != newComSHA {
+				t.Errorf("status %d resume %v: isErr=%v %s %v", status, resume, isErr, text, out)
+			}
+		}
+	}
+}
+
+// A conflict with no pull request to find, or one of a fork, or into another
+// branch, stays a refusal of the create.
+func TestOpenConflictWithNoPullRequestToFindIsRefused(t *testing.T) {
+	fork := strings.Replace(ownPR(newComSHA), `"head":{"sha":"`+newComSHA+`","ref":"`+srcBranch+`","repo":{"full_name":"acme/shop"}}`,
+		`"head":{"sha":"`+newComSHA+`","ref":"`+srcBranch+`","repo":{"full_name":"evil/shop"}}`, 1)
+	for name, list := range map[string]string{
+		"none": `[]`, "a fork": `[` + fork + `]`, "closed": `[` + strings.Replace(ownPR(newComSHA), `"state":"open"`, `"state":"closed"`, 1) + `]`,
+	} {
+		routes := openRoutes()
+		routes["GET "+repo+"/pulls"] = reply(200, list)
+		routes["POST "+repo+"/pulls"] = reply(422, `{"message":"Validation Failed"}`)
+		cl, text := classCall(t, routes, "open_merge_request", openArgs())
+		if cl.Class != kit.ClassRefused || !strings.Contains(text, "stays, call the tool again") {
+			t.Errorf("%s: %+v %s", name, cl, text)
+		}
+	}
+}

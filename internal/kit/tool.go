@@ -3,7 +3,9 @@ package kit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -38,14 +40,28 @@ func Irreversible(title string, idempotent bool) *mcp.ToolAnnotations {
 // each call. It never logs the input or the output of a call.
 func AddTool[In, Out any](s *mcp.Server, log *slog.Logger, t *mcp.Tool, h mcp.ToolHandlerFor[In, Out]) {
 	name := t.Name
-	mcp.AddTool(s, t, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
+	readOnly := t.Annotations != nil && t.Annotations.ReadOnlyHint
+	mcp.AddTool(s, t, func(ctx context.Context, req *mcp.CallToolRequest, in In) (res *mcp.CallToolResult, out Out, err error) {
 		start := time.Now()
-		res, out, err := h(ctx, req, in)
+		ctx, st := newCallContext(ctx)
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					// The log has the tool and the stack, never the arguments.
+					log.Error("tool panic", "tool", name, "panic_type", fmt.Sprintf("%T", rec), "stack", string(debug.Stack()))
+					res, err = nil, &PanicError{ReadOnly: readOnly}
+				}
+			}()
+			res, out, err = h(ctx, req, in)
+		}()
 		outcome := "ok"
 		if err != nil {
 			outcome = "error"
 			if errors.Is(err, ErrInvalidInput) {
 				outcome = "invalid_input"
+			}
+			if st.wroteBefore() {
+				err = &AfterWriteError{Err: err}
 			}
 		}
 		log.Info("tool call", "tool", name, "outcome", outcome, "duration_ms", time.Since(start).Milliseconds())

@@ -8,9 +8,6 @@ import (
 	"github.com/zeroroot-ai/connectors/internal/kit/kittest"
 )
 
-// wrap lets a test put a layer around the handler of the vendor mock.
-var wrap = func(h http.Handler) http.Handler { return h }
-
 // The answer of each call that changes the vendor is lost: the connection closes
 // with no answer. A request that the client does not repeat may have run on the
 // vendor, so the class is outcome_unknown. A request that the tool declared

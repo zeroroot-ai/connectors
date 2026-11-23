@@ -167,6 +167,9 @@ func (c *Client) DoBytes(ctx context.Context, r Request) ([]byte, error) {
 	if err != nil && !repeatable(r) && lostAnswer(err) {
 		return nil, &OutcomeUnknownError{Err: err}
 	}
+	if err == nil && !repeatable(r) {
+		markWrite(ctx) // a later failure of the same tool call must not be repeated
+	}
 	return data, err
 }
 

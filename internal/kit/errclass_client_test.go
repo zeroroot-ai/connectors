@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -159,81 +160,143 @@ func TestHugeRetryAfterIsBounded(t *testing.T) {
 	}
 }
 
-// A panic of a tool is an error result of the class refused. The log has the
-// tool and no argument.
-func TestPanicIsRefused(t *testing.T) {
+// connectTools registers the tools of a test and returns the client session.
+func connectTools(t *testing.T, log *slog.Logger, register func(*mcp.Server)) *mcp.ClientSession {
+	t.Helper()
+	srv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	ClassifyErrors(srv, log)
+	register(srv)
+	ct, st := mcp.NewInMemoryTransports()
+	ss, err := srv.Connect(context.Background(), st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ss.Close() })
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "0"}, nil).Connect(context.Background(), ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	return cs
+}
+
+func callClass(t *testing.T, cs *mcp.ClientSession, tool string) (class string, text string, res *mcp.CallToolResult) {
+	t.Helper()
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: tool, Arguments: map[string]any{"secret": "hunter2-token"}})
+	if err != nil || !res.IsError {
+		t.Fatalf("%s: err=%v res=%+v", tool, err, res)
+	}
+	sc, _ := res.StructuredContent.(map[string]any)
+	ec, _ := sc["error"].(map[string]any)
+	class, _ = ec["class"].(string)
+	return class, res.Content[0].(*mcp.TextContent).Text, res
+}
+
+// A panic of a tool that only reads is a refusal. A panic of a tool that changes
+// its target, or of a tool with no annotation, may have changed it before the
+// panic, so the class is outcome_unknown. The log has the tool and no argument.
+func TestPanicClassFollowsReadOnlyHint(t *testing.T) {
 	type in struct {
 		Secret string `json:"secret"`
 	}
 	type out struct{}
 	var logged strings.Builder
 	log := slog.New(slog.NewTextHandler(&logged, nil))
-	srv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
-	ClassifyErrors(srv, log)
-	AddTool(srv, log, &mcp.Tool{Name: "boom"}, func(context.Context, *mcp.CallToolRequest, in) (*mcp.CallToolResult, out, error) {
-		boom() // the value of the panic must not reach the text of the result
+	panics := func(context.Context, *mcp.CallToolRequest, in) (*mcp.CallToolResult, out, error) {
+		boom()
 		return nil, out{}, nil
+	}
+	cs := connectTools(t, log, func(srv *mcp.Server) {
+		AddTool(srv, log, &mcp.Tool{Name: "reads", Annotations: ReadOnly("reads")}, panics)
+		AddTool(srv, log, &mcp.Tool{Name: "writes", Annotations: Reversible("writes", true)}, panics)
+		AddTool(srv, log, &mcp.Tool{Name: "bare"}, panics)
 	})
-	ct, st := mcp.NewInMemoryTransports()
-	ss, err := srv.Connect(context.Background(), st, nil)
-	if err != nil {
-		t.Fatal(err)
+	for tool, want := range map[string]string{"reads": ClassRefused, "writes": ClassOutcomeUnknown, "bare": ClassOutcomeUnknown} {
+		class, text, _ := callClass(t, cs, tool)
+		if class != want {
+			t.Errorf("%s: class = %s, want %s", tool, class, want)
+		}
+		if strings.Contains(text, "hunter2") || strings.Contains(text, "boom") {
+			t.Errorf("%s: the text shows the panic: %s", tool, text)
+		}
 	}
-	defer func() { _ = ss.Close() }()
-	cs, err := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "0"}, nil).Connect(context.Background(), ct, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = cs.Close() }()
-	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "boom", Arguments: map[string]any{"secret": "hunter2-token"}})
-	if err != nil || !res.IsError {
-		t.Fatalf("err=%v res=%+v", err, res)
-	}
-	sc, _ := res.StructuredContent.(map[string]any)
-	if ec, _ := sc["error"].(map[string]any); ec["class"] != ClassRefused {
-		t.Errorf("structured content = %v", res.StructuredContent)
-	}
-	if text := res.Content[0].(*mcp.TextContent).Text; strings.Contains(text, "hunter2") || strings.Contains(text, "boom") {
-		t.Errorf("the text shows the panic: %s", text)
-	}
-	if l := logged.String(); !strings.Contains(l, "tool panic") || !strings.Contains(l, "tool=boom") || strings.Contains(l, "hunter2") {
+	if l := logged.String(); !strings.Contains(l, "tool panic") || !strings.Contains(l, "tool=reads") || strings.Contains(l, "hunter2") {
 		t.Errorf("log = %s", l)
 	}
 	// The server still answers after a panic.
-	if _, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "boom", Arguments: map[string]any{}}); err != nil {
-		t.Errorf("the server stopped: %v", err)
+	if _, _, res := callClass(t, cs, "reads"); res == nil {
+		t.Error("the server stopped")
 	}
 }
 
-// A failure to get the token happens before the request is sent. A repeat is
-// safe, so it is never outcome_unknown, even for a POST.
-func TestTokenFailureIsNotAnUnknownOutcome(t *testing.T) {
-	for name, c := range map[string]struct {
-		h    http.HandlerFunc
-		want string
-	}{
-		"a lost answer": {drop, ClassUnavailable},
-		"503":           {status(503, nil), ClassUnavailable},
-		"429":           {status(429, nil), ClassRateLimited},
-		"401":           {status(401, nil), ClassRefused},
-		"400":           {status(400, nil), ClassRefused},
-		"500":           {status(500, nil), ClassRefused},
+// A tool call that made a request that is not repeatable, and that the vendor
+// accepted, must not be repeated after a later failure that a later call could
+// pass. The call would repeat the request.
+func TestFailureAfterAWriteIsOutcomeUnknown(t *testing.T) {
+	var fail atomic.Int32 // the status that the GET answers
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(int(fail.Load()))
+			return
+		}
+		if r.URL.Path == "/bad" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ts.Close)
+	u, _ := url.Parse(ts.URL)
+	api := NewClient(u, ClientOptions{Timeout: time.Second, Sleep: func(context.Context, time.Duration) error { return nil }})
+	log := slog.New(slog.DiscardHandler)
+	type in struct {
+		Secret string `json:"secret"`
+	}
+	type out struct{}
+	do := func(ctx context.Context, m, p string) error {
+		return api.Do(ctx, Request{Method: m, Path: p}, nil)
+	}
+	tool := func(steps ...func(context.Context) error) mcp.ToolHandlerFor[in, out] {
+		return func(ctx context.Context, _ *mcp.CallToolRequest, _ in) (*mcp.CallToolResult, out, error) {
+			for _, s := range steps {
+				if err := s(ctx); err != nil {
+					return nil, out{}, err
+				}
+			}
+			return nil, out{}, nil
+		}
+	}
+	post := func(ctx context.Context) error { return do(ctx, http.MethodPost, "/w") }
+	put := func(ctx context.Context) error { return do(ctx, http.MethodPut, "/w") }
+	get := func(ctx context.Context) error { return do(ctx, http.MethodGet, "/r") }
+	badPost := func(ctx context.Context) error { return do(ctx, http.MethodPost, "/bad") }
+	opted := func(ctx context.Context) error { return Retryable(get(ctx)) }
+	cs := connectTools(t, log, func(srv *mcp.Server) {
+		for name, h := range map[string]mcp.ToolHandlerFor[in, out]{
+			"read_read":       tool(get, get),
+			"post_then_get":   tool(post, get),
+			"put_then_get":    tool(put, get),
+			"post_then_400":   tool(post, badPost),
+			"post_then_opted": tool(post, opted),
+		} {
+			AddTool(srv, log, &mcp.Tool{Name: name}, h)
+		}
+	})
+	fail.Store(http.StatusServiceUnavailable)
+	for tool, want := range map[string]string{
+		"read_read":       ClassUnavailable,    // nothing was written
+		"post_then_get":   ClassOutcomeUnknown, // the POST ran
+		"put_then_get":    ClassUnavailable,    // a PUT is safe to repeat
+		"post_then_400":   ClassRefused,        // a known refusal stays a refusal
+		"post_then_opted": ClassUnavailable,    // the tool proved a repeat safe
 	} {
-		ts := httptest.NewServer(c.h)
-		u, _ := url.Parse(ts.URL)
-		creds := &ClientCredentials{TokenURL: ts.URL + "/token", ID: "id", Secret: "secret"}
-		api := NewClient(u, ClientOptions{Auth: creds.Authenticator(), Timeout: time.Second})
-		err := api.Do(context.Background(), Request{Method: http.MethodPost, Path: "/x"}, nil)
-		ts.Close()
-		if err == nil {
-			t.Fatalf("%s: no error", name)
+		if class, text, _ := callClass(t, cs, tool); class != want {
+			t.Errorf("%s: class = %s, want %s (%s)", tool, class, want, text)
 		}
-		if got := Classify(err); got.Class != c.want {
-			t.Errorf("%s: %+v, want %s (%v)", name, got, c.want, err)
-		}
-		if strings.Contains(err.Error(), "secret") {
-			t.Errorf("%s: the text shows the secret: %v", name, err)
-		}
+	}
+	fail.Store(http.StatusTooManyRequests)
+	if class, _, _ := callClass(t, cs, "post_then_get"); class != ClassOutcomeUnknown {
+		t.Errorf("a 429 after a write: class = %s", class)
 	}
 }
 

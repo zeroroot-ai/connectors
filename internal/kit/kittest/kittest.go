@@ -171,9 +171,19 @@ func ErrorClass(t *testing.T, res *mcp.CallToolResult) kit.ErrorClass {
 // PUT and DELETE) after it read the request, so the caller gets no answer, as in
 // a lost answer. It lets a token request through, and it serves each read with
 // the mock. A test sets it before it starts the mock.
-func LostAnswer(h http.Handler) http.Handler {
+func LostAnswer(h http.Handler) http.Handler { return LostAnswerExcept(h) }
+
+// LostAnswerExcept is LostAnswer, and it lets through a request whose path has
+// one of the texts in pass. A test uses it for a read that the vendor serves with
+// a POST, for example a search.
+func LostAnswerExcept(h http.Handler, pass ...string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		write := r.Method != http.MethodGet && r.Method != http.MethodHead
+		for _, p := range pass {
+			if strings.Contains(r.URL.Path, p) {
+				write = false
+			}
+		}
 		if write && !strings.Contains(r.URL.Path, "token") && !strings.Contains(r.URL.Path, "/oauth") {
 			c, _, err := w.(http.Hijacker).Hijack()
 			if err == nil {

@@ -319,7 +319,7 @@ func puppetError(op string, err error) error {
 			Message string `json:"message"`
 		}
 		if kit.DecodeErrorBody(ae, &body) == nil && body.Kind != "" {
-			return fmt.Errorf("%s: Puppet answered HTTP %d, %s: %s%s", op, ae.Status, body.Kind, body.Msg, body.Message)
+			return kit.Described(err, "%s: Puppet answered HTTP %d, %s: %s%s", op, ae.Status, body.Kind, body.Msg, body.Message)
 		}
 	}
 	return fmt.Errorf("%s: %w", op, err)

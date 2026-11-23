@@ -212,7 +212,7 @@ func snError(op string, err error) error {
 			} `json:"error"`
 		}
 		if kit.DecodeErrorBody(ae, &body) == nil && body.Error.Message != "" {
-			return fmt.Errorf("%s: ServiceNow answered HTTP %d: %s: %s", op, ae.Status, body.Error.Message, body.Error.Detail)
+			return kit.Described(err, "%s: ServiceNow answered HTTP %d: %s: %s", op, ae.Status, body.Error.Message, body.Error.Detail)
 		}
 	}
 	return fmt.Errorf("%s: %w", op, err)
@@ -273,13 +273,9 @@ func (v *service) create(ctx context.Context, _ *mcp.CallToolRequest, in ticket.
 		Query: url.Values{"sysparm_fields": {fields}, "sysparm_exclude_reference_link": {"true"}}, JSON: body,
 	}, &resp)
 	if err != nil {
-		cerr := snError("create incident", err)
-		if in.DedupKey != "" {
-			// A repeat with the same dedup_key finds the incident that the lost call
-			// made, so a repeat is safe.
-			return nil, out, kit.Retryable(cerr)
-		}
-		return nil, out, cerr
+		// A lost answer is outcome_unknown, even with a dedup_key. The correlation_id
+		// is not unique, and a repeat while an insert still runs makes a second incident.
+		return nil, out, snError("create incident", err)
 	}
 	if kit.CheckString("sys_id", resp.Result.SysID, 32, kit.Hex32) != nil {
 		return nil, out, errors.New("create incident: ServiceNow gave no sys_id in the answer")

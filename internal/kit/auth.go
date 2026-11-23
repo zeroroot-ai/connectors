@@ -96,19 +96,15 @@ func (c *ClientCredentials) Token(ctx context.Context) (Secret, error) {
 	hcc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := hcc.Do(req)
 	if err != nil {
-		// No request reached the vendor API yet, so a later call is safe.
-		return "", Retryable(&tokenError{msg: "token endpoint is not reachable", cause: err})
+		// The cause gives the class: a transport failure is unavailable, or a
+		// timeout. A tool call that wrote before this failure is outcome_unknown.
+		return "", &tokenError{msg: "token endpoint is not reachable", cause: &transportError{err: err}}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		// The body is not shown. A token endpoint can echo a credential.
-		te := &tokenError{msg: fmt.Sprintf("token endpoint answered HTTP %d", resp.StatusCode),
+		return "", &tokenError{msg: fmt.Sprintf("token endpoint answered HTTP %d", resp.StatusCode),
 			cause: &APIError{Status: resp.StatusCode, RateLimited: resp.StatusCode == http.StatusTooManyRequests}}
-		switch resp.StatusCode {
-		case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-			return "", Retryable(te) // no request reached the vendor API yet
-		}
-		return "", te
 	}
 	var tr struct {
 		AccessToken string `json:"access_token"`

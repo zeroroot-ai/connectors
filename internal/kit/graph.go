@@ -18,7 +18,7 @@ func GraphError(op string, err error) error {
 			} `json:"error"`
 		}
 		if DecodeErrorBody(ae, &body) == nil && body.Error.Code != "" {
-			return fmt.Errorf("%s: Graph answered HTTP %d, %s: %s", op, ae.Status, body.Error.Code, body.Error.Message)
+			return Described(err, "%s: Graph answered HTTP %d, %s: %s", op, ae.Status, body.Error.Code, body.Error.Message)
 		}
 	}
 	return fmt.Errorf("%s: %w", op, err)

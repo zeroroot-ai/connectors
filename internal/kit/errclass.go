@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"runtime/debug"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -61,12 +62,95 @@ func (e *RetryableError) Unwrap() error { return e.Err }
 // caller returns it as an error of its own.
 func Retryable(err error) *RetryableError { return &RetryableError{Err: err} }
 
+// DescribedError is an error with its own text and a cause. A server uses it to
+// show the message that the vendor put in an error body, and the class of the
+// error still comes from the cause (an APIError, a transport error).
+type DescribedError struct {
+	msg   string
+	cause error
+}
+
+func (e *DescribedError) Error() string { return e.msg }
+func (e *DescribedError) Unwrap() error { return e.cause }
+
+// Described returns an error with the text of format and the cause cause.
+func Described(cause error, format string, a ...any) *DescribedError {
+	return &DescribedError{msg: fmt.Sprintf(format, a...), cause: cause}
+}
+
+// AfterWriteError marks an error of a tool call that made a request that is not
+// repeatable, and that the vendor accepted, before the error. A repeat of the
+// call would repeat that request, so the class of an error that a later call
+// could pass is outcome_unknown. AddTool wraps the error. It keeps the text.
+type AfterWriteError struct{ Err error }
+
+func (e *AfterWriteError) Error() string { return e.Err.Error() }
+func (e *AfterWriteError) Unwrap() error { return e.Err }
+
+// PanicError is the error that AddTool makes of a panic of a tool. ReadOnly is
+// the readOnlyHint of the tool. A panic of a tool that changes its target may
+// have changed it before the panic, so the class is outcome_unknown. The text is
+// fixed and has no value of the panic.
+type PanicError struct{ ReadOnly bool }
+
+func (e *PanicError) Error() string { return "the tool failed with an internal error" }
+
+type callKey struct{}
+
+// callState records, for one tool call, that a request that is not repeatable
+// was accepted by the vendor.
+type callState struct {
+	mu    sync.Mutex
+	wrote bool
+}
+
+func newCallContext(ctx context.Context) (context.Context, *callState) {
+	st := &callState{}
+	return context.WithValue(ctx, callKey{}, st), st
+}
+
+// markWrite records that the call made a request that is not repeatable and that
+// the vendor accepted.
+func markWrite(ctx context.Context) {
+	if st, ok := ctx.Value(callKey{}).(*callState); ok {
+		st.mu.Lock()
+		st.wrote = true
+		st.mu.Unlock()
+	}
+}
+
+func (st *callState) wroteBefore() bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.wrote
+}
+
 // Classify returns the class of an error. The cause comes first. The order is:
 // the rate limit, an HTTP 4xx answer (refused), the loss of the answer of a
 // request that is not safe to repeat (outcome_unknown, unless the tool wrapped
 // the error with Retryable), a timeout, an error that a repeat can pass, then
 // refused.
 func Classify(err error) ErrorClass {
+	c := classifyCause(err)
+	var aw *AfterWriteError
+	var re *RetryableError
+	if errors.As(err, &aw) && !errors.As(err, &re) &&
+		(c.Class == ClassUnavailable || c.Class == ClassTimeout || c.Class == ClassRateLimited) {
+		// An earlier request of the call changed the vendor. A repeat of the call
+		// would repeat it.
+		return ErrorClass{Class: ClassOutcomeUnknown}
+	}
+	return c
+}
+
+func classifyCause(err error) ErrorClass {
+	var pe *PanicError
+	if errors.As(err, &pe) {
+		if pe.ReadOnly {
+			return ErrorClass{Class: ClassRefused}
+		}
+		return ErrorClass{Class: ClassOutcomeUnknown}
+	}
 	var rl *RateLimitError
 	if errors.As(err, &rl) {
 		return ErrorClass{Class: ClassRateLimited, RetryAfterSeconds: secondsUntil(rl.Until)}

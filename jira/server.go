@@ -226,7 +226,7 @@ func jiraError(op string, err error) error {
 			for k, m := range body.Errors {
 				parts = append(parts, k+": "+m)
 			}
-			return fmt.Errorf("%s: Jira answered HTTP %d: %s", op, ae.Status, strings.Join(parts, "; "))
+			return kit.Described(err, "%s: Jira answered HTTP %d: %s", op, ae.Status, strings.Join(parts, "; "))
 		}
 	}
 	return fmt.Errorf("%s: %w", op, err)
@@ -273,13 +273,9 @@ func (v *service) create(ctx context.Context, _ *mcp.CallToolRequest, in ticket.
 		Method: http.MethodPost, Path: kit.Path("rest", "api", "3", "issue"), JSON: map[string]any{"fields": f},
 	}, &resp)
 	if err != nil {
-		cerr := jiraError("create issue", err)
-		if in.DedupKey != "" {
-			// A repeat with the same dedup_key finds the issue that the lost call
-			// made, so a repeat is safe.
-			return nil, out, kit.Retryable(cerr)
-		}
-		return nil, out, cerr
+		// A lost answer is outcome_unknown, even with a dedup_key. The search for the
+		// key is eventually consistent, so a repeat can open a second issue.
+		return nil, out, jiraError("create issue", err)
 	}
 	if !issueKey.MatchString(resp.Key) {
 		return nil, out, errors.New("create issue: Jira gave no issue key in the answer")
