@@ -103,11 +103,8 @@ func TestAlertsStatesAndFields(t *testing.T) {
 		ids != "[GHSA-c2f3-g4h5-j6m7 CVE-2026-1111]" || a["verifiable"] != true {
 		t.Errorf("alert = %v", a)
 	}
-	if byID["gitlab:80"]["state"] != "open" {
-		t.Errorf("RESOLVED with no fix on the default branch must be open: %v", byID["gitlab:80"])
-	}
-	if m.token != "glpat-secret" {
-		t.Errorf("token %q", m.token)
+	if byID["gitlab:80"]["state"] != "open" || m.token != "glpat-secret" {
+		t.Errorf("RESOLVED with no fix on the default branch must be open: %v, token %q", byID["gitlab:80"], m.token)
 	}
 	checkOtherStates(t, call)
 }
@@ -124,8 +121,9 @@ func checkOtherStates(t *testing.T, call func(string, map[string]any) (bool, str
 		t.Errorf("fixed alert = %v", l[0])
 	}
 	_, _, out = call("list_dependency_alerts", map[string]any{"project": "acme/shop", "state": "dismissed"})
-	ids := []string{}
-	for _, x := range alertList(t, out) {
+	got := alertList(t, out)
+	ids := make([]string, 0, len(got))
+	for _, x := range got {
 		ids = append(ids, x["id"].(string))
 		if x["id"] == "gitlab:79" && (x["verifiable"] != false || len(x["advisory_ids"].([]any)) != 0) {
 			t.Errorf("an alert with no advisory id must have verifiable false: %v", x)
