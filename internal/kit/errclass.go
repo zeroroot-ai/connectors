@@ -42,8 +42,9 @@ type RetryableError struct{ Err error }
 func (e *RetryableError) Error() string { return e.Err.Error() }
 func (e *RetryableError) Unwrap() error { return e.Err }
 
-// Retryable wraps err as a RetryableError.
-func Retryable(err error) error { return &RetryableError{Err: err} }
+// Retryable wraps err as a RetryableError. It returns the concrete type, so the
+// caller returns it as an error of its own.
+func Retryable(err error) *RetryableError { return &RetryableError{Err: err} }
 
 // Classify returns the class of an error. The order is: the rate limit, a
 // timeout, an error that a later call can pass, then refused.

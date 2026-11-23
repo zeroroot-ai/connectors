@@ -13,7 +13,7 @@ import (
 
 // classCall runs a tool against the route table and returns the class that the
 // error result carries, and its text.
-func classCall(t *testing.T, routes routeMap, tool string, args map[string]any) (kit.ErrorClass, string) {
+func classCall(t *testing.T, routes routeMap, tool string, args map[string]any) (class kit.ErrorClass, text string) {
 	t.Helper()
 	ts := httptest.NewServer(&mock{routes: routes})
 	t.Cleanup(ts.Close)
