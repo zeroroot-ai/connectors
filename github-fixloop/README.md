@@ -187,6 +187,6 @@ The installed version comes from the manifest at the default branch (`GET /repos
 
 Pages: the tool reads 100 alerts a page by cursor (the `after` value of the `Link` header), at most 10 pages. When GitHub has more alerts, `truncated` is true. A next page link without an `after` cursor is an error, not the end of the list. A GitHub error such as 403 (alerts disabled, or a token without the permission) is an error, never an empty list.
 
-How to verify a fix: call the tool with `state` `all`. Treat an alert as fixed only when its `state` is `fixed`. An alert that is missing, a `dismissed` alert (this includes `auto_dismissed`) and a `truncated` list prove nothing. The package URL is built with `github.com/package-url/packageurl-go`. The tool folds the name as trivy does: a Go module path and a Python name are lower case.
+How to verify a fix: call the tool with `state` `all`. Treat an alert as fixed only when its `state` is `fixed`. An alert that is missing, a `dismissed` alert (this includes `auto_dismissed`) and a `truncated` list prove nothing. The package URL is built with `github.com/package-url/packageurl-go`. The tool folds the name as trivy does: a Go module path, an npm name and a Python name are lower case.
 
 Test mock: `mock-forge` serves the endpoint from the content of the repository. See the README of `mock-forge`.

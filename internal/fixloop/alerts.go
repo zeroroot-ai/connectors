@@ -88,8 +88,6 @@ type AlertsResult struct {
 	State     string  `json:"state"`
 	Alerts    []Alert `json:"alerts"`
 	Truncated bool    `json:"truncated"`
-	// Note explains a limit of the host, for example that a field is not known.
-	Note string `json:"note,omitempty"`
 }
 
 // The values of Alert.VersionSource.
@@ -162,7 +160,7 @@ func PurlType(ecosystem string) string { return purlTypes[strings.ToLower(ecosys
 // Purl builds the package URL of a package at a version with
 // github.com/package-url/packageurl-go, so the escaping follows the package URL
 // rules (a + is %2B, a scope @ is %40). It folds the name as the trivy parsers
-// do: a Go module path and a Python name are lower case, and a Python _ is -.
+// do: a Go module path, an npm name and a Python name are lower case, and a Python _ is -.
 // It returns "" when the ecosystem is not known, or the name or the version is
 // empty.
 func Purl(ecosystem, name, version string) string {
@@ -172,7 +170,7 @@ func Purl(ecosystem, name, version string) string {
 	}
 	var namespace string
 	switch typ {
-	case packageurl.TypeGolang:
+	case packageurl.TypeGolang, packageurl.TypeNPM:
 		name = strings.ToLower(name)
 	case packageurl.TypePyPi:
 		name = strings.ToLower(strings.ReplaceAll(name, "_", "-"))
@@ -196,10 +194,16 @@ var ecosystemsByFile = map[string]string{
 	"go.mod": "go", "go.sum": "go", "package-lock.json": "npm", "yarn.lock": "yarn", "pnpm-lock.yaml": "pnpm",
 	"npm-shrinkwrap.json": "npm", "requirements.txt": "pip", "Pipfile.lock": "pipenv", "poetry.lock": "poetry",
 	"uv.lock": "uv", "Gemfile.lock": "bundler", "pom.xml": "maven", "composer.lock": "composer", "Cargo.lock": "cargo",
-	"packages.lock.json": "nuget", "conan.lock": "conan", "build.gradle": "gradle", "build.sbt": "sbt",
+	"packages.lock.json": "nuget", "conan.lock": "conan", "build.gradle": "gradle", "build.gradle.kts": "gradle",
+	"gradle.lockfile": "gradle", "build.sbt": "sbt", "setup.py": "setuptools", "Pipfile": "pipenv",
+	"package.json": "npm", "gems.locked": "bundler",
 }
 
-// EcosystemOfFile returns the ecosystem of a manifest path, or "".
+// EcosystemOfFile returns the ecosystem of a manifest path, or "". A file that
+// can belong to more than one ecosystem has none. A CycloneDX SBOM (bom.json,
+// *.cdx.json) lists packages of every ecosystem, and pyproject.toml serves poetry,
+// uv and others, so they give "". An empty ecosystem gives no purl, and a caller
+// does not verify a fix on it.
 func EcosystemOfFile(p string) string {
 	if i := strings.LastIndex(p, "/"); i >= 0 {
 		p = p[i+1:]

@@ -28,7 +28,8 @@ type Installed struct {
 //     (lockfile version 2 and 3), and each dependencies entry, nested ones too
 //     (version 1).
 //   - requirements.txt: a line name==version or name===version. A range and a
-//     wildcard such as 1.2.* are not an installed version.
+//     wildcard such as 1.2.* are not an installed version. A trailing backslash
+//     (pip-compile --generate-hashes) is allowed.
 func InstalledPackage(manifestPath, content, name string) Installed {
 	switch path.Base(manifestPath) {
 	case "go.mod":
@@ -93,16 +94,31 @@ func goModLines(content string) (requires [][2]string, replaces []goReplace) {
 	return requires, replaces
 }
 
+// findReplace picks the replace directive of a module at a version. As the go
+// command does, a directive for that version wins over a directive for every
+// version, wherever each one stands in the file.
+func findReplace(replaces []goReplace, module, version string) (goReplace, bool) {
+	var generic goReplace
+	found := false
+	for _, rp := range replaces {
+		switch {
+		case rp.old != module:
+		case rp.oldVer == version:
+			return rp, true
+		case rp.oldVer == "" && !found:
+			generic, found = rp, true
+		}
+	}
+	return generic, found
+}
+
 func goModInstalled(content, name string) Installed {
 	requires, replaces := goModLines(content)
 	out := Installed{Name: name}
 	for _, rq := range requires {
 		eName, eVer := rq[0], rq[1]
-		for _, rp := range replaces {
-			if rp.old == rq[0] && (rp.oldVer == "" || rp.oldVer == rq[1]) {
-				eName, eVer = rp.new, rp.newVer // a local path has no version
-				break
-			}
+		if rp, ok := findReplace(replaces, rq[0], rq[1]); ok {
+			eName, eVer = rp.new, rp.newVer // a local path has no version
 		}
 		if rq[0] != name && eName != name {
 			continue
@@ -157,7 +173,7 @@ func npmLockVersions(content, name string) []string {
 	return out
 }
 
-var requirementLine = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?\s*===?\s*([^\s;#,]+)\s*(?:[;#].*)?$`)
+var requirementLine = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?\s*===?\s*([^\s;#,]+)\s*(?:[;#].*|\\)?$`)
 
 func normalizePip(s string) string {
 	return strings.ToLower(strings.NewReplacer("_", "-", ".", "-").Replace(s))

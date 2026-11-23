@@ -20,6 +20,8 @@ func TestPurl(t *testing.T) {
 		{"cargo", "serde", "1.0.1", "pkg:cargo/serde@1.0.1"},
 		{"rust", "serde", "1.0.1", "pkg:cargo/serde@1.0.1"},
 		{"bundler", "rails", "7.0.0", "pkg:gem/rails@7.0.0"},
+		{"npm", "JSONStream", "1.3.5", "pkg:npm/jsonstream@1.3.5"},
+		{"npm", "@Scope/Pkg", "1.0.0", "pkg:npm/%40scope/pkg@1.0.0"},
 		{"go", "github.com/x/y", "", ""},
 		{"unknown", "a", "1", ""},
 	} {
@@ -71,6 +73,10 @@ func TestInstalledPackage(t *testing.T) {
 		{"requirements.txt", "flask>=2\n", "flask", "flask", nil},
 		{"requirements.txt", "flask==2.*\n", "flask", "flask", nil},
 		{"requirements.txt", "flask==2.0,<3\n", "flask", "flask", nil},
+		{"requirements.txt", "flask==2.0.1 \\\n    --hash=sha256:abc\n", "flask", "flask", []string{"2.0.1"}},
+		{"go.mod", "require a/b v1.0.0\nreplace a/b v1.0.0 => c/d v2.0.0\nreplace a/b => e/f v3.0.0\n", "a/b", "c/d", []string{"v2.0.0"}},
+		{"go.mod", "require a/b v1.0.0\nreplace a/b => e/f v3.0.0\nreplace a/b v1.0.0 => c/d v2.0.0\n", "a/b", "c/d", []string{"v2.0.0"}},
+		{"go.mod", "require a/b v1.1.0\nreplace a/b => e/f v3.0.0\nreplace a/b v1.0.0 => c/d v2.0.0\n", "a/b", "e/f", []string{"v3.0.0"}},
 		{"pom.xml", "x", "x", "x", nil},
 	} {
 		got := InstalledPackage(c.file, c.content, c.name)
@@ -81,7 +87,10 @@ func TestInstalledPackage(t *testing.T) {
 }
 
 func TestEcosystemOfFile(t *testing.T) {
-	if EcosystemOfFile("a/b/go.mod") != "go" || EcosystemOfFile("poetry.lock") != "poetry" || EcosystemOfFile("x.txt") != "" {
+	if EcosystemOfFile("a/b/go.mod") != "go" || EcosystemOfFile("poetry.lock") != "poetry" || EcosystemOfFile("x.txt") != "" || EcosystemOfFile("bom.json") != "" ||
+		EcosystemOfFile("app.cdx.json") != "" || EcosystemOfFile("pyproject.toml") != "" || EcosystemOfFile("a/build.gradle.kts") != "gradle" ||
+		EcosystemOfFile("setup.py") != "setuptools" || EcosystemOfFile("Pipfile") != "pipenv" || EcosystemOfFile("package.json") != "npm" ||
+		EcosystemOfFile("gems.locked") != "bundler" {
 		t.Error("EcosystemOfFile")
 	}
 }

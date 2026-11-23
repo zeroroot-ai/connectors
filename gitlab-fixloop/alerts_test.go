@@ -32,8 +32,8 @@ func depList(items ...string) routeHandler { return reply(200, "["+strings.Join(
 
 type routeHandler = func(http.ResponseWriter, *http.Request, map[string]any)
 
-func vulnNode(id int, state, pkg, version, file, identifiers string) string {
-	return `{"id":"gid://gitlab/Vulnerability/` + strconv.Itoa(id) + `","state":"` + state + `","severity":"HIGH","title":"Flaw in ` + pkg + `",` +
+func vulnNode(id int, state string, resolved bool, pkg, version, file, identifiers string) string {
+	return `{"id":"gid://gitlab/Vulnerability/` + strconv.Itoa(id) + `","state":"` + state + `","resolvedOnDefaultBranch":` + strconv.FormatBool(resolved) + `,"severity":"HIGH","title":"Flaw in ` + pkg + `",` +
 		`"webUrl":"https://gitlab.example.com/acme/shop/-/security/vulnerabilities/` + strconv.Itoa(id) + `",` +
 		`"identifiers":[` + identifiers + `],"location":{"__typename":"VulnerabilityLocationDependencyScanning","file":"` + file + `",` +
 		`"dependency":{"package":{"name":"` + pkg + `"},"version":"` + version + `"}}}`
@@ -52,17 +52,6 @@ func graph(nodes, next string) string {
 	return `{"data":{"project":{"vulnerabilities":{"pageInfo":` + pi + `,"nodes":[` + nodes + `]}}}}`
 }
 
-// stateOf returns the VulnerabilityState filter of a GraphQL request.
-func stateOf(body map[string]any) string {
-	vars, _ := body["variables"].(map[string]any)
-	list, _ := vars["state"].([]any)
-	parts := make([]string, 0, len(list))
-	for _, s := range list {
-		parts = append(parts, fmt.Sprint(s))
-	}
-	return strings.Join(parts, ",")
-}
-
 func alertList(t *testing.T, out map[string]any) []map[string]any {
 	t.Helper()
 	raw := out["alerts"].([]any)
@@ -73,69 +62,81 @@ func alertList(t *testing.T, out map[string]any) []map[string]any {
 	return l
 }
 
+// The answers follow the GraphQL reference: GitLab sets the state RESOLVED when a
+// person or a policy resolves a vulnerability. A fix that a scan sees leaves the
+// state DETECTED and sets resolvedOnDefaultBranch to true.
+func stateFixture() string {
+	return strings.Join([]string{
+		vulnNode(77, "DETECTED", false, "lodash", "4.17.20", "package-lock.json", cveGhsa), // open
+		vulnNode(78, "DETECTED", true, "github.com/Acme/Lib", "v1.2.0", "go.mod", cveGhsa), // fixed by a scan
+		vulnNode(79, "DISMISSED", false, "left-pad", "1.3.0", "package-lock.json", ""),     // dismissed
+		vulnNode(80, "RESOLVED", false, "minimist", "1.0.0", "package-lock.json", cveGhsa), // resolved by a person: open
+		vulnNode(81, "DISMISSED", true, "chalk", "1.0.0", "package-lock.json", cveGhsa),    // dismissed wins
+		vulnNode(82, "CONFIRMED", false, "request", "2.0.0", "package-lock.json", cveGhsa), // open
+	}, ",")
+}
+
 func TestAlertsStatesAndFields(t *testing.T) {
-	open := vulnNode(77, "DETECTED", "lodash", "4.17.20", "package-lock.json", cveGhsa)
-	fixed := vulnNode(78, "RESOLVED", "github.com/Acme/Lib", "v1.2.0", "go.mod", cveGhsa)
-	dismissed := vulnNode(79, "DISMISSED", "left-pad", "1.3.0", "package-lock.json", "")
 	m, call := setup(t, routeMap{
 		"GET " + projectPath: reply(200, projectInfo),
 		"GET " + depsPath:    depList(dep("lodash", "4.17.20", `{"id":77}`), dep("left-pad", "1.3.0")),
 		"POST " + graphPath: func(w http.ResponseWriter, _ *http.Request, body map[string]any) {
-			switch stateOf(body) {
-			case "DETECTED,CONFIRMED":
-				_, _ = w.Write([]byte(graph(open, "")))
-			case "RESOLVED":
-				_, _ = w.Write([]byte(graph(fixed, "")))
-			case "DISMISSED":
-				_, _ = w.Write([]byte(graph(dismissed, "")))
-			default:
-				_, _ = w.Write([]byte(graph(open+","+fixed+","+dismissed, "")))
+			if !strings.Contains(fmt.Sprint(body["query"]), "resolvedOnDefaultBranch") {
+				http.Error(w, `{"message":"the query must ask resolvedOnDefaultBranch"}`, http.StatusBadRequest)
+				return
 			}
+			_, _ = w.Write([]byte(graph(stateFixture(), "")))
 		},
 	})
-	isErr, msg, out := call("list_dependency_alerts", map[string]any{"project": "acme/shop"})
-	if isErr {
-		t.Fatal(msg)
-	}
-	l := alertList(t, out)
-	if len(l) != 1 || out["truncated"] != false || out["ref"] != "main" {
-		t.Fatalf("out = %v", out)
-	}
-	a := l[0]
-	ids := fmt.Sprint(a["advisory_ids"])
-	if a["id"] != "gitlab:77" || a["state"] != "open" || a["package"] != "lodash" || a["ecosystem"] != "npm" || a["version"] != "4.17.20" ||
-		a["version_source"] != "host" || a["purl"] != "pkg:npm/lodash@4.17.20" || a["severity"] != "high" || a["manifest_path"] != "package-lock.json" ||
-		ids != "[GHSA-c2f3-g4h5-j6m7 CVE-2026-1111]" || a["verifiable"] != true {
-		t.Errorf("alert = %v", a)
-	}
-	if m.token != "glpat-secret" {
-		t.Errorf("token %q", m.token)
-	}
-
-	checkAllStates(t, call)
-}
-
-func checkAllStates(t *testing.T, call func(string, map[string]any) (bool, string, map[string]any)) {
-	t.Helper()
-	_, _, out := call("list_dependency_alerts", map[string]any{"project": "acme/shop", "state": "all"})
+	_, _, out := call("list_dependency_alerts", map[string]any{"project": "acme/shop"})
 	byID := map[string]map[string]any{}
 	for _, x := range alertList(t, out) {
 		byID[x["id"].(string)] = x
 	}
-	if len(byID) != 3 || byID["gitlab:78"]["state"] != "fixed" || byID["gitlab:79"]["state"] != "dismissed" {
-		t.Fatalf("all = %v", out)
+	if len(byID) != 3 || byID["gitlab:77"] == nil || byID["gitlab:80"] == nil || byID["gitlab:82"] == nil || out["truncated"] != false || out["ref"] != "main" {
+		t.Fatalf("open = %v", out)
+	}
+	a := byID["gitlab:77"]
+	ids := fmt.Sprint(a["advisory_ids"])
+	if a["state"] != "open" || a["package"] != "lodash" || a["ecosystem"] != "npm" || a["version"] != "4.17.20" ||
+		a["version_source"] != "host" || a["purl"] != "pkg:npm/lodash@4.17.20" || a["severity"] != "high" || a["manifest_path"] != "package-lock.json" ||
+		ids != "[GHSA-c2f3-g4h5-j6m7 CVE-2026-1111]" || a["verifiable"] != true {
+		t.Errorf("alert = %v", a)
+	}
+	if byID["gitlab:80"]["state"] != "open" {
+		t.Errorf("RESOLVED with no fix on the default branch must be open: %v", byID["gitlab:80"])
+	}
+	if m.token != "glpat-secret" {
+		t.Errorf("token %q", m.token)
+	}
+	checkOtherStates(t, call)
+}
+
+func checkOtherStates(t *testing.T, call func(string, map[string]any) (bool, string, map[string]any)) {
+	t.Helper()
+	_, _, out := call("list_dependency_alerts", map[string]any{"project": "acme/shop", "state": "fixed"})
+	l := alertList(t, out)
+	if len(l) != 1 || l[0]["id"] != "gitlab:78" || l[0]["state"] != "fixed" {
+		t.Fatalf("fixed = %v", out)
 	}
 	// A resolved vulnerability is not in the dependency list. The file name gives the ecosystem.
-	if f := byID["gitlab:78"]; f["ecosystem"] != "go" || f["purl"] != "pkg:golang/github.com/acme/lib@v1.2.0" {
-		t.Errorf("fixed alert = %v", f)
+	if l[0]["ecosystem"] != "go" || l[0]["purl"] != "pkg:golang/github.com/acme/lib@v1.2.0" {
+		t.Errorf("fixed alert = %v", l[0])
 	}
-	// No advisory id: the alert is not verifiable.
-	if d := byID["gitlab:79"]; d["verifiable"] != false || len(d["advisory_ids"].([]any)) != 0 {
-		t.Errorf("dismissed alert = %v", d)
+	_, _, out = call("list_dependency_alerts", map[string]any{"project": "acme/shop", "state": "dismissed"})
+	ids := []string{}
+	for _, x := range alertList(t, out) {
+		ids = append(ids, x["id"].(string))
+		if x["id"] == "gitlab:79" && (x["verifiable"] != false || len(x["advisory_ids"].([]any)) != 0) {
+			t.Errorf("an alert with no advisory id must have verifiable false: %v", x)
+		}
 	}
-	_, _, out = call("list_dependency_alerts", map[string]any{"project": "acme/shop", "state": "fixed"})
-	if l := alertList(t, out); len(l) != 1 || l[0]["state"] != "fixed" {
-		t.Errorf("fixed filter = %v", out)
+	if fmt.Sprint(ids) != "[gitlab:79 gitlab:81]" {
+		t.Errorf("dismissed = %v", ids)
+	}
+	_, _, out = call("list_dependency_alerts", map[string]any{"project": "acme/shop", "state": "all"})
+	if n := len(alertList(t, out)); n != 6 {
+		t.Errorf("all = %d alerts", n)
 	}
 }
 
@@ -189,9 +190,9 @@ func TestAlertsPagesAndCut(t *testing.T) {
 			vars := body["variables"].(map[string]any)
 			switch vars["after"] {
 			case nil:
-				_, _ = w.Write([]byte(graph(vulnNode(1, "DETECTED", "a", "1", "package-lock.json", cveGhsa), "C2")))
+				_, _ = w.Write([]byte(graph(vulnNode(1, "DETECTED", false, "a", "1", "package-lock.json", cveGhsa), "C2")))
 			case "C2":
-				_, _ = w.Write([]byte(graph(vulnNode(2, "DETECTED", "a", "1", "package-lock.json", cveGhsa), "")))
+				_, _ = w.Write([]byte(graph(vulnNode(2, "DETECTED", false, "a", "1", "package-lock.json", cveGhsa), "")))
 			default:
 				http.Error(w, `{"message":"bad cursor"}`, http.StatusBadRequest)
 			}
@@ -208,7 +209,7 @@ func TestAlertsPagesAndCut(t *testing.T) {
 		"GET " + depsPath:    depList(dep("a", "1")),
 		"POST " + graphPath: func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
 			calls++
-			_, _ = w.Write([]byte(graph(vulnNode(calls, "DETECTED", "a", "1", "package-lock.json", cveGhsa), "NEXT")))
+			_, _ = w.Write([]byte(graph(vulnNode(calls, "DETECTED", false, "a", "1", "package-lock.json", cveGhsa), "NEXT")))
 		},
 	})
 	_, _, out = call("list_dependency_alerts", map[string]any{"project": "acme/shop"})

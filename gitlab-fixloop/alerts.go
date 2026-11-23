@@ -29,8 +29,9 @@ import (
 //
 // https://docs.gitlab.com/api/graphql/reference/ (the field Project.vulnerabilities, the object Vulnerability,
 // VulnerabilityIdentifier, VulnerabilityLocationDependencyScanning and VulnerableDependency, and the enum
-// VulnerabilityState: DETECTED, CONFIRMED, DISMISSED, RESOLVED). DETECTED and CONFIRMED map to open, RESOLVED to
-// fixed and DISMISSED to dismissed. The GraphQL API needs GitLab Ultimate and the read_api scope.
+// VulnerabilityState: DETECTED, CONFIRMED, DISMISSED, RESOLVED, and the field Vulnerability.resolvedOnDefaultBranch).
+// The tool reads each state and filters the list itself, see alertState. The GraphQL API needs GitLab Ultimate and the
+// read_api scope.
 //
 // The dependency list gives the package manager, which the vulnerability has not:
 //
@@ -55,6 +56,7 @@ func (v *service) registerAlerts(s *mcp.Server, log *slog.Logger) {
 			"Each alert has a stable id, the state (open, fixed or dismissed), the package, the ecosystem, the installed version " +
 			"and its package URL, the advisory ids (GHSA and CVE) from the identifiers of the vulnerability, the severity, the manifest path and the URL. " +
 			"GitLab gives no vulnerable range and no patched version, so those fields are empty. " +
+			"The state is fixed only when GitLab says that the default branch fixed the vulnerability (resolvedOnDefaultBranch) and nobody dismissed it. A vulnerability that a person marked resolved, with no fix on the default branch, is open. " +
 			"An alert with no advisory id has verifiable false: a caller cannot match it to a finding by advisory. " +
 			"The state filter is open (the default), fixed, dismissed or all. " +
 			"A token that cannot read the Security Dashboard, a project with no dependency scan and a GraphQL error are errors and never an empty list. " +
@@ -108,13 +110,16 @@ func (v *service) listDependencyAlerts(ctx context.Context, _ *mcp.CallToolReque
 	if err != nil {
 		return nil, out, err
 	}
-	nodes, truncated, err := v.vulnerabilities(ctx, in.Repo, state)
+	nodes, truncated, err := v.vulnerabilities(ctx, in.Repo)
 	if err != nil {
 		return nil, out, err
 	}
 	out.Truncated = truncated
 	for _, n := range nodes {
-		out.Alerts = append(out.Alerts, toAlert(n, managers))
+		al := toAlert(n, managers)
+		if state == fixloop.AlertAll || state == al.State {
+			out.Alerts = append(out.Alerts, al)
+		}
 	}
 	return nil, out, nil
 }
@@ -158,12 +163,12 @@ func (v *service) packageManagers(ctx context.Context, project string) (map[stri
 
 func depKey(name, version, file string) string { return name + "\x00" + version + "\x00" + file }
 
-const vulnerabilityQuery = `query($path: ID!, $state: [VulnerabilityState!], $after: String) {
+const vulnerabilityQuery = `query($path: ID!, $after: String) {
   project(fullPath: $path) {
-    vulnerabilities(reportType: [DEPENDENCY_SCANNING], state: $state, first: 100, after: $after) {
+    vulnerabilities(reportType: [DEPENDENCY_SCANNING], first: 100, after: $after) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        id state severity title webUrl
+        id state resolvedOnDefaultBranch severity title webUrl
         identifiers { externalType externalId name url }
         location {
           __typename
@@ -175,12 +180,13 @@ const vulnerabilityQuery = `query($path: ID!, $state: [VulnerabilityState!], $af
 }`
 
 type glVuln struct {
-	ID          string `json:"id"`
-	State       string `json:"state"`
-	Severity    string `json:"severity"`
-	Title       string `json:"title"`
-	WebURL      string `json:"webUrl"`
-	Identifiers []struct {
+	ID                      string `json:"id"`
+	State                   string `json:"state"`
+	ResolvedOnDefaultBranch bool   `json:"resolvedOnDefaultBranch"`
+	Severity                string `json:"severity"`
+	Title                   string `json:"title"`
+	WebURL                  string `json:"webUrl"`
+	Identifiers             []struct {
 		ExternalType string `json:"externalType"`
 		ExternalID   string `json:"externalId"`
 		Name         string `json:"name"`
@@ -214,28 +220,16 @@ type glGraphResponse struct {
 	} `json:"errors"`
 }
 
-func graphStates(state string) []string {
-	switch state {
-	case fixloop.AlertOpen:
-		return []string{"DETECTED", "CONFIRMED"}
-	case fixloop.AlertFixed:
-		return []string{"RESOLVED"}
-	case fixloop.AlertDismissed:
-		return []string{"DISMISSED"}
-	}
-	return nil
-}
-
 // vulnerabilities reads the pages of the GraphQL field. It returns true when
 // GitLab has more pages than the tool reads.
-func (v *service) vulnerabilities(ctx context.Context, project, state string) ([]glVuln, bool, error) {
+func (v *service) vulnerabilities(ctx context.Context, project string) ([]glVuln, bool, error) {
 	var all []glVuln
 	after := ""
 	for n := 0; ; n++ {
 		if n == fixloop.MaxAlertPages {
 			return all, true, nil
 		}
-		vars := map[string]any{"path": project, "state": graphStates(state)}
+		vars := map[string]any{"path": project}
 		if after != "" {
 			vars["after"] = after
 		}
@@ -272,7 +266,7 @@ func (v *service) vulnerabilities(ctx context.Context, project, state string) ([
 
 func toAlert(n glVuln, managers map[string]string) fixloop.Alert {
 	al := fixloop.Alert{
-		ID: "gitlab:" + n.ID[strings.LastIndex(n.ID, "/")+1:], State: alertState(n.State), Severity: strings.ToLower(n.Severity),
+		ID: "gitlab:" + n.ID[strings.LastIndex(n.ID, "/")+1:], State: alertState(n), Severity: strings.ToLower(n.Severity),
 		ManifestPath: n.Location.File, URL: n.WebURL,
 	}
 	texts := make([]string, 0, 1+3*len(n.Identifiers))
@@ -299,13 +293,18 @@ func toAlert(n glVuln, managers map[string]string) fixloop.Alert {
 	return al
 }
 
-// alertState maps VulnerabilityState to the state of an alert.
-func alertState(s string) string {
-	switch s {
-	case "RESOLVED":
-		return fixloop.AlertFixed
-	case "DISMISSED":
+// alertState gives the state of an alert. GitLab sets the state RESOLVED when a
+// person or a policy resolves a vulnerability, not when a scan sees the fix. A
+// fix that a scan sees leaves the state DETECTED and sets resolvedOnDefaultBranch
+// ("Indicates whether the vulnerability is fixed on the default branch or not").
+// So a vulnerability is fixed only when resolvedOnDefaultBranch is true and the
+// state is not DISMISSED. RESOLVED with resolvedOnDefaultBranch false is open.
+func alertState(n glVuln) string {
+	switch {
+	case n.State == "DISMISSED":
 		return fixloop.AlertDismissed
+	case n.ResolvedOnDefaultBranch:
+		return fixloop.AlertFixed
 	}
-	return fixloop.AlertOpen // DETECTED and CONFIRMED
+	return fixloop.AlertOpen
 }
