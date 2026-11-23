@@ -109,3 +109,64 @@ func TestOpenKeepsTheExecutableBitInTheForge(t *testing.T) {
 		t.Errorf("no pull request: %d", st)
 	}
 }
+
+// srcEntries makes the folder src of the base tree hold these entries.
+func srcEntries(routes map[string]handler, entries ...string) map[string]handler {
+	routes["GET "+repo+"/git/trees/"+srcTree] = reply(200, `{"sha":"`+srcTree+`","truncated":false,"tree":[`+strings.Join(entries, ",")+`]}`)
+	return routes
+}
+
+func item(path, mode, typ string) string {
+	return `{"path":"` + path + `","mode":"` + mode + `","type":"` + typ + `","sha":"` + blobSHA + `"}`
+}
+
+// The tool writes plain files. It does not replace a symlink, a submodule or a
+// folder, it does not write through one, and it does not delete a folder or a
+// submodule whole. Each refusal comes before any write.
+func TestOpenRefusesToReplaceOrWriteThroughANonFile(t *testing.T) {
+	write := func(path string) map[string]any {
+		return map[string]any{"files": []map[string]any{{"path": path, "content": "x\n"}}}
+	}
+	remove := func(path string) map[string]any {
+		return map[string]any{"files": []map[string]any{{"path": path, "delete": true}}}
+	}
+	cases := map[string]struct {
+		entries []string
+		files   map[string]any
+		want    string
+	}{
+		"write to a symlink":                 {[]string{item("db.go", "120000", "blob")}, write("src/db.go"), "is a symlink"},
+		"write to a submodule":               {[]string{item("db.go", "160000", "commit")}, write("src/db.go"), "is a submodule"},
+		"write to a folder":                  {[]string{item("db.go", "040000", "tree")}, write("src/db.go"), "is a folder"},
+		"write below a symlink":              {[]string{item("db.go", "120000", "blob")}, write("src/db.go/x.go"), "below src/db.go"},
+		"write below a submodule":            {[]string{item("db.go", "160000", "commit")}, write("src/db.go/x.go"), "is a submodule and not a folder"},
+		"write below a file":                 {[]string{item("db.go", "100644", "blob")}, write("src/db.go/x.go"), "is a file and not a folder"},
+		"delete below a file":                {[]string{item("db.go", "100644", "blob")}, remove("src/db.go/x.go"), "is a file and not a folder"},
+		"delete of a folder":                 {[]string{item("db.go", "040000", "tree")}, remove("src/db.go"), "would remove it whole"},
+		"delete of a submodule":              {[]string{item("db.go", "160000", "commit")}, remove("src/db.go"), "would remove it whole"},
+		"write to an unknown mode of a blob": {[]string{item("db.go", "100664", "blob")}, write("src/db.go"), "does not replace it"},
+	}
+	for name, c := range cases {
+		m, call := setup(t, srcEntries(openRoutes(), c.entries...))
+		args := openArgs()
+		args["files"] = c.files["files"]
+		isErr, text, _ := call("open_merge_request", args)
+		if !isErr || !strings.Contains(text, c.want) {
+			t.Errorf("%s: isErr=%v %s, want %q", name, isErr, text, c.want)
+		}
+		for _, c2 := range m.calls {
+			if strings.HasPrefix(c2, "POST") {
+				t.Errorf("%s: the tool wrote: %s", name, c2)
+			}
+		}
+	}
+}
+
+func TestOpenAllowsTheDeleteOfASymlinkAndTheWriteOfAPlainFile(t *testing.T) {
+	_, call := setup(t, srcEntries(openRoutes(), item("db.go", "100644", "blob"), item("link", "120000", "blob")))
+	args := openArgs()
+	args["files"] = []map[string]any{{"path": "src/db.go", "content": "x\n"}, {"path": "src/link", "delete": true}}
+	if isErr, text, _ := call("open_merge_request", args); isErr {
+		t.Errorf("a plain write and the delete of a symlink were refused: %s", text)
+	}
+}

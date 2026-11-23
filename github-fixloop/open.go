@@ -211,15 +211,21 @@ func modeOr(modes map[string]string, path string) string {
 	return fileMode
 }
 
-// modesOf returns the mode that the tool writes for each path that it writes.
-// An existing file that is executable (100755) in the tree keeps that mode, so an
-// edit of a script does not drop its executable bit. Any other path gets the mode
-// of a regular file. The tool walks the folders of each path without recursion,
-// so a large tree is read in full:
+// modesOf checks each path of the changes against the tree and returns the mode
+// that the tool writes for each written path. It reads the tree by walking the
+// folders of each path without recursion, so a large tree is read in full:
 //
 //	GET /repos/{owner}/{repo}/git/trees/{tree_sha}
 //
 // https://docs.github.com/en/rest/git/trees#get-a-tree
+//
+// A write to a path that is an executable file (100755) keeps 100755, so an edit
+// of a script does not drop its executable bit. A path that does not exist gets
+// 100644. The tool refuses, with kit.ErrInvalidInput, a write to a path that
+// exists and is not a blob with the mode 100644 or 100755 (a symlink, a
+// submodule, a folder), a write or a delete below a folder of the path that is
+// not a folder, and a delete of a path that is a folder or a submodule, because
+// the delete would remove it whole.
 func (v *service) modesOf(ctx context.Context, r prRef, rootTree string, changes []fixloop.FileChange) (map[string]string, error) {
 	folders := map[string][]ghTreeItem{}
 	list := func(sha string) ([]ghTreeItem, error) {
@@ -231,24 +237,26 @@ func (v *service) modesOf(ctx context.Context, r prRef, rootTree string, changes
 			Tree      []ghTreeItem `json:"tree"`
 		}
 		if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: repoPath(r, "git", "trees", sha)}, &t); err != nil {
-			return nil, fmt.Errorf("read the tree %s to keep the file modes: %w", sha, err)
+			return nil, fmt.Errorf("read the tree %s to check the paths: %w", sha, err)
 		}
 		if t.Truncated {
-			return nil, fmt.Errorf("the tree %s is too large to read the file modes", sha)
+			return nil, fmt.Errorf("the tree %s is too large to check the paths", sha)
 		}
 		folders[sha] = t.Tree
 		return t.Tree, nil
 	}
 	modes := map[string]string{}
 	for _, c := range changes {
-		if c.Delete {
-			continue
-		}
-		mode, err := modeAt(list, rootTree, c.Path)
+		item, err := itemAt(list, rootTree, c.Path)
 		if err != nil {
 			return nil, err
 		}
-		modes[c.Path] = mode
+		if err := checkChange(c, item); err != nil {
+			return nil, err
+		}
+		if !c.Delete {
+			modes[c.Path] = modeOf(item)
+		}
 	}
 	return modes, nil
 }
@@ -260,16 +268,16 @@ type ghTreeItem struct {
 	SHA  string `json:"sha"`
 }
 
-// modeAt walks the folders of path from the root tree and returns the mode to
-// write: execMode for an executable blob, fileMode for the rest, a missing path
-// included.
-func modeAt(list func(string) ([]ghTreeItem, error), root, path string) (string, error) {
+// itemAt walks the folders of path from the root tree and returns the entry of
+// the path, or nil when it does not exist. It refuses a path below an entry that
+// is not a folder.
+func itemAt(list func(string) ([]ghTreeItem, error), root, path string) (*ghTreeItem, error) {
 	segs := strings.Split(path, "/")
 	sha := root
 	for i, seg := range segs {
 		items, err := list(sha)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		var found *ghTreeItem
 		for j := range items {
@@ -279,18 +287,57 @@ func modeAt(list func(string) ([]ghTreeItem, error), root, path string) (string,
 		}
 		switch {
 		case found == nil:
-			return fileMode, nil
+			return nil, nil
 		case i == len(segs)-1:
-			if found.Type == "blob" && found.Mode == execMode {
-				return execMode, nil
-			}
-			return fileMode, nil
+			return found, nil
 		case found.Type != "tree":
-			return fileMode, nil
+			return nil, fmt.Errorf("%w: %s is below %s, which is a %s and not a folder. The tool does not write through it",
+				kit.ErrInvalidInput, path, strings.Join(segs[:i+1], "/"), kindOf(found))
 		}
 		sha = found.SHA
 	}
-	return fileMode, nil
+	return nil, nil
+}
+
+// kindOf names the kind of an entry for an error message.
+func kindOf(it *ghTreeItem) string {
+	switch {
+	case it.Type == "tree":
+		return "folder"
+	case it.Type == "commit":
+		return "submodule"
+	case it.Mode == "120000":
+		return "symlink"
+	}
+	return "file"
+}
+
+// checkChange refuses a change that would replace or remove an entry that is not
+// a plain file. A write needs a blob with the mode 100644 or 100755. A delete
+// needs a blob (100644, 100755 or 120000), never a folder or a submodule.
+func checkChange(c fixloop.FileChange, it *ghTreeItem) error {
+	if it == nil {
+		return nil
+	}
+	plain := it.Type == "blob" && (it.Mode == fileMode || it.Mode == execMode)
+	switch {
+	case c.Delete && it.Type == "blob":
+		return nil
+	case c.Delete:
+		return fmt.Errorf("%w: %s is a %s. A delete would remove it whole, and the tool deletes files only", kit.ErrInvalidInput, c.Path, kindOf(it))
+	case !plain:
+		return fmt.Errorf("%w: %s is a %s. The tool writes plain files and does not replace it", kit.ErrInvalidInput, c.Path, kindOf(it))
+	}
+	return nil
+}
+
+// modeOf returns the mode to write for an existing plain file, or fileMode for a
+// path that does not exist.
+func modeOf(it *ghTreeItem) string {
+	if it != nil && it.Mode == execMode {
+		return execMode
+	}
+	return fileMode
 }
 
 // treeEntries makes one blob for each new content and one entry for each
