@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/zeroroot-ai/connectors/compare/v0.4.0...v0.5.0) (2026-11-23)
+
+
+### Features
+
+* **mock-forge:** add a stateful GitHub and Prometheus mock test image ([#27](https://github.com/zeroroot-ai/connectors/issues/27)) ([0f911b6](https://github.com/zeroroot-ai/connectors/commit/0f911b64f5c681881110ac960b668fc2055426a1))
+
 ## [0.4.0](https://github.com/zeroroot-ai/connectors/compare/v0.3.0...v0.4.0) (2026-11-22)
 
 
