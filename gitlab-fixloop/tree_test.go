@@ -9,7 +9,7 @@ import (
 	"github.com/zeroroot-ai/connectors/internal/fixloop"
 )
 
-// The mock follows https://docs.gitlab.com/api/repositories/#list-repository-tree :
+// The mock follows https://docs.gitlab.com/api/repositories/ :
 // an array of {"id","name","type","path","mode"}, the parameters ref, path,
 // recursive, pagination=keyset, per_page and page_token, and a Link header with
 // rel="next" for the next page. A missing path answers 404.

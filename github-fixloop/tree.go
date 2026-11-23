@@ -45,16 +45,18 @@ func (v *service) registerTree(s *mcp.Server, log *slog.Logger) {
 	}, v.listTree)
 }
 
+type ghTreeEntry struct {
+	Path string `json:"path"`
+	Mode string `json:"mode"`
+	Type string `json:"type"`
+	SHA  string `json:"sha"`
+	Size *int64 `json:"size"`
+}
+
 type ghTree struct {
-	SHA       string `json:"sha"`
-	Truncated bool   `json:"truncated"`
-	Tree      []struct {
-		Path string `json:"path"`
-		Mode string `json:"mode"`
-		Type string `json:"type"`
-		SHA  string `json:"sha"`
-		Size *int64 `json:"size"`
-	} `json:"tree"`
+	SHA       string        `json:"sha"`
+	Truncated bool          `json:"truncated"`
+	Tree      []ghTreeEntry `json:"tree"`
 }
 
 func (v *service) getTree(ctx context.Context, r prRef, ref string, recursive bool) (*ghTree, error) {
@@ -93,17 +95,8 @@ func (v *service) listTree(ctx context.Context, _ *mcp.CallToolRequest, in fixlo
 		return nil, out, err
 	}
 	if treeSHA == "" {
-		if out.Ref == "" {
-			var info struct {
-				DefaultBranch string `json:"default_branch"`
-			}
-			if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: repoPath(r)}, &info); err != nil {
-				return nil, out, fmt.Errorf("read the repository (the project may not exist): %w", err)
-			}
-			if info.DefaultBranch == "" {
-				return nil, out, errors.New("read the repository: GitHub gave no default branch")
-			}
-			out.Ref = info.DefaultBranch
+		if out.Ref, err = v.treeRef(ctx, r, out.Ref); err != nil {
+			return nil, out, err
 		}
 		if treeSHA, err = v.subtreeSHA(ctx, r, out.Ref, path); err != nil {
 			return nil, out, err
@@ -130,16 +123,8 @@ func (v *service) listTree(ctx context.Context, _ *mcp.CallToolRequest, in fixlo
 		return nil, out, fmt.Errorf("%w: the cursor is past the end of the tree", kit.ErrInvalidInput)
 	}
 	end := min(offset+treePage, len(list))
-	for _, e := range list[offset:end] {
-		typ := fixloop.TreeType(e.Mode, e.Type)
-		if typ == "" {
-			return nil, out, fmt.Errorf("read the tree: GitHub gave the entry type %q for %s", e.Type, e.Path)
-		}
-		p := e.Path
-		if path != "" {
-			p = path + "/" + e.Path
-		}
-		out.Entries = append(out.Entries, fixloop.TreeEntry{Path: p, Type: typ, SHA: e.SHA, Size: e.Size, Mode: e.Mode})
+	if out.Entries, err = toTreeEntries(list[offset:end], path); err != nil {
+		return nil, out, err
 	}
 	if end < len(list) {
 		out.NextCursor = treeSHA + ":" + strconv.Itoa(end)
@@ -188,4 +173,38 @@ func (v *service) subtreeSHA(ctx context.Context, r prRef, ref, path string) (st
 		sha = next
 	}
 	return sha, nil
+}
+
+// treeRef returns the ref, or the default branch when the ref is empty.
+func (v *service) treeRef(ctx context.Context, r prRef, ref string) (string, error) {
+	if ref != "" {
+		return ref, nil
+	}
+	var info struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: repoPath(r)}, &info); err != nil {
+		return "", fmt.Errorf("read the repository (the project may not exist): %w", err)
+	}
+	if info.DefaultBranch == "" {
+		return "", errors.New("read the repository: GitHub gave no default branch")
+	}
+	return info.DefaultBranch, nil
+}
+
+// treeEntries makes the result entries. The prefix is the folder of the listing.
+func toTreeEntries(list []ghTreeEntry, prefix string) ([]fixloop.TreeEntry, error) {
+	out := make([]fixloop.TreeEntry, 0, len(list))
+	for _, e := range list {
+		typ := fixloop.TreeType(e.Mode, e.Type)
+		if typ == "" {
+			return nil, fmt.Errorf("read the tree: GitHub gave the entry type %q for %s", e.Type, e.Path)
+		}
+		p := e.Path
+		if prefix != "" {
+			p = prefix + "/" + e.Path
+		}
+		out = append(out, fixloop.TreeEntry{Path: p, Type: typ, SHA: e.SHA, Size: e.Size, Mode: e.Mode})
+	}
+	return out, nil
 }

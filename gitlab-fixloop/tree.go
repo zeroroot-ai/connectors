@@ -18,7 +18,7 @@ import (
 
 // list_tree uses the repository tree API:
 //   GET /projects/:id/repository/tree?ref=&path=&recursive=true&pagination=keyset&per_page=100&page_token=
-// https://docs.gitlab.com/api/repositories/#list-repository-tree
+// https://docs.gitlab.com/api/repositories/
 // Each entry has id (the git object sha), name, type (tree, blob or commit),
 // path (the full path) and mode. It has no size. A missing path answers 404
 // (before GitLab 17.7 it answered an empty list). The keyset pagination gives
