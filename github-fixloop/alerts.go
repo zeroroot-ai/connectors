@@ -169,7 +169,8 @@ func toAlert(a ghAlert) fixloop.Alert {
 	if a.Vulnerability.FirstPatched != nil {
 		al.FirstPatched = a.Vulnerability.FirstPatched.Identifier
 	}
-	ids := []string{a.Advisory.GHSAID, a.Advisory.CVEID}
+	ids := make([]string, 0, 2+len(a.Advisory.Identifiers))
+	ids = append(ids, a.Advisory.GHSAID, a.Advisory.CVEID)
 	for _, i := range a.Advisory.Identifiers {
 		ids = append(ids, i.Value)
 	}
