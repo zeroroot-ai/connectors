@@ -119,7 +119,7 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func setup(t *testing.T) (srv *mock, call func(string, map[string]any) (bool, string, *mcp.CallToolResult), tools map[string]*mcp.Tool) {
 	t.Helper()
 	m := &mock{deployment: fixture(t, "deployment_ok.json"), members: fixture(t, "members_one.json")}
-	ts := httptest.NewServer(m)
+	ts := httptest.NewServer(wrap(m))
 	t.Cleanup(ts.Close)
 	register, err := buildWith(kit.NewEnvFrom(map[string]string{
 		"INTUNE_TENANT_ID": "contoso.onmicrosoft.com", "INTUNE_CLIENT_ID": "app-id", "INTUNE_CLIENT_SECRET": "s3cret",

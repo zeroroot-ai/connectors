@@ -4,11 +4,15 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/zeroroot-ai/connectors/internal/kit"
 	"github.com/zeroroot-ai/connectors/internal/kit/kittest"
+	"github.com/zeroroot-ai/connectors/internal/mockforge/mocktest"
 )
 
 // classCall runs a tool against the route table and returns the class that the
@@ -85,28 +89,153 @@ func TestErrorClassRefused(t *testing.T) {
 	}
 }
 
-// The branch stays when the pull request fails to open, and a call again
-// finishes the work. The error is typed, so no text is read.
-func TestErrorClassBranchStaysIsUnavailable(t *testing.T) {
-	routes := openRoutes()
-	routes["POST "+repo+"/pulls"] = reply(422, `{"message":"Validation Failed"}`)
-	c, text := classCall(t, routes, "open_merge_request", openArgs())
-	if c.Class != kit.ClassUnavailable {
-		t.Errorf("class = %+v, text %s", c, text)
-	}
-	if want := "the branch " + srcBranch + " stays, call the tool again"; !strings.Contains(text, want) {
-		t.Errorf("the text changed: %s", text)
+// dropped closes the connection with no answer, as a lost answer does.
+func dropped(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+	if c, _, err := w.(http.Hijacker).Hijack(); err == nil {
+		_ = c.Close()
 	}
 }
 
-// The resume of an own branch opens the pull request too, with the same hint.
-func TestErrorClassBranchStaysOnResumeIsUnavailable(t *testing.T) {
-	routes := branchExists(openRoutes())
-	routes[compareKey] = reply(200, ownCompare())
-	routes["GET "+repo+"/pulls"] = reply(200, `[]`)
-	routes["POST "+repo+"/pulls"] = reply(422, `{"message":"Validation Failed"}`)
-	c, text := classCall(t, routes, "open_merge_request", openArgs())
-	if c.Class != kit.ClassUnavailable || !strings.Contains(text, "stays, call the tool again") {
-		t.Errorf("class = %+v, text %s", c, text)
+// The branch stays when the pull request fails to open, and a call again finds
+// the branch and finishes the work, so a repeat is proven safe. A failure that
+// can pass later is unavailable, even for a POST whose answer is lost. A refusal
+// of GitHub stays a refusal: the class of the cause comes first.
+func TestErrorClassBranchStays(t *testing.T) {
+	for name, c := range map[string]struct {
+		h    handler
+		want string
+	}{
+		"502":           {reply(502, `{"message":"bad gateway"}`), kit.ClassUnavailable},
+		"503":           {reply(503, `{"message":"down"}`), kit.ClassUnavailable},
+		"504":           {reply(504, `{"message":"timeout"}`), kit.ClassTimeout},
+		"a lost answer": {dropped, kit.ClassUnavailable},
+		"401":           {reply(401, `{"message":"Bad credentials"}`), kit.ClassRefused},
+		"403":           {reply(403, `{"message":"Resource not accessible"}`), kit.ClassRefused},
+		"404":           {reply(404, `{"message":"Not Found"}`), kit.ClassRefused},
+		"422":           {reply(422, `{"message":"Validation Failed"}`), kit.ClassRefused},
+		"429":           {reply(429, `{"message":"slow down"}`), kit.ClassRateLimited},
+	} {
+		for _, resume := range []bool{false, true} {
+			routes := openRoutes()
+			if resume {
+				routes = branchExists(routes)
+				routes[compareKey] = reply(200, ownCompare())
+				routes["GET "+repo+"/pulls"] = reply(200, `[]`)
+			}
+			routes["POST "+repo+"/pulls"] = c.h
+			cl, text := classCall(t, routes, "open_merge_request", openArgs())
+			if cl.Class != c.want {
+				t.Errorf("%s (resume %v): class = %+v, want %s, text %s", name, resume, cl, c.want, text)
+			}
+			if !strings.Contains(text, "the branch "+srcBranch+" stays, call the tool again") {
+				t.Errorf("%s (resume %v): the text changed: %s", name, resume, text)
+			}
+		}
+	}
+}
+
+// The answer of a write is lost. The write may have run, and the tool did not
+// prove that a repeat is safe, so the class is outcome_unknown. A write that
+// the client repeats because the method is idempotent is unavailable.
+func TestErrorClassLostAnswerOfEachWriteTool(t *testing.T) {
+	// open_merge_request: the first write is the blob.
+	routes := openRoutes()
+	routes["POST "+repo+"/git/blobs"] = dropped
+	if cl, _ := classCall(t, routes, "open_merge_request", openArgs()); cl.Class != kit.ClassOutcomeUnknown {
+		t.Errorf("open_merge_request blob: %+v", cl)
+	}
+	// Each other write step of open_merge_request.
+	for _, step := range []string{"/git/trees", "/git/commits", "/git/refs"} {
+		routes = openRoutes()
+		routes["POST "+repo+step] = dropped
+		if cl, _ := classCall(t, routes, "open_merge_request", openArgs()); cl.Class != kit.ClassOutcomeUnknown {
+			t.Errorf("open_merge_request %s: %+v", step, cl)
+		}
+	}
+	// close_merge_request: a PATCH that sets the state closed, which the client repeats.
+	routes = map[string]handler{"GET " + pr7: reply(200, openPR("clean")), "PATCH " + pr7: dropped}
+	if cl, text := classCall(t, routes, "close_merge_request", map[string]any{"merge_request": ref}); cl.Class != kit.ClassUnavailable {
+		t.Errorf("close_merge_request: %+v %s", cl, text)
+	}
+	// merge_merge_request: PUT with the head sha, which the client repeats.
+	routes = merge(checks(greenRun, "success", 1), map[string]handler{"GET " + pr7: reply(200, openPR("clean")), "PUT " + pr7 + "/merge": dropped})
+	cl, text := classCall(t, routes, "merge_merge_request", map[string]any{"merge_request": ref, "expected_head_sha": headSHA})
+	if cl.Class != kit.ClassUnavailable {
+		t.Errorf("merge_merge_request: %+v %s", cl, text)
+	}
+}
+
+// wrap lets a test put a layer around the handler of the vendor mock.
+var wrap = func(h http.Handler) http.Handler { return h }
+
+// revert_merge_request builds the revert with POST calls. The answer of one is
+// lost after a real merge, so the revert may have run: outcome_unknown.
+func TestErrorClassLostAnswerOfRevert(t *testing.T) {
+	var armed atomic.Bool
+	srv := mocktest.StartWrapped(t, func(h http.Handler) http.Handler {
+		lost := kittest.LostAnswer(h)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if armed.Load() {
+				lost.ServeHTTP(w, r)
+				return
+			}
+			h.ServeHTTP(w, r)
+		})
+	})
+	srv.Seed("acme", "shop", map[string]any{"src/db.go": flawed}, nil)
+	register, err := build(kit.NewEnvFrom(map[string]string{
+		"GITHUB_API_URL": srv.URL, "GITHUB_TOKEN": "mock-token", "GITHUB_ENVIRONMENT": "production",
+	}), slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := kittest.Connect(t, register)
+	open := kittest.Call(t, cs, "open_merge_request", map[string]any{
+		"project": "acme/shop", "branch": "zeroroot/fix-1", "base_branch": "main", "title": "Fix",
+		"files": []map[string]any{{"path": "src/db.go", "content": fixed}},
+	})
+	if open.IsError {
+		t.Fatal(kittest.Text(t, open))
+	}
+	var out map[string]any
+	kittest.Structured(t, open, &out)
+	head, _ := out["head_sha"].(string)
+	if res := kittest.Call(t, cs, "merge_merge_request", map[string]any{"merge_request": out["merge_request"], "expected_head_sha": head}); res.IsError {
+		t.Fatal(kittest.Text(t, res))
+	}
+	armed.Store(true)
+	res := kittest.Call(t, cs, "revert_merge_request", map[string]any{"merge_request": out["merge_request"]})
+	if got := kittest.ErrorClass(t, res); got.Class != kit.ClassOutcomeUnknown {
+		t.Errorf("revert_merge_request: %+v %s", got, kittest.Text(t, res))
+	}
+}
+
+// GitHub refuses for its rate limit with HTTP 403. The headers say so, not the text.
+func TestErrorClassRateLimitedBy403(t *testing.T) {
+	limited := func(h map[string]string) handler {
+		return func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+			for k, v := range h {
+				w.Header().Set(k, v)
+			}
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+		}
+	}
+	reset := strconv.FormatInt(time.Now().Add(8*time.Hour).Unix(), 10)
+	for name, c := range map[string]struct {
+		h    handler
+		want string
+	}{
+		"remaining 0":          {limited(map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": reset}), kit.ClassRateLimited},
+		"retry after":          {limited(map[string]string{"Retry-After": "90"}), kit.ClassRateLimited},
+		"a permission refusal": {limited(map[string]string{"X-RateLimit-Remaining": "4000"}), kit.ClassRefused},
+	} {
+		cl, _ := classCall(t, contentsRoute(c.h), "read_file", readA)
+		if cl.Class != c.want {
+			t.Errorf("%s: %+v, want %s", name, cl, c.want)
+		}
+		if c.want == kit.ClassRateLimited && (cl.RetryAfterSeconds < 1 || cl.RetryAfterSeconds > kit.MaxRetryAfterSeconds) {
+			t.Errorf("%s: retry_after_seconds = %d", name, cl.RetryAfterSeconds)
+		}
 	}
 }

@@ -22,7 +22,18 @@ type Server struct {
 // Start runs a mock on a local port.
 func Start(tb testing.TB) *Server {
 	tb.Helper()
-	s := &Server{Server: httptest.NewServer(mockforge.New(nil)), t: tb}
+	return StartWrapped(tb, nil)
+}
+
+// StartWrapped is Start with a layer around the handler of the mock. A test uses
+// it to drop a connection. A nil wrap changes nothing.
+func StartWrapped(tb testing.TB, wrap func(http.Handler) http.Handler) *Server {
+	tb.Helper()
+	var h http.Handler = mockforge.New(nil)
+	if wrap != nil {
+		h = wrap(h)
+	}
+	s := &Server{Server: httptest.NewServer(h), t: tb}
 	tb.Cleanup(s.Close)
 	return s
 }

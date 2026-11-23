@@ -54,12 +54,15 @@ Each tool error reaches the caller as an MCP result with `isError: true` and the
 
 | Class | Meaning | Source |
 |---|---|---|
-| `unavailable` | A later call can pass. | A transport failure, HTTP 502 or 503, and an error that a tool marks with `kit.Retryable`, for example the `open_merge_request` failure after which the branch stays. |
-| `timeout` | A bound ended. | A deadline, a client timeout, HTTP 504. |
-| `rate_limited` | The vendor refused for its rate limit. | HTTP 429. `retry_after_seconds` is the time that the vendor asked for, or 0 when it named none. |
-| `refused` | The same call fails again. | Every other error, an invalid input included. |
+| `unavailable` | A later call can pass, and a repeat is safe. | A transport failure, HTTP 502 or 503, for a request that the client repeats (GET, HEAD, PUT, DELETE, or a request with `Retry`), or for an error that a tool marks with `kit.Retryable` because it proved a repeat safe. A failure to get the token. |
+| `timeout` | A bound ended, and a repeat is safe. | A deadline, a client timeout, HTTP 504, in the same cases as `unavailable`. |
+| `rate_limited` | The vendor refused for its rate limit. It did not run the request. | HTTP 429, and HTTP 403 with the header `X-RateLimit-Remaining: 0` or `Retry-After` (GitHub). `retry_after_seconds` is the time that the vendor asked for, at most 3600, or 0 when it named none. |
+| `outcome_unknown` | The answer is lost, and the request may have run on the vendor. The same call is not safe to repeat. | A transport error, a timeout, HTTP 502, 503 or 504 on a request that the client does not repeat (a POST or a PATCH with no `Retry`). A caller never repeats it. It shows the failure, and a person checks the vendor. |
+| `refused` | The same call fails again. | Every other error, an invalid input included, and each HTTP 4xx answer other than 429, whatever wraps it. A panic of a tool. |
 
-`kit.ClassifyErrors` installs this on each server (`kit.NewHandler` and `kittest.Connect` do it). A tool that wants its own error to be retryable wraps it with `kit.Retryable`. The text of the error stays as the tool wrote it.
+The class of the cause comes first. A tool opts in to `unavailable` or `timeout` for a lost answer with `kit.Retryable` only when a repeat is proven safe. `open_merge_request` does so after the branch exists, because a call again finds the branch and finishes the work. `create_ticket` of `jira` and `servicenow` does so when the call has a `dedup_key`, because a call again finds the ticket that the lost call made. `kit.Retryable` never turns a 4xx answer into a retry. It keeps the text of the error.
+
+`kit.ClassifyErrors` installs this on each server (`kit.NewHandler` and `kittest.Connect` do it). It also turns a panic of a tool into an error result of the class `refused`, and logs the tool and the stack with no arguments. The text of the error stays as the tool wrote it.
 
 ## Rules
 

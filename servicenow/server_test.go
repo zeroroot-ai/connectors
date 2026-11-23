@@ -80,7 +80,7 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func setup(t *testing.T) (srv *mock, call func(string, map[string]any) (isErr bool, text string, res *mcp.CallToolResult), tools map[string]*mcp.Tool) {
 	t.Helper()
 	m := &mock{state: "1"}
-	ts := httptest.NewTLSServer(m)
+	ts := httptest.NewTLSServer(wrap(m))
 	t.Cleanup(ts.Close)
 	register, err := buildWith(kit.NewEnvFrom(map[string]string{
 		"SERVICENOW_INSTANCE_URL": ts.URL, "SERVICENOW_USER": "svc", "SERVICENOW_PASSWORD": "s3cret",

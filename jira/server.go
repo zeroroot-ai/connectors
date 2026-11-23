@@ -273,7 +273,13 @@ func (v *service) create(ctx context.Context, _ *mcp.CallToolRequest, in ticket.
 		Method: http.MethodPost, Path: kit.Path("rest", "api", "3", "issue"), JSON: map[string]any{"fields": f},
 	}, &resp)
 	if err != nil {
-		return nil, out, jiraError("create issue", err)
+		cerr := jiraError("create issue", err)
+		if in.DedupKey != "" {
+			// A repeat with the same dedup_key finds the issue that the lost call
+			// made, so a repeat is safe.
+			return nil, out, kit.Retryable(cerr)
+		}
+		return nil, out, cerr
 	}
 	if !issueKey.MatchString(resp.Key) {
 		return nil, out, errors.New("create issue: Jira gave no issue key in the answer")

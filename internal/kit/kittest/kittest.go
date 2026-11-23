@@ -4,7 +4,10 @@ package kittest
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -18,7 +21,7 @@ func Connect(t *testing.T, register func(*mcp.Server)) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	srv := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
-	kit.ClassifyErrors(srv)
+	kit.ClassifyErrors(srv, slog.New(slog.DiscardHandler))
 	register(srv)
 	ct, st := mcp.NewInMemoryTransports()
 	ss, err := srv.Connect(ctx, st, nil)
@@ -41,7 +44,23 @@ func Call(t *testing.T, cs *mcp.ClientSession, tool string, args map[string]any)
 	if err != nil {
 		t.Fatalf("call %s: %v", tool, err)
 	}
+	lastMu.Lock()
+	last = res
+	lastMu.Unlock()
 	return res
+}
+
+var (
+	lastMu sync.Mutex
+	last   *mcp.CallToolResult
+)
+
+// LastResult returns the result of the last call of Call. A test that uses a
+// setup function that gives only the text of a result reads the rest from it.
+func LastResult() *mcp.CallToolResult {
+	lastMu.Lock()
+	defer lastMu.Unlock()
+	return last
 }
 
 // Text returns the text of the first content item of a result.
@@ -145,4 +164,23 @@ func ErrorClass(t *testing.T, res *mcp.CallToolResult) kit.ErrorClass {
 		t.Fatalf("the error result has no class: %v", res.StructuredContent)
 	}
 	return *out.Error
+}
+
+// LostAnswer returns a wrapper for the handler of a vendor mock. The wrapper
+// drops the connection of each request that changes the vendor (POST, PATCH,
+// PUT and DELETE) after it read the request, so the caller gets no answer, as in
+// a lost answer. It lets a token request through, and it serves each read with
+// the mock. A test sets it before it starts the mock.
+func LostAnswer(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		write := r.Method != http.MethodGet && r.Method != http.MethodHead
+		if write && !strings.Contains(r.URL.Path, "token") && !strings.Contains(r.URL.Path, "/oauth") {
+			c, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = c.Close()
+			}
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }

@@ -168,7 +168,7 @@ func setup(t *testing.T, routes map[string]handler) (srv *mock, call func(string
 	t.Helper()
 	mergeableWait = 0
 	m := &mock{routes: routes}
-	ts := httptest.NewServer(m)
+	ts := httptest.NewServer(wrap(m))
 	t.Cleanup(ts.Close)
 	register, err := build(kit.NewEnvFrom(map[string]string{
 		"GITHUB_API_URL": ts.URL, "GITHUB_TOKEN": "ghp_secret", "GITHUB_ENVIRONMENT": "production",

@@ -33,7 +33,22 @@ func TestClassify(t *testing.T) {
 		"transport failure":      {&transportError{err: errors.New("connection refused")}, ClassUnavailable, 0},
 		"transport timeout":      {&transportError{err: timeoutErr{}}, ClassTimeout, 0},
 		"a deadline":             {fmt.Errorf("wait: %w", context.DeadlineExceeded), ClassTimeout, 0},
-		"retryable":              {Retryable(fmt.Errorf("the branch stays: %w", &APIError{Status: 422})), ClassUnavailable, 0},
+		"retryable 502":          {Retryable(fmt.Errorf("the branch stays: %w", &APIError{Status: 502})), ClassUnavailable, 0},
+		"retryable transport":    {Retryable(fmt.Errorf("the branch stays: %w", &transportError{err: errors.New("reset")})), ClassUnavailable, 0},
+		"retryable 504":          {Retryable(&APIError{Status: 504}), ClassTimeout, 0},
+		"retryable 401":          {Retryable(fmt.Errorf("the branch stays: %w", &APIError{Status: 401})), ClassRefused, 0},
+		"retryable 403":          {Retryable(fmt.Errorf("the branch stays: %w", &APIError{Status: 403})), ClassRefused, 0},
+		"retryable 404":          {Retryable(fmt.Errorf("the branch stays: %w", &APIError{Status: 404})), ClassRefused, 0},
+		"retryable 422":          {Retryable(fmt.Errorf("the branch stays: %w", &APIError{Status: 422})), ClassRefused, 0},
+		"403 with a rate limit":  {&APIError{Status: 403, RateLimited: true}, ClassRateLimited, 0},
+		"retryable 403 limited":  {Retryable(&APIError{Status: 403, RateLimited: true}), ClassRateLimited, 0},
+		"lost answer, transport": {&OutcomeUnknownError{Err: &transportError{err: errors.New("reset")}}, ClassOutcomeUnknown, 0},
+		"lost answer, timeout":   {&OutcomeUnknownError{Err: &transportError{err: timeoutErr{}}}, ClassOutcomeUnknown, 0},
+		"lost answer, 502":       {&OutcomeUnknownError{Err: &APIError{Status: 502}}, ClassOutcomeUnknown, 0},
+		"lost answer, 504":       {fmt.Errorf("create: %w", &OutcomeUnknownError{Err: &APIError{Status: 504}}), ClassOutcomeUnknown, 0},
+		"lost answer, opted in":  {Retryable(&OutcomeUnknownError{Err: &APIError{Status: 503}}), ClassUnavailable, 0},
+		"lost answer, opted 504": {Retryable(&OutcomeUnknownError{Err: &APIError{Status: 504}}), ClassTimeout, 0},
+		"a limit is bounded":     {&RateLimitError{Until: time.Now().Add(100000 * time.Hour), Cause: errors.New("x")}, ClassRateLimited, MaxRetryAfterSeconds},
 		"retryable over a limit": {Retryable(&RateLimitError{Until: time.Now().Add(time.Minute), Cause: errors.New("x")}), ClassRateLimited, 59},
 		"invalid input":          {fmt.Errorf("%w: bad", ErrInvalidInput), ClassRefused, 0},
 		"400":                    {&APIError{Status: 400}, ClassRefused, 0},
@@ -42,7 +57,8 @@ func TestClassify(t *testing.T) {
 		"canceled":               {context.Canceled, ClassRefused, 0},
 	} {
 		got := Classify(c.err)
-		if got.Class != c.want || got.RetryAfterSeconds < c.min || (c.min == 0 && got.RetryAfterSeconds != 0) {
+		if got.Class != c.want || got.RetryAfterSeconds < c.min || got.RetryAfterSeconds > MaxRetryAfterSeconds ||
+			(c.min == 0 && got.RetryAfterSeconds != 0) {
 			t.Errorf("%s: got %+v, want %s and at least %d seconds", name, got, c.want, c.min)
 		}
 	}
@@ -67,7 +83,7 @@ func TestClassifyErrorsMiddleware(t *testing.T) {
 		"timeout": context.DeadlineExceeded, "rate_limited": &RateLimitError{Until: time.Now().Add(time.Minute), Cause: errors.New("x")},
 	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
-	ClassifyErrors(srv)
+	ClassifyErrors(srv, slog.New(slog.DiscardHandler))
 	for name, e := range errs {
 		AddTool(srv, slog.New(slog.DiscardHandler), &mcp.Tool{Name: name}, func(context.Context, *mcp.CallToolRequest, in) (*mcp.CallToolResult, out, error) {
 			return nil, out{}, e

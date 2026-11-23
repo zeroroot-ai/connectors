@@ -96,12 +96,19 @@ func (c *ClientCredentials) Token(ctx context.Context) (Secret, error) {
 	hcc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := hcc.Do(req)
 	if err != nil {
-		return "", errors.New("token endpoint is not reachable")
+		// No request reached the vendor API yet, so a later call is safe.
+		return "", Retryable(&tokenError{msg: "token endpoint is not reachable", cause: err})
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		// The body is not shown. A token endpoint can echo a credential.
-		return "", fmt.Errorf("token endpoint answered HTTP %d", resp.StatusCode)
+		te := &tokenError{msg: fmt.Sprintf("token endpoint answered HTTP %d", resp.StatusCode),
+			cause: &APIError{Status: resp.StatusCode, RateLimited: resp.StatusCode == http.StatusTooManyRequests}}
+		switch resp.StatusCode {
+		case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return "", Retryable(te) // no request reached the vendor API yet
+		}
+		return "", te
 	}
 	var tr struct {
 		AccessToken string `json:"access_token"`
@@ -117,6 +124,16 @@ func (c *ClientCredentials) Token(ctx context.Context) (Secret, error) {
 	c.expires = now().Add(time.Duration(tr.ExpiresIn) * time.Second)
 	return c.token, nil
 }
+
+// tokenError is a failure of the token endpoint. Its text is fixed, because a
+// token endpoint can echo a credential. The cause gives the class of the error.
+type tokenError struct {
+	msg   string
+	cause error
+}
+
+func (e *tokenError) Error() string { return e.msg }
+func (e *tokenError) Unwrap() error { return e.cause }
 
 // Authenticator returns an Authenticator that sends the token as a bearer
 // token.

@@ -86,7 +86,7 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func setupWith(t *testing.T, keyType string) (srv *mock, call func(string, map[string]any) (isErr bool, text string, res *mcp.CallToolResult), tools map[string]*mcp.Tool) {
 	t.Helper()
 	m := &mock{}
-	ts := httptest.NewTLSServer(m)
+	ts := httptest.NewTLSServer(wrap(m))
 	t.Cleanup(ts.Close)
 	register, err := buildWith(kit.NewEnvFrom(map[string]string{
 		"CORTEX_API_URL": ts.URL, "CORTEX_API_KEY_ID": "7", "CORTEX_API_KEY": "the-secret-key", "CORTEX_API_KEY_TYPE": keyType,

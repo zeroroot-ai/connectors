@@ -107,7 +107,7 @@ func baseEnv(url string) map[string]string {
 func setup(t *testing.T) (srv *mock, call func(string, map[string]any) (bool, string), tools map[string]*mcp.Tool) {
 	t.Helper()
 	m := &mock{}
-	ts := httptest.NewTLSServer(m)
+	ts := httptest.NewTLSServer(wrap(m))
 	t.Cleanup(ts.Close)
 	register, err := buildWith(kit.NewEnvFrom(baseEnv(ts.URL)), slog.New(slog.DiscardHandler), ts.Client())
 	if err != nil {

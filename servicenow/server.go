@@ -273,7 +273,13 @@ func (v *service) create(ctx context.Context, _ *mcp.CallToolRequest, in ticket.
 		Query: url.Values{"sysparm_fields": {fields}, "sysparm_exclude_reference_link": {"true"}}, JSON: body,
 	}, &resp)
 	if err != nil {
-		return nil, out, snError("create incident", err)
+		cerr := snError("create incident", err)
+		if in.DedupKey != "" {
+			// A repeat with the same dedup_key finds the incident that the lost call
+			// made, so a repeat is safe.
+			return nil, out, kit.Retryable(cerr)
+		}
+		return nil, out, cerr
 	}
 	if kit.CheckString("sys_id", resp.Result.SysID, 32, kit.Hex32) != nil {
 		return nil, out, errors.New("create incident: ServiceNow gave no sys_id in the answer")

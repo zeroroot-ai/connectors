@@ -125,6 +125,10 @@ func Path(segments ...string) string {
 type APIError struct {
 	Status int
 	Body   string // the start of the answer, cut to a short length
+	// RateLimited is true when the vendor refused for its rate limit: HTTP 429,
+	// or HTTP 403 with the header X-RateLimit-Remaining 0 or the header Retry-After
+	// (GitHub). The client reads the headers, never the text of the answer.
+	RateLimited bool
 }
 
 func (e *APIError) Error() string {
@@ -153,19 +157,67 @@ func (c *Client) Do(ctx context.Context, r Request, out any) error {
 
 // DoBytes is like Do, but it returns the body of a 2xx answer as it is. A
 // caller uses it for a vendor API that answers in XML.
+//
+// A request that the client does not repeat (a method that is not idempotent,
+// with no Retry) may have run on the vendor when the answer is lost: a transport
+// error, a timeout, HTTP 502, 503 or 504. The error is then an
+// OutcomeUnknownError, and a caller must not repeat the request.
 func (c *Client) DoBytes(ctx context.Context, r Request) ([]byte, error) {
+	data, err := c.doBytes(ctx, r)
+	if err != nil && !repeatable(r) && lostAnswer(err) {
+		return nil, &OutcomeUnknownError{Err: err}
+	}
+	return data, err
+}
+
+func repeatable(r Request) bool {
+	return r.Retry || r.Method == http.MethodGet || r.Method == http.MethodHead ||
+		r.Method == http.MethodPut || r.Method == http.MethodDelete
+}
+
+// lostAnswer is true for an error after which the vendor may have run the
+// request: a transport error, or HTTP 502, 503 or 504. A rate limit is not one:
+// the vendor did not run the request.
+func lostAnswer(err error) bool {
+	var af *authFailure
+	if errors.As(err, &af) {
+		return false // the request was not sent
+	}
+	var te *transportError
+	if errors.As(err, &te) {
+		return true
+	}
+	var ae *APIError
+	if errors.As(err, &ae) && !ae.RateLimited {
+		switch ae.Status {
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) doBytes(ctx context.Context, r Request) ([]byte, error) {
 	body, contentType, err := encodeBody(r)
 	if err != nil {
 		return nil, err
 	}
-	retryable := r.Retry || r.Method == http.MethodGet || r.Method == http.MethodHead ||
-		r.Method == http.MethodPut || r.Method == http.MethodDelete
+	retryable := repeatable(r)
 	for attempt := 0; ; attempt++ {
 		data, wait, err := c.once(ctx, r, body, contentType)
 		if err == nil {
 			return data, nil
 		}
-		if !retryable || attempt >= c.maxRetries || ctx.Err() != nil || !temporary(err) {
+		if !retryable {
+			var ae *APIError
+			if errors.As(err, &ae) && ae.RateLimited && wait > 0 {
+				// The vendor did not run the request. The client does not repeat it, so
+				// the caller gets the time that the vendor named.
+				return nil, &RateLimitError{Until: time.Now().Add(wait), Cause: err}
+			}
+			return nil, err
+		}
+		if attempt >= c.maxRetries || ctx.Err() != nil || !temporary(err) {
 			return nil, err
 		}
 		if wait <= 0 {
@@ -181,6 +233,14 @@ func (c *Client) DoBytes(ctx context.Context, r Request) ([]byte, error) {
 		}
 	}
 }
+
+// OutcomeUnknownError is the error of a request that the client does not repeat
+// and whose answer is lost. The request may have run on the vendor. It keeps the
+// text of the error that it wraps.
+type OutcomeUnknownError struct{ Err error }
+
+func (e *OutcomeUnknownError) Error() string { return e.Err.Error() }
+func (e *OutcomeUnknownError) Unwrap() error { return e.Err }
 
 func encodeBody(r Request) (body []byte, contentType string, err error) {
 	switch {
@@ -225,7 +285,7 @@ func (c *Client) once(ctx context.Context, r Request, body []byte, contentType s
 	}
 	if c.auth != nil {
 		if err := c.auth(ctx, req); err != nil {
-			return nil, 0, fmt.Errorf("authenticate: %w", err)
+			return nil, 0, &authFailure{err: fmt.Errorf("authenticate: %w", err)}
 		}
 	}
 	resp, err := c.hc.Do(req)
@@ -248,7 +308,7 @@ func (c *Client) once(ctx context.Context, r Request, body []byte, contentType s
 		if len(snippet) > errorSnippet {
 			snippet = snippet[:errorSnippet]
 		}
-		return nil, retryAfter(resp), &APIError{Status: resp.StatusCode, Body: strings.TrimSpace(snippet)}
+		return nil, retryAfter(resp), &APIError{Status: resp.StatusCode, Body: strings.TrimSpace(snippet), RateLimited: rateLimited(resp)}
 	}
 	if r.ResponseHeader != nil {
 		*r.ResponseHeader = resp.Header.Clone()
@@ -259,6 +319,13 @@ func (c *Client) once(ctx context.Context, r Request, body []byte, contentType s
 func escapedJoin(base *url.URL, p string) string {
 	return strings.TrimRight(base.EscapedPath(), "/") + p
 }
+
+// authFailure is the failure to get the credential of a request. The request was
+// not sent, so a repeat is safe. It keeps the text of the error that it wraps.
+type authFailure struct{ err error }
+
+func (e *authFailure) Error() string { return e.err.Error() }
+func (e *authFailure) Unwrap() error { return e.err }
 
 type transportError struct{ err error }
 
@@ -272,6 +339,9 @@ func temporary(err error) bool {
 	}
 	var ae *APIError
 	if errors.As(err, &ae) {
+		if ae.RateLimited {
+			return true
+		}
 		switch ae.Status {
 		case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 			return true
@@ -301,8 +371,14 @@ func (e *RateLimitError) Unwrap() error { return e.Cause }
 func retryAfter(resp *http.Response) time.Duration {
 	now := serverNow(resp)
 	ra := strings.TrimSpace(resp.Header.Get("Retry-After"))
-	if sec, err := strconv.Atoi(ra); err == nil && sec >= 0 {
-		return time.Duration(sec) * time.Second
+	sec, err := strconv.Atoi(ra)
+	if errors.Is(err, strconv.ErrRange) && !strings.HasPrefix(ra, "-") {
+		sec, err = maxRetryAfterSeconds, nil // a number too large for an int
+	}
+	if err == nil && sec >= 0 {
+		// Bound the number before the multiplication, so a huge value cannot
+		// overflow the duration.
+		return time.Duration(min(sec, maxRetryAfterSeconds)) * time.Second
 	}
 	// Retry-After can be an HTTP date. The wait is counted from the Date header
 	// of the answer, so a wrong clock of this host does not change it.
@@ -312,14 +388,36 @@ func retryAfter(resp *http.Response) time.Duration {
 		}
 		return 0
 	}
-	if resp.StatusCode == http.StatusTooManyRequests {
-		if reset, err := strconv.ParseInt(resp.Header.Get("X-Rate-Limit-Reset"), 10, 64); err == nil {
-			if d := time.Unix(reset, 0).Sub(now); d > 0 {
-				return d
+	if rateLimited(resp) {
+		// Okta sends X-Rate-Limit-Reset, GitHub sends X-RateLimit-Reset. Each is the
+		// time of the reset in epoch seconds.
+		for _, h := range []string{"X-Rate-Limit-Reset", "X-RateLimit-Reset"} {
+			if reset, err := strconv.ParseInt(resp.Header.Get(h), 10, 64); err == nil {
+				if d := time.Unix(reset, 0).Sub(now); d > 0 {
+					return min(d, maxRetryAfterSeconds*time.Second)
+				}
 			}
 		}
 	}
 	return 0
+}
+
+// maxRetryAfterSeconds bounds a wait that a vendor names, in seconds. It is one
+// year, far above any wait that a tool accepts.
+const maxRetryAfterSeconds = 365 * 24 * 3600
+
+// rateLimited reads the headers of a failed answer. It is true for HTTP 429, and
+// for HTTP 403 with X-RateLimit-Remaining 0 or a Retry-After header, which is how
+// GitHub refuses for its rate limit. It never reads the text of the answer.
+func rateLimited(resp *http.Response) bool {
+	switch resp.StatusCode {
+	case http.StatusTooManyRequests:
+		return true
+	case http.StatusForbidden:
+		return strings.TrimSpace(resp.Header.Get("X-RateLimit-Remaining")) == "0" ||
+			strings.TrimSpace(resp.Header.Get("Retry-After")) != ""
+	}
+	return false
 }
 
 // serverNow is the time of the vendor: the Date header of the answer. A reset
