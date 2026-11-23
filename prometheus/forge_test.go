@@ -14,9 +14,9 @@ import (
 // (internal/mockforge). The test sets the health value, as the exit test of the
 // fix loop does after a deploy.
 
-func forgeHealth(t *testing.T) (*mocktest.Server, func(since time.Time, hold int) map[string]any) {
+func forgeHealth(t *testing.T) (srv *mocktest.Server, read func(since time.Time, hold int) map[string]any) {
 	t.Helper()
-	srv := mocktest.Start(t)
+	srv = mocktest.Start(t)
 	register, err := build(kit.NewEnvFrom(map[string]string{
 		"PROMETHEUS_BASE_URL":       srv.URL,
 		"PROMETHEUS_HEALTH_QUERIES": `{"acme/shop":"up{job=\"shop\"} > bool 0"}`,

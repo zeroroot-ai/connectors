@@ -21,10 +21,13 @@ const (
 	fixed  = "package db\n// fixed: bound parameter\n"
 )
 
-func forgeSetup(t *testing.T) (*mocktest.Server, func(string, map[string]any) (bool, string, map[string]any)) {
+// forgeCall calls one tool of the server.
+type forgeCall func(tool string, args map[string]any) (isErr bool, text string, out map[string]any)
+
+func forgeSetup(t *testing.T) (srv *mocktest.Server, call forgeCall) {
 	t.Helper()
 	mergeableWait = 0
-	srv := mocktest.Start(t)
+	srv = mocktest.Start(t)
 	srv.Seed("acme", "shop", map[string]any{"src/db.go": flawed, "run.sh": "#!/bin/sh\n"},
 		map[string]any{"auto_deploy": map[string]string{"environment": "production", "state": "success"}})
 	register, err := build(kit.NewEnvFrom(map[string]string{
@@ -45,7 +48,7 @@ func forgeSetup(t *testing.T) (*mocktest.Server, func(string, map[string]any) (b
 	}
 }
 
-func forgeOpen(t *testing.T, call func(string, map[string]any) (bool, string, map[string]any)) map[string]any {
+func forgeOpen(t *testing.T, call forgeCall) map[string]any {
 	t.Helper()
 	isErr, text, out := call("open_merge_request", map[string]any{
 		"project": "acme/shop", "branch": "zeroroot/fix-1", "base_branch": "main",
@@ -101,7 +104,11 @@ func TestForgeOpenMergeDeployRevert(t *testing.T) {
 	if dep["deployed"] != true || dep["application"] != "acme/shop" {
 		t.Errorf("deployment: %v", dep)
 	}
+	checkRevert(t, srv, call, ref)
+}
 
+func checkRevert(t *testing.T, srv *mocktest.Server, call forgeCall, ref string) {
+	t.Helper()
 	isErr, text, rev := call("revert_merge_request", map[string]any{"merge_request": ref})
 	if isErr || rev["merged"] != true {
 		t.Fatalf("revert: %s %v", text, rev)

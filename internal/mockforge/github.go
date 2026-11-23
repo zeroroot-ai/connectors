@@ -109,15 +109,23 @@ func (c *call) git(rest []string) {
 			return
 		}
 		writeJSON(c.w, http.StatusOK, map[string]any{"ref": "refs/heads/" + name, "object": map[string]string{"type": "commit", "sha": sha}})
-	case len(rest) == 1 && rest[0] == "refs" && c.req.Method == http.MethodPost:
+	default:
+		c.gitObjects(rest)
+	}
+}
+
+func (c *call) gitObjects(rest []string) {
+	post := c.req.Method == http.MethodPost
+	switch {
+	case len(rest) == 1 && rest[0] == "refs" && post:
 		c.createRef()
-	case len(rest) == 1 && rest[0] == "commits" && c.req.Method == http.MethodPost:
+	case len(rest) == 1 && rest[0] == "commits" && post:
 		c.createCommit()
 	case len(rest) == 2 && rest[0] == "commits" && c.req.Method == http.MethodGet:
 		c.getCommit(rest[1])
-	case len(rest) == 1 && rest[0] == "blobs" && c.req.Method == http.MethodPost:
+	case len(rest) == 1 && rest[0] == "blobs" && post:
 		c.createBlob()
-	case len(rest) == 1 && rest[0] == "trees" && c.req.Method == http.MethodPost:
+	case len(rest) == 1 && rest[0] == "trees" && post:
 		c.createTree()
 	case len(rest) == 2 && rest[0] == "trees" && c.req.Method == http.MethodGet:
 		c.getTree(rest[1])

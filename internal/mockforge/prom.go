@@ -96,7 +96,8 @@ func (m *Mock) controlProm(w http.ResponseWriter, req *http.Request, what string
 		if in.Value == "" {
 			in.Value = "1"
 		}
-		hist := append(m.prom.health[in.Query], promPoint{At: at, Value: string(in.Value), NoData: in.NoData})
+		hist := append([]promPoint{}, m.prom.health[in.Query]...)
+		hist = append(hist, promPoint{At: at, Value: string(in.Value), NoData: in.NoData})
 		sort.SliceStable(hist, func(i, j int) bool { return hist[i].At.Before(hist[j].At) })
 		m.prom.health[in.Query] = hist
 		writeJSON(w, http.StatusOK, map[string]any{"query": in.Query, "value": string(in.Value), "at": stamp(at)})

@@ -117,8 +117,9 @@ func (m *Mock) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 // splitPath splits an escaped path and unescapes each segment, so a branch
 // name with an escaped slash stays one segment.
 func splitPath(p string) []string {
-	var out []string
-	for _, s := range strings.Split(strings.Trim(p, "/"), "/") {
+	parts := strings.Split(strings.Trim(p, "/"), "/")
+	out := make([]string, 0, len(parts))
+	for _, s := range parts {
 		if u, err := url.PathUnescape(s); err == nil {
 			s = u
 		}

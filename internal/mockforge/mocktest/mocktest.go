@@ -20,16 +20,16 @@ type Server struct {
 }
 
 // Start runs a mock on a local port.
-func Start(t testing.TB) *Server {
-	t.Helper()
-	s := &Server{Server: httptest.NewServer(mockforge.New(nil)), t: t}
-	t.Cleanup(s.Close)
+func Start(tb testing.TB) *Server {
+	tb.Helper()
+	s := &Server{Server: httptest.NewServer(mockforge.New(nil)), t: tb}
+	tb.Cleanup(s.Close)
 	return s
 }
 
 // Do sends one request with an optional JSON body. It returns the status and the
 // decoded JSON object of the answer. The answer can be empty.
-func (s *Server) Do(method, path string, body any) (int, map[string]any) {
+func (s *Server) Do(method, path string, body any) (status int, out map[string]any) {
 	s.t.Helper()
 	var rd io.Reader
 	if body != nil {
@@ -49,7 +49,6 @@ func (s *Server) Do(method, path string, body any) (int, map[string]any) {
 	}
 	defer func() { _ = res.Body.Close() }()
 	raw, _ := io.ReadAll(res.Body)
-	var out map[string]any
 	_ = json.Unmarshal(raw, &out)
 	return res.StatusCode, out
 }
@@ -76,7 +75,7 @@ func (s *Server) Get(path string) map[string]any {
 
 // Seed makes a repository on the branch main with files. A value is a string
 // or an object with content and mode. It returns the head commit of main.
-func (s *Server) Seed(owner, repo string, files map[string]any, more map[string]any) string {
+func (s *Server) Seed(owner, repo string, files, more map[string]any) string {
 	s.t.Helper()
 	body := map[string]any{"owner": owner, "repo": repo, "files": files}
 	for k, v := range more {

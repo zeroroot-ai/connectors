@@ -174,21 +174,31 @@ func (m *Mock) controlRepo(w http.ResponseWriter, req *http.Request, r *repo, re
 		m.push(w, req, r)
 	case len(rest) == 1 && rest[0] == "checks" && req.Method == http.MethodPost:
 		m.setChecks(w, req, r)
-	case len(rest) == 1 && rest[0] == "merge-failure" && req.Method == http.MethodPut:
-		var f Failure
-		if readBody(w, req, &f) {
-			if f.Status < 400 || f.Status > 599 {
-				apiError(w, http.StatusBadRequest, "status must be an HTTP error status")
-				return
-			}
-			r.mergeFail = &f
-			writeJSON(w, http.StatusOK, f)
-		}
-	case len(rest) == 1 && rest[0] == "merge-failure" && req.Method == http.MethodDelete:
-		r.mergeFail = nil
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	case len(rest) == 1 && rest[0] == "merge-failure":
+		setMergeFailure(w, req, r)
 	case len(rest) == 1 && rest[0] == "deployments" && req.Method == http.MethodPost:
 		m.deploy(w, req, r)
+	default:
+		notFound(w)
+	}
+}
+
+func setMergeFailure(w http.ResponseWriter, req *http.Request, r *repo) {
+	switch req.Method {
+	case http.MethodPut:
+		var f Failure
+		if !readBody(w, req, &f) {
+			return
+		}
+		if f.Status < 400 || f.Status > 599 {
+			apiError(w, http.StatusBadRequest, "status must be an HTTP error status")
+			return
+		}
+		r.mergeFail = &f
+		writeJSON(w, http.StatusOK, f)
+	case http.MethodDelete:
+		r.mergeFail = nil
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	default:
 		notFound(w)
 	}
@@ -297,7 +307,7 @@ func (m *Mock) repoState(r *repo) map[string]any {
 		}
 		branches[name] = map[string]any{"sha": r.refs[name], "files": files}
 	}
-	pulls := []map[string]any{}
+	pulls := make([]map[string]any, 0, len(r.pulls))
 	for _, n := range sortedNumbers(r.pulls) {
 		p := r.pulls[n]
 		pulls = append(pulls, map[string]any{
@@ -305,7 +315,7 @@ func (m *Mock) repoState(r *repo) map[string]any {
 			"head_sha": p.head(r), "base_ref": p.BaseRef, "merge_commit": p.MergeSHA,
 		})
 	}
-	deps := []map[string]any{}
+	deps := make([]map[string]any, 0, len(r.deployments))
 	for _, d := range r.deployments {
 		deps = append(deps, map[string]any{"id": d.ID, "sha": d.SHA, "environment": d.Environment, "statuses": d.Statuses})
 	}
@@ -318,7 +328,7 @@ func (m *Mock) repoState(r *repo) map[string]any {
 }
 
 func (m *Mock) state(w http.ResponseWriter) {
-	repos := []string{}
+	repos := make([]string, 0, len(m.repos))
 	for _, r := range m.repos {
 		repos = append(repos, r.fullName())
 	}

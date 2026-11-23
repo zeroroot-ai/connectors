@@ -211,7 +211,7 @@ func (c *call) patchPull(p *pull) {
 func (c *call) pullCommits(p *pull) {
 	all := p.commitList(c.r)
 	from, to := page(c.req, len(all))
-	out := []map[string]any{}
+	out := make([]map[string]any, 0, to-from)
 	for _, s := range all[from:to] {
 		cm := c.r.commits[s]
 		out = append(out, map[string]any{"sha": s, "commit": map[string]any{"message": cm.Message, "author": cm.Author}})

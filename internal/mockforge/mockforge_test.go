@@ -80,14 +80,14 @@ func TestSelfSignedCertificateIsTrustedWithItsAuthority(t *testing.T) {
 		t.Fatal("the authority is not PEM")
 	}
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}}
-	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+"/healthz", nil)
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+"/healthz", http.NoBody)
 	res, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("a client with the authority: %v", err)
 	}
 	_ = res.Body.Close()
 	plain := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}}
-	req, _ = http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+"/healthz", nil)
+	req, _ = http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+"/healthz", http.NoBody)
 	if res, err = plain.Do(req); err == nil {
 		_ = res.Body.Close()
 		t.Error("a client with no authority must refuse the certificate")
