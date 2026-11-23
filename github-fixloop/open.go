@@ -29,7 +29,10 @@ import (
 //
 // The token needs the permissions contents:write and pull_requests:write.
 
-const fileMode = "100644" // GitHub tree entries of a regular, not executable file
+const (
+	fileMode = "100644" // GitHub tree entries of a regular, not executable file
+	execMode = "100755" // an executable file. The tool keeps it for a path that has it in the base tree.
+)
 
 func (v *service) registerOpen(s *mcp.Server, log *slog.Logger) {
 	kit.AddTool(s, log, &mcp.Tool{
@@ -119,7 +122,11 @@ func (v *service) openMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 	if err != nil {
 		return nil, out, err
 	}
-	tree, err := v.treeEntries(ctx, r, in.Changes)
+	modes, err := v.modesOf(ctx, r, treeSHA, in.Changes)
+	if err != nil {
+		return nil, out, err
+	}
+	tree, err := v.treeEntries(ctx, r, in.Changes, modes)
 	if err != nil {
 		return nil, out, err
 	}
@@ -195,9 +202,100 @@ func (v *service) baseOf(ctx context.Context, r prRef, target string) (commit, t
 	return tip.Object.SHA, c.Tree.SHA, nil
 }
 
+// modeOr returns the mode that the tool writes for a path: the mode in modes, or
+// the mode of a regular file.
+func modeOr(modes map[string]string, path string) string {
+	if m, ok := modes[path]; ok {
+		return m
+	}
+	return fileMode
+}
+
+// modesOf returns the mode that the tool writes for each path that it writes.
+// An existing file that is executable (100755) in the tree keeps that mode, so an
+// edit of a script does not drop its executable bit. Any other path gets the mode
+// of a regular file. The tool walks the folders of each path without recursion,
+// so a large tree is read in full:
+//
+//	GET /repos/{owner}/{repo}/git/trees/{tree_sha}
+//
+// https://docs.github.com/en/rest/git/trees#get-a-tree
+func (v *service) modesOf(ctx context.Context, r prRef, rootTree string, changes []fixloop.FileChange) (map[string]string, error) {
+	folders := map[string][]ghTreeItem{}
+	list := func(sha string) ([]ghTreeItem, error) {
+		if items, ok := folders[sha]; ok {
+			return items, nil
+		}
+		var t struct {
+			Truncated bool         `json:"truncated"`
+			Tree      []ghTreeItem `json:"tree"`
+		}
+		if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: repoPath(r, "git", "trees", sha)}, &t); err != nil {
+			return nil, fmt.Errorf("read the tree %s to keep the file modes: %w", sha, err)
+		}
+		if t.Truncated {
+			return nil, fmt.Errorf("the tree %s is too large to read the file modes", sha)
+		}
+		folders[sha] = t.Tree
+		return t.Tree, nil
+	}
+	modes := map[string]string{}
+	for _, c := range changes {
+		if c.Delete {
+			continue
+		}
+		mode, err := modeAt(list, rootTree, c.Path)
+		if err != nil {
+			return nil, err
+		}
+		modes[c.Path] = mode
+	}
+	return modes, nil
+}
+
+type ghTreeItem struct {
+	Path string `json:"path"`
+	Mode string `json:"mode"`
+	Type string `json:"type"`
+	SHA  string `json:"sha"`
+}
+
+// modeAt walks the folders of path from the root tree and returns the mode to
+// write: execMode for an executable blob, fileMode for the rest, a missing path
+// included.
+func modeAt(list func(string) ([]ghTreeItem, error), root, path string) (string, error) {
+	segs := strings.Split(path, "/")
+	sha := root
+	for i, seg := range segs {
+		items, err := list(sha)
+		if err != nil {
+			return "", err
+		}
+		var found *ghTreeItem
+		for j := range items {
+			if items[j].Path == seg {
+				found = &items[j]
+			}
+		}
+		switch {
+		case found == nil:
+			return fileMode, nil
+		case i == len(segs)-1:
+			if found.Type == "blob" && found.Mode == execMode {
+				return execMode, nil
+			}
+			return fileMode, nil
+		case found.Type != "tree":
+			return fileMode, nil
+		}
+		sha = found.SHA
+	}
+	return fileMode, nil
+}
+
 // treeEntries makes one blob for each new content and one entry for each
 // change. An entry with a null sha removes the path.
-func (v *service) treeEntries(ctx context.Context, r prRef, changes []fixloop.FileChange) ([]map[string]any, error) {
+func (v *service) treeEntries(ctx context.Context, r prRef, changes []fixloop.FileChange, modes map[string]string) ([]map[string]any, error) {
 	entries := make([]map[string]any, 0, len(changes))
 	for i, c := range changes {
 		if c.Delete {
@@ -212,7 +310,7 @@ func (v *service) treeEntries(ctx context.Context, r prRef, changes []fixloop.Fi
 		if err != nil {
 			return nil, fmt.Errorf("create the blob of change %s: %w", strconv.Itoa(i+1), err)
 		}
-		entries = append(entries, map[string]any{"path": c.Path, "mode": fileMode, "type": "blob", "sha": b.SHA})
+		entries = append(entries, map[string]any{"path": c.Path, "mode": modeOr(modes, c.Path), "type": "blob", "sha": b.SHA})
 	}
 	return entries, nil
 }
@@ -291,8 +389,9 @@ func (v *service) foreign(ctx context.Context, r prRef, in fixloop.OpenInput) (c
 	}
 	for _, c := range in.Changes {
 		g, ok := got[c.Path]
-		// A status "changed" is a change of the mode. This tool writes the mode
-		// 100644 and no other, so a branch with a change of mode is foreign.
+		// A status "changed" is a change of the mode. This tool keeps the mode of an
+		// existing path, so its commit never changes a mode. A branch with a change
+		// of mode is foreign.
 		switch {
 		case !ok:
 			return "", "its commit changes other files than the input", nil
@@ -315,8 +414,9 @@ func (v *service) foreign(ctx context.Context, r prRef, in fixloop.OpenInput) (c
 }
 
 // checkModes reads the tree of the commit and refuses a written path whose
-// entry is not a blob with the mode 100644. A tree that GitHub cuts cannot be
-// checked, so it is refused.
+// entry is not a blob with the mode that the tool writes: 100755 when the path
+// is an executable file in the parent commit, 100644 otherwise. A tree that
+// GitHub cuts cannot be checked, so it is refused.
 func (v *service) checkModes(ctx context.Context, r prRef, commit string, in fixloop.OpenInput) (string, error) {
 	var c gitCommit
 	if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: repoPath(r, "git", "commits", commit)}, &c); err != nil {
@@ -340,6 +440,19 @@ func (v *service) checkModes(ctx context.Context, r prRef, commit string, in fix
 	if tree.Truncated {
 		return "has a tree that is too large for the tool to check the file modes", nil
 	}
+	// The expected mode of a path is the mode that the tool writes for it: the mode
+	// in the parent commit of the commit, which was the head of the base branch.
+	if len(c.Parents) != 1 {
+		return "has a commit that does not have one parent", nil
+	}
+	var parent gitCommit
+	if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: repoPath(r, "git", "commits", c.Parents[0].SHA)}, &parent); err != nil {
+		return "", fmt.Errorf("read the parent commit of the source branch: %w", err)
+	}
+	modes, err := v.modesOf(ctx, r, parent.Tree.SHA, in.Changes)
+	if err != nil {
+		return "", err
+	}
 	entries := make(map[string][3]string, len(tree.Tree))
 	for _, e := range tree.Tree {
 		entries[e.Path] = [3]string{e.Mode, e.Type, e.SHA}
@@ -352,7 +465,7 @@ func (v *service) checkModes(ctx context.Context, r prRef, commit string, in fix
 			continue
 		}
 		e, ok := entries[f.Path]
-		if !ok || e[0] != fileMode || e[1] != "blob" || e[2] != fixloop.BlobSHA(*f.Content) {
+		if !ok || e[0] != modeOr(modes, f.Path) || e[1] != "blob" || e[2] != fixloop.BlobSHA(*f.Content) {
 			return "its commit holds a file mode, a type or a content that this tool did not write for " + f.Path, nil
 		}
 	}

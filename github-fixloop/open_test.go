@@ -24,6 +24,7 @@ const (
 	newTreeSHA = "2222222222222222222222222222222222222222"
 	newComSHA  = "3333333333333333333333333333333333333333"
 	baseTree   = "4444444444444444444444444444444444444444"
+	srcTree    = "5555555555555555555555555555555555555555"
 	srcBranch  = "zeroroot/fix-sqli-1"
 )
 
@@ -32,6 +33,8 @@ func openRoutes() map[string]handler {
 	return map[string]handler{
 		"GET " + repo + "/git/ref/heads/main":     reply(200, `{"ref":"refs/heads/main","object":{"sha":"`+baseSHA+`"}}`),
 		"GET " + repo + "/git/commits/" + baseSHA: reply(200, `{"sha":"`+baseSHA+`","tree":{"sha":"`+baseTree+`"},"parents":[]}`),
+		"GET " + repo + "/git/trees/" + baseTree:  reply(200, `{"sha":"`+baseTree+`","truncated":false,"tree":[{"path":"src","mode":"040000","type":"tree","sha":"`+srcTree+`"}]}`),
+		"GET " + repo + "/git/trees/" + srcTree:   reply(200, `{"sha":"`+srcTree+`","truncated":false,"tree":[{"path":"db.go","mode":"100644","type":"blob","sha":"`+blobSHA+`"}]}`),
 		"POST " + repo + "/git/blobs":             reply(201, `{"sha":"`+newBlobSHA+`"}`),
 		"POST " + repo + "/git/trees":             reply(201, `{"sha":"`+newTreeSHA+`"}`),
 		"POST " + repo + "/git/commits":           reply(201, `{"sha":"`+newComSHA+`","tree":{"sha":"`+newTreeSHA+`"},"parents":[{"sha":"`+baseSHA+`"}]}`),
