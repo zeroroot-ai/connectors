@@ -103,9 +103,7 @@ func (v *service) listTree(ctx context.Context, _ *mcp.CallToolRequest, in fixlo
 	if len(list) == 0 && path != "" && in.Cursor == "" {
 		// A missing folder (GitLab before 17.7) and a file both give an empty list. A
 		// folder of git is never empty, so check that the path is a folder.
-		if err := v.checkFolder(ctx, in.Repo, out.Ref, path); err != nil {
-			return nil, out, err
-		}
+		return nil, out, v.emptyFolderError(ctx, in.Repo, out.Ref, path)
 	}
 	next, more, err := nextPageToken(hdr.Get("Link"))
 	switch {
@@ -143,11 +141,11 @@ func nextPageToken(link string) (token string, more bool, err error) {
 // maxParentPages bounds the pages of the parent folder that checkFolder reads.
 const maxParentPages = 10
 
-// checkFolder makes sure that path is a folder at the ref. It lists the parent
-// folder without recursion and looks for an entry of type tree. It returns an
-// error when the path is a file, is missing, or is not found in the pages that
-// the tool reads.
-func (v *service) checkFolder(ctx context.Context, project, ref, path string) error {
+// emptyFolderError explains an empty list for a path. It always returns an
+// error, because the list of a real folder is never empty. It lists the parent
+// folder without recursion and looks for the entry of the path, so the error says
+// whether the path is a file or is missing.
+func (v *service) emptyFolderError(ctx context.Context, project, ref, path string) error {
 	parent := ""
 	if i := strings.LastIndex(path, "/"); i >= 0 {
 		parent = path[:i]
