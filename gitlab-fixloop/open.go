@@ -133,7 +133,7 @@ func (v *service) openMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 	if err != nil {
 		return nil, out, err
 	}
-	if err := sameHead(created, commit.ID); err != nil {
+	if err := sameHead(created, commit.ID, in.SourceBranch); err != nil {
 		return nil, out, err
 	}
 	return nil, v.openResult(project, created, in, commit.ID, existing), nil
@@ -159,7 +159,7 @@ func (v *service) createMR(ctx context.Context, project string, in fixloop.OpenI
 				return found, true, nil
 			}
 		}
-		return nil, false, kit.Retryable(fmt.Errorf("open the merge request (the branch %s stays, call the tool again): %w", in.SourceBranch, err))
+		return nil, false, kit.Retryable(fmt.Errorf("open the merge request (%s): %w", fixloop.BranchStays(in.SourceBranch, err), err))
 	}
 	return &created, false, nil
 }
@@ -167,10 +167,11 @@ func (v *service) createMR(ctx context.Context, project string, in fixloop.OpenI
 // sameHead refuses a merge request whose head is not the commit that the tool
 // made or checked. The head_sha of the result is that commit, so a later merge
 // with expected_head_sha merges only that commit.
-func sameHead(mr *glMR, commit string) error {
+func sameHead(mr *glMR, commit, branch string) error {
 	if !strings.EqualFold(mr.SHA, commit) {
 		return fmt.Errorf("%w: the head of the merge request is %s and not %s, the commit that this tool made or checked. "+
-			"A push moved the branch. Nothing was merged", kit.ErrInvalidInput, mr.SHA, commit)
+			"A push moved the branch. The merge request !%d (%s) is open, and the branch %s stays",
+			kit.ErrInvalidInput, mr.SHA, commit, mr.IID, mr.WebURL, branch)
 	}
 	return nil
 }
@@ -266,7 +267,7 @@ func (v *service) resume(ctx context.Context, project string, in fixloop.OpenInp
 		return nil, out, err
 	}
 	if mr != nil {
-		if err := sameHead(mr, commit); err != nil {
+		if err := sameHead(mr, commit, in.SourceBranch); err != nil {
 			return nil, out, err
 		}
 		return nil, v.openResult(project, mr, in, commit, true), nil
@@ -275,7 +276,7 @@ func (v *service) resume(ctx context.Context, project string, in fixloop.OpenInp
 	if err != nil {
 		return nil, out, err
 	}
-	if err := sameHead(created, commit); err != nil {
+	if err := sameHead(created, commit, in.SourceBranch); err != nil {
 		return nil, out, err
 	}
 	return nil, v.openResult(project, created, in, commit, existing), nil

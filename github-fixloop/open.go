@@ -160,14 +160,14 @@ func (v *service) openMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 	}, &created)
 	if err != nil {
 		if pr := v.pullAfterConflict(ctx, r, in, err); pr != nil {
-			if herr := sameHead(pr, commit.SHA); herr != nil {
+			if herr := sameHead(pr, commit.SHA, in.SourceBranch); herr != nil {
 				return nil, out, herr
 			}
 			return nil, v.openResult(r, pr, in, commit.SHA, true), nil
 		}
-		return nil, out, kit.Retryable(fmt.Errorf("open the pull request (the branch %s stays, call the tool again): %w", in.SourceBranch, err))
+		return nil, out, kit.Retryable(fmt.Errorf("open the pull request (%s): %w", fixloop.BranchStays(in.SourceBranch, err), err))
 	}
-	if err := sameHead(&created, commit.SHA); err != nil {
+	if err := sameHead(&created, commit.SHA, in.SourceBranch); err != nil {
 		return nil, out, err
 	}
 	return nil, v.openResult(r, &created, in, commit.SHA, false), nil
@@ -192,10 +192,11 @@ func (v *service) pullAfterConflict(ctx context.Context, r prRef, in fixloop.Ope
 // sameHead refuses a pull request whose head is not the commit that the tool
 // made or checked. The head_sha of the result is that commit, so a later merge
 // with expected_head_sha merges only that commit.
-func sameHead(pr *ghPR, commit string) error {
+func sameHead(pr *ghPR, commit, branch string) error {
 	if !strings.EqualFold(pr.Head.SHA, commit) {
 		return fmt.Errorf("%w: the head of the pull request is %s and not %s, the commit that this tool made or checked. "+
-			"A push moved the branch. Nothing was merged", kit.ErrInvalidInput, pr.Head.SHA, commit)
+			"A push moved the branch. The pull request #%d (%s) is open, and the branch %s stays",
+			kit.ErrInvalidInput, pr.Head.SHA, commit, pr.Number, pr.HTMLURL, branch)
 	}
 	return nil
 }
@@ -409,7 +410,7 @@ func (v *service) resume(ctx context.Context, r prRef, in fixloop.OpenInput, out
 		return nil, out, err
 	}
 	if pr != nil {
-		if err := sameHead(pr, commit); err != nil {
+		if err := sameHead(pr, commit, in.SourceBranch); err != nil {
 			return nil, out, err
 		}
 		return nil, v.openResult(r, pr, in, commit, true), nil
@@ -421,14 +422,14 @@ func (v *service) resume(ctx context.Context, r prRef, in fixloop.OpenInput, out
 	}, &created)
 	if err != nil {
 		if pr := v.pullAfterConflict(ctx, r, in, err); pr != nil {
-			if herr := sameHead(pr, commit); herr != nil {
+			if herr := sameHead(pr, commit, in.SourceBranch); herr != nil {
 				return nil, out, herr
 			}
 			return nil, v.openResult(r, pr, in, commit, true), nil
 		}
-		return nil, out, kit.Retryable(fmt.Errorf("open the pull request (the branch %s stays, call the tool again): %w", in.SourceBranch, err))
+		return nil, out, kit.Retryable(fmt.Errorf("open the pull request (%s): %w", fixloop.BranchStays(in.SourceBranch, err), err))
 	}
-	if err := sameHead(&created, commit); err != nil {
+	if err := sameHead(&created, commit, in.SourceBranch); err != nil {
 		return nil, out, err
 	}
 	return nil, v.openResult(r, &created, in, commit, false), nil
