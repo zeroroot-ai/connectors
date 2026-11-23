@@ -934,6 +934,27 @@ func (v *service) openRevert(ctx context.Context, r prRef, orig *ghPR, branch st
 	return &created, nil
 }
 
+// findOpenPR returns the open pull request from the branch into the base branch,
+// or nil. The request lists the open pull requests of the branch only, so a newer
+// closed pull request of the same branch does not hide the open one. A pull
+// request from a fork with the same branch name is not ours.
+func (v *service) findOpenPR(ctx context.Context, r prRef, branch, base string) (*ghPR, error) {
+	var found []ghPR
+	err := v.client.Do(ctx, kit.Request{
+		Method: http.MethodGet, Path: repoPath(r, "pulls"),
+		Query: url.Values{"head": {r.owner + ":" + branch}, "base": {base}, "state": {"open"}, "per_page": {"100"}},
+	}, &found)
+	if err != nil {
+		return nil, fmt.Errorf("look for the open pull request of the branch: %w", err)
+	}
+	for i := range found {
+		if found[i].State == "open" && found[i].Base.Ref == base && !found[i].fromFork() {
+			return &found[i], nil
+		}
+	}
+	return nil, nil
+}
+
 func (v *service) findPR(ctx context.Context, r prRef, branch string) (*ghPR, error) {
 	var found []ghPR
 	err := v.client.Do(ctx, kit.Request{
@@ -941,7 +962,7 @@ func (v *service) findPR(ctx context.Context, r prRef, branch string) (*ghPR, er
 		Query: url.Values{"head": {r.owner + ":" + branch}, "state": {"all"}, "per_page": {"1"}},
 	}, &found)
 	if err != nil {
-		return nil, fmt.Errorf("look for a revert pull request: %w", err)
+		return nil, fmt.Errorf("look for a pull request of the branch: %w", err)
 	}
 	if len(found) == 0 {
 		return nil, nil

@@ -288,7 +288,7 @@ func TestFailureAfterAWriteIsOutcomeUnknown(t *testing.T) {
 		"read_read":       ClassUnavailable,    // nothing was written
 		"post_then_get":   ClassOutcomeUnknown, // the POST ran
 		"put_then_get":    ClassUnavailable,    // a PUT is safe to repeat
-		"post_then_400":   ClassRefused,        // a known refusal stays a refusal
+		"post_then_400":   ClassOutcomeUnknown, // a refusal by a later step must not hide the write
 		"post_then_opted": ClassUnavailable,    // the tool proved a repeat safe
 	} {
 		if class, text, _ := callClass(t, cs, tool); class != want {

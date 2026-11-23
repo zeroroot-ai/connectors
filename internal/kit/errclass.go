@@ -134,10 +134,11 @@ func Classify(err error) ErrorClass {
 	c := classifyCause(err)
 	var aw *AfterWriteError
 	var re *RetryableError
-	if errors.As(err, &aw) && !errors.As(err, &re) &&
-		(c.Class == ClassUnavailable || c.Class == ClassTimeout || c.Class == ClassRateLimited) {
+	if errors.As(err, &aw) && !errors.As(err, &re) && c.Class != ClassOutcomeUnknown {
 		// An earlier request of the call changed the vendor. A repeat of the call
-		// would repeat it.
+		// would repeat it, and a refusal by a later step must not hide that the call
+		// wrote. This holds for a refusal too: a 4xx answer of a later step is
+		// outcome_unknown, not refused.
 		return ErrorClass{Class: ClassOutcomeUnknown}
 	}
 	return c
