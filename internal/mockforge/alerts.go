@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/zeroroot-ai/connectors/internal/fixloop"
 )
 
 // Dependabot alerts. The endpoint follows
@@ -11,8 +13,8 @@ import (
 //
 // The mock derives the alerts from the content of the repository. A test seeds
 // advisories with POST /_mock/advisories. The mock reads go.mod on the default
-// branch. An alert is open while go.mod requires a version of the advisory
-// package that the vulnerable range holds. It is fixed after a commit moves
+// branch, with its replace directives applied. An alert is open while go.mod
+// installs a version of the advisory package that the vulnerable range holds. It is fixed after a commit moves
 // the default branch to a version that the range does not hold, or removes the
 // requirement. A merged pull request is such a commit, so a fix closes the
 // alert with no other action. The mock supports the ecosystem go only.
@@ -52,8 +54,10 @@ func (m *Mock) evalAlerts(r *repo) {
 	}
 	at := stamp(m.now())
 	for _, adv := range m.advisories {
-		ver := goModRequire(gomod, adv.Package)
-		vulnerable := ver != "" && inRange(ver, adv.VulnerableRange)
+		vulnerable := false
+		for _, ver := range fixloop.InstalledPackage("go.mod", gomod, adv.Package).Versions {
+			vulnerable = vulnerable || inRange(ver, adv.VulnerableRange)
+		}
 		a := r.alerts[adv.GHSAID]
 		switch {
 		case vulnerable && a == nil:
@@ -127,11 +131,21 @@ func (c *call) alerts(rest []string) {
 		notFound(c.w)
 		return
 	}
+	if c.r.alertsOff {
+		apiError(c.w, http.StatusForbidden, "Dependabot alerts are disabled for this repository.")
+		return
+	}
 	q := c.req.URL.Query()
 	want := map[string]bool{}
 	for _, s := range strings.Split(q.Get("state"), ",") {
-		if s = strings.TrimSpace(s); s != "" {
+		s = strings.TrimSpace(s)
+		switch s {
+		case "":
+		case "open", "fixed", "dismissed", "auto_dismissed":
 			want[s] = true
+		default:
+			apiError(c.w, http.StatusUnprocessableEntity, "Validation Failed: state "+s+" is not one of auto_dismissed, dismissed, fixed, open")
+			return
 		}
 	}
 	list := []*alert{}
@@ -196,12 +210,22 @@ func (m *Mock) addAdvisory(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, http.StatusCreated, in)
 }
 
-// dismissAlert serves POST /_mock/repos/{o}/{r}/alerts/{number}/dismiss.
-func (m *Mock) dismissAlert(w http.ResponseWriter, r *repo, number string) {
+// dismissAlert serves POST /_mock/repos/{o}/{r}/alerts/{number}/dismiss. The
+// body {"auto": true} makes the state auto_dismissed.
+func (m *Mock) dismissAlert(w http.ResponseWriter, req *http.Request, r *repo, number string) {
+	var in struct {
+		Auto bool `json:"auto"`
+	}
+	if req.ContentLength > 0 && !readBody(w, req, &in) {
+		return
+	}
 	n, _ := strconv.Atoi(number)
 	for _, a := range r.alerts {
 		if a.Number == n && a.State == "open" {
 			a.State, a.DismissedAt = "dismissed", stamp(m.now())
+			if in.Auto {
+				a.State = "auto_dismissed"
+			}
 			writeJSON(w, http.StatusOK, map[string]any{"number": n, "state": a.State})
 			return
 		}
@@ -210,33 +234,6 @@ func (m *Mock) dismissAlert(w http.ResponseWriter, r *repo, number string) {
 }
 
 // ---- go.mod and versions ----
-
-// goModRequire returns the version that go.mod requires for a module.
-func goModRequire(content, module string) string {
-	inBlock := false
-	for _, line := range strings.Split(content, "\n") {
-		line = strings.TrimSpace(line)
-		if i := strings.Index(line, "//"); i >= 0 {
-			line = strings.TrimSpace(line[:i])
-		}
-		switch {
-		case line == "require (":
-			inBlock = true
-			continue
-		case inBlock && line == ")":
-			inBlock = false
-			continue
-		case !inBlock && strings.HasPrefix(line, "require "):
-			line = strings.TrimPrefix(line, "require ")
-		case !inBlock:
-			continue
-		}
-		if f := strings.Fields(line); len(f) == 2 && f[0] == module {
-			return f[1]
-		}
-	}
-	return ""
-}
 
 // inRange reports whether a version is in a vulnerable range of GitHub. The
 // range is comparisons that a comma joins, for example ">= 1.0.0, < 1.2.4".

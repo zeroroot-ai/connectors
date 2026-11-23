@@ -38,8 +38,12 @@ func (v *service) registerAlerts(s *mcp.Server, log *slog.Logger) {
 			"the package, the ecosystem, the installed version and its package URL, the vulnerable version range, the first patched " +
 			"version, the advisory ids (GHSA and CVE), the severity, the manifest path and the URL. " +
 			"GitHub gives no installed version, so the tool reads it from go.mod, package-lock.json or requirements.txt at the default branch. " +
+			"A package that the manifest installs at several versions has version_ambiguous true, the list in versions, and no purl. " +
 			"The tool reads at most 1000 alerts. When there are more, truncated is true. " +
-			"A ref that is not the default branch is refused. Call it again after a fix is merged: the alert is then fixed.",
+			"A ref that is not the default branch is refused. A GitHub error, such as disabled alerts (403), is an error and never an empty list. " +
+			"To verify a fix, call it with state all and treat an alert as fixed only when its state is fixed. " +
+			"An alert that is missing from the list, a dismissed alert and an auto dismissed alert (shown as dismissed) are not fixed. " +
+			"A truncated list proves nothing.",
 		Annotations: kit.ReadOnly("List GitHub dependency alerts"),
 	}, v.listDependencyAlerts)
 }
@@ -111,20 +115,23 @@ func (v *service) listDependencyAlerts(ctx context.Context, _ *mcp.CallToolReque
 	return nil, out, nil
 }
 
-// nextCursor returns the after value of the next link in a Link header, or ""
-// when there is no next page.
-func nextCursor(link string) string {
+// nextCursor returns the after value of the next link in a Link header. more is
+// false when there is no next link. A next link that the tool cannot follow is an
+// error, because ending the list there would show a cut list as a whole list.
+func nextCursor(link string) (after string, more bool, err error) {
 	for _, part := range strings.Split(link, ",") {
 		seg := strings.Split(part, ";")
 		if len(seg) < 2 || !strings.Contains(seg[1], `rel="next"`) {
 			continue
 		}
-		raw := strings.Trim(strings.TrimSpace(seg[0]), "<>")
-		if u, err := url.Parse(raw); err == nil {
-			return u.Query().Get("after")
+		u, perr := url.Parse(strings.Trim(strings.TrimSpace(seg[0]), "<>"))
+		if perr != nil || u.Query().Get("after") == "" {
+			return "", true, errors.New("list the dependency alerts: GitHub gave a next page link that has no after cursor, " +
+				"so the tool cannot read the rest of the list")
 		}
+		return u.Query().Get("after"), true, nil
 	}
-	return ""
+	return "", false, nil
 }
 
 // convertAlerts makes the result alerts. It reads each manifest at most once.
@@ -144,14 +151,25 @@ func (v *service) convertAlerts(ctx context.Context, project, branch string, raw
 				}
 				manifests[p] = content
 			}
-			if ver := fixloop.InstalledVersion(p, content, al.Package); ver != "" {
-				al.Version, al.VersionSource = ver, fixloop.VersionFromManifest
-				al.Purl = fixloop.Purl(al.Ecosystem, al.Package, ver)
-			}
+			applyInstalled(&al, fixloop.InstalledPackage(p, content, al.Package))
 		}
 		out = append(out, al)
 	}
 	return out
+}
+
+// applyInstalled sets the version of an alert. A package that the manifest
+// installs at several versions has no single version. The alert then lists the
+// versions and has no purl, so a caller does not match it to the wrong package.
+func applyInstalled(al *fixloop.Alert, in fixloop.Installed) {
+	switch len(in.Versions) {
+	case 0:
+	case 1:
+		al.Version, al.VersionSource = in.Versions[0], fixloop.VersionFromManifest
+		al.Purl = fixloop.Purl(al.Ecosystem, in.Name, in.Versions[0])
+	default:
+		al.Versions, al.VersionAmbiguous, al.VersionSource = in.Versions, true, fixloop.VersionFromManifest
+	}
 }
 
 func toAlert(a ghAlert) fixloop.Alert {
@@ -175,6 +193,7 @@ func toAlert(a ghAlert) fixloop.Alert {
 		ids = append(ids, i.Value)
 	}
 	al.AdvisoryIDs = fixloop.AdvisoryIDs(ids...)
+	al.Verifiable = len(al.AdvisoryIDs) > 0
 	al.PurlType = fixloop.PurlType(al.Ecosystem)
 	return al
 }
@@ -203,8 +222,11 @@ func (v *service) fetchAlerts(ctx context.Context, r prRef, state string) ([]ghA
 			return nil, false, fmt.Errorf("list the dependency alerts (the token needs the Dependabot alerts read permission): %w", err)
 		}
 		raw = append(raw, list...)
-		after := nextCursor(hdr.Get("Link"))
-		if after == "" || len(list) == 0 {
+		after, more, err := nextCursor(hdr.Get("Link"))
+		if err != nil {
+			return nil, false, err
+		}
+		if !more {
 			return raw, false, nil
 		}
 		q.Set("after", after)

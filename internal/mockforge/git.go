@@ -68,6 +68,7 @@ type repo struct {
 
 	alerts    map[string]*alert // by GHSA id
 	nextAlert int
+	alertsOff bool
 }
 
 func newRepo(owner, name, branch string) *repo {

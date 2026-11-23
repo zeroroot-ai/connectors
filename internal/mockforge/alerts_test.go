@@ -20,10 +20,3 @@ func TestInRange(t *testing.T) {
 		}
 	}
 }
-
-func TestGoModRequire(t *testing.T) {
-	mod := "module m\nrequire a/b v1.0.0\nrequire (\n\tc/d v2.0.0 // indirect\n)\n"
-	if goModRequire(mod, "a/b") != "v1.0.0" || goModRequire(mod, "c/d") != "v2.0.0" || goModRequire(mod, "x") != "" {
-		t.Error("goModRequire")
-	}
-}

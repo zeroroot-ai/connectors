@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -224,4 +225,123 @@ func TestAlertsStateFilterAndToken(t *testing.T) {
 	if got := m.headers.Get("Authorization"); got != "Bearer ghp_secret" {
 		t.Errorf("authorization = %q", got)
 	}
+}
+
+func TestAlertsAutoDismissedAndVerifiable(t *testing.T) {
+	srv, call := alertForge(t)
+	srv.Post("/_mock/repos/acme/shop/alerts/1/dismiss", map[string]any{"auto": true})
+	_, _, d := call("list_dependency_alerts", map[string]any{"project": "acme/shop", "state": "dismissed"})
+	l := alertsOf(t, d)
+	if len(l) != 1 || l[0]["state"] != "dismissed" || l[0]["verifiable"] != true {
+		t.Errorf("auto dismissed: %v", d)
+	}
+	// An auto dismissed alert is not an open alert and it is not a fixed alert.
+	for _, st := range []string{"open", "fixed"} {
+		_, _, out := call("list_dependency_alerts", map[string]any{"project": "acme/shop", "state": st})
+		if n := len(alertsOf(t, out)); n != 0 {
+			t.Errorf("state %s: %v", st, out)
+		}
+	}
+	if st, body := srv.Do(http.MethodGet, "/repos/acme/shop/dependabot/alerts?state=auto_dismissed", nil); st != 200 || body != nil {
+		t.Errorf("mock filter auto_dismissed: %d %v", st, body)
+	}
+}
+
+func TestAlertsErrorsAreNeverACleanList(t *testing.T) {
+	srv, call := alertForge(t)
+	// The mock answers 403 when the alerts are disabled or the token cannot read them.
+	srv.Do(http.MethodPatch, "/_mock/repos/acme/shop", map[string]any{"dependabot_alerts_disabled": true})
+	if isErr, msg, _ := call("list_dependency_alerts", map[string]any{"project": "acme/shop"}); !isErr || !strings.Contains(msg, "403") {
+		t.Errorf("403: isErr=%v %s", isErr, msg)
+	}
+	if st, _ := srv.Do(http.MethodGet, "/repos/acme/shop/dependabot/alerts", nil); st != http.StatusForbidden {
+		t.Errorf("mock status %d, want 403", st)
+	}
+	// 404: the repository does not exist.
+	if st, _ := srv.Do(http.MethodGet, "/repos/acme/none/dependabot/alerts", nil); st != http.StatusNotFound {
+		t.Errorf("mock status %d, want 404", st)
+	}
+	if isErr, _, _ := call("list_dependency_alerts", map[string]any{"project": "acme/none"}); !isErr {
+		t.Error("a missing project gave a result")
+	}
+	// 422: a bad state.
+	srv.Do(http.MethodPatch, "/_mock/repos/acme/shop", map[string]any{"dependabot_alerts_disabled": false})
+	if st, _ := srv.Do(http.MethodGet, "/repos/acme/shop/dependabot/alerts?state=bogus", nil); st != http.StatusUnprocessableEntity {
+		t.Errorf("mock status %d, want 422", st)
+	}
+}
+
+func TestAlertsRefuseABrokenNextLink(t *testing.T) {
+	for name, link := range map[string]string{
+		"no after cursor": `<https://api.github.com` + alertsPath + `?per_page=100&page=2>; rel="next"`,
+		"bad url":         `<http://[::1>; rel="next"`,
+	} {
+		_, call := setup(t, map[string]handler{
+			"GET " + repo: reply(200, allMethods[:len(allMethods)-1]+`,"default_branch":"main"}`),
+			"GET " + alertsPath: func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+				w.Header().Set("Link", link)
+				_, _ = w.Write([]byte(alertPage(1, 1)))
+			},
+		})
+		if isErr, msg, _ := call("list_dependency_alerts", map[string]any{"project": "acme/shop"}); !isErr || !strings.Contains(msg, "next page link") {
+			t.Errorf("%s: isErr=%v %s", name, isErr, msg)
+		}
+	}
+}
+
+func TestAlertsAmbiguousVersions(t *testing.T) {
+	nested := `{"packages":{"node_modules/lodash":{"version":"4.17.20"},"node_modules/a/node_modules/lodash":{"version":"3.10.1"}}}`
+	_, call := setup(t, map[string]handler{
+		"GET " + repo: reply(200, allMethods[:len(allMethods)-1]+`,"default_branch":"main"}`),
+		"GET " + repo + "/contents/package-lock.json": reply(200, fileJSON("file", "base64", base64.StdEncoding.EncodeToString([]byte(nested)), len(nested))),
+		"GET " + alertsPath:                           reply(200, alertPage(1, 1)),
+	})
+	isErr, msg, out := call("list_dependency_alerts", map[string]any{"project": "acme/shop"})
+	if isErr {
+		t.Fatal(msg)
+	}
+	a := alertsOf(t, out)[0]
+	if a["version_ambiguous"] != true || a["purl"] != nil || a["version"] != nil || fmt.Sprint(a["versions"]) != "[3.10.1 4.17.20]" {
+		t.Errorf("alert = %v", a)
+	}
+}
+
+func TestAlertsGoModReplace(t *testing.T) {
+	for name, tc := range map[string]struct {
+		gomod string
+		open  bool
+	}{
+		"no replace":                 {vulnGoMod, true},
+		"replace to a fixed fork":    {vulnGoMod + "replace github.com/acme/lib => github.com/fork/lib v1.9.0\n", false},
+		"replace to a local path":    {vulnGoMod + "replace github.com/acme/lib => ../lib\n", false},
+		"replace of another version": {vulnGoMod + "replace github.com/acme/lib v0.1.0 => github.com/fork/lib v1.9.0\n", true},
+	} {
+		srv := mocktest.Start(t)
+		srv.Seed("acme", "shop", map[string]any{"go.mod": tc.gomod}, nil)
+		srv.Post("/_mock/advisories", map[string]any{
+			"ghsa_id": "GHSA-c2f3-g4h5-j6m7", "package": "github.com/acme/lib", "vulnerable_version_range": ">= 1.0.0, < 1.2.4",
+		})
+		if got := openAlerts(t, srv); got != tc.open {
+			t.Errorf("%s: open = %v, want %v", name, got, tc.open)
+		}
+	}
+}
+
+// openAlerts reports whether the mock lists an open alert for acme/shop.
+func openAlerts(t *testing.T, srv *mocktest.Server) bool {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/repos/acme/shop/dependabot/alerts?state=open", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	var list []any
+	if err := json.NewDecoder(res.Body).Decode(&list); err != nil {
+		t.Fatal(err)
+	}
+	return len(list) == 1
 }

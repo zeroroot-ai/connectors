@@ -2,9 +2,10 @@ package fixloop
 
 import (
 	"fmt"
-	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/package-url/packageurl-go"
 
 	"github.com/zeroroot-ai/connectors/internal/kit"
 )
@@ -54,20 +55,28 @@ type AlertsInput struct {
 // "host". When the tool cannot find it, Version is empty and VersionSource is
 // empty.
 type Alert struct {
-	ID              string   `json:"id"`
-	State           string   `json:"state"`
-	Package         string   `json:"package"`
-	Ecosystem       string   `json:"ecosystem"`
-	PurlType        string   `json:"purl_type,omitempty"`
-	Purl            string   `json:"purl,omitempty"`
-	Version         string   `json:"version,omitempty"`
-	VersionSource   string   `json:"version_source,omitempty"`
-	VulnerableRange string   `json:"vulnerable_version_range,omitempty"`
-	FirstPatched    string   `json:"first_patched_version,omitempty"`
-	AdvisoryIDs     []string `json:"advisory_ids"`
-	Severity        string   `json:"severity,omitempty"`
-	ManifestPath    string   `json:"manifest_path,omitempty"`
-	URL             string   `json:"url,omitempty"`
+	ID            string `json:"id"`
+	State         string `json:"state"`
+	Package       string `json:"package"`
+	Ecosystem     string `json:"ecosystem"`
+	PurlType      string `json:"purl_type,omitempty"`
+	Purl          string `json:"purl,omitempty"`
+	Version       string `json:"version,omitempty"`
+	VersionSource string `json:"version_source,omitempty"`
+	// Versions lists each version that the manifest installs when VersionAmbiguous
+	// is true. Version and Purl are then empty.
+	Versions         []string `json:"versions,omitempty"`
+	VersionAmbiguous bool     `json:"version_ambiguous,omitempty"`
+	VulnerableRange  string   `json:"vulnerable_version_range,omitempty"`
+	FirstPatched     string   `json:"first_patched_version,omitempty"`
+	AdvisoryIDs      []string `json:"advisory_ids"`
+	// Verifiable is false when the alert has no advisory id. A caller cannot
+	// match such an alert to a finding by advisory, so it must not treat the
+	// alert as proof of a fix.
+	Verifiable   bool   `json:"verifiable"`
+	Severity     string `json:"severity,omitempty"`
+	ManifestPath string `json:"manifest_path,omitempty"`
+	URL          string `json:"url,omitempty"`
 }
 
 // AlertsResult is the result of list_dependency_alerts. Truncated is true when
@@ -139,34 +148,61 @@ func AdvisoryIDs(texts ...string) []string {
 // purlTypes maps the ecosystem names of GitHub and the package managers of
 // GitLab to the type of a package URL.
 var purlTypes = map[string]string{
-	"go": "golang", "npm": "npm", "yarn": "npm", "pnpm": "npm", "pip": "pypi", "pipenv": "pypi", "setuptools": "pypi",
-	"maven": "maven", "gradle": "maven", "sbt": "maven", "rubygems": "gem", "bundler": "gem", "rust": "cargo",
-	"composer": "composer", "nuget": "nuget", "pub": "pub", "swift": "swift", "erlang": "hex", "actions": "githubactions",
-	"conan": "conan",
+	"go": "golang", "npm": "npm", "yarn": "npm", "pnpm": "npm",
+	"pip": "pypi", "pipenv": "pypi", "setuptools": "pypi", "poetry": "pypi", "uv": "pypi",
+	"maven": "maven", "gradle": "maven", "sbt": "maven", "rubygems": "gem", "bundler": "gem",
+	"rust": "cargo", "cargo": "cargo", "composer": "composer", "nuget": "nuget", "pub": "pub", "swift": "swift",
+	"erlang": "hex", "actions": "githubactions", "conan": "conan", "conda": "conda",
 }
 
 // PurlType returns the package URL type of an ecosystem, or "" when it is not
 // known.
 func PurlType(ecosystem string) string { return purlTypes[strings.ToLower(ecosystem)] }
 
-// Purl builds the package URL of a package at a version, in the form of the
-// trivy parser: pkg:npm/lodash@4.17.20 and pkg:golang/github.com/x/y@v1.2.3.
-// It returns "" when the ecosystem, the name or the version is empty or not
-// known.
+// Purl builds the package URL of a package at a version with
+// github.com/package-url/packageurl-go, so the escaping follows the package URL
+// rules (a + is %2B, a scope @ is %40). It folds the name as the trivy parsers
+// do: a Go module path and a Python name are lower case, and a Python _ is -.
+// It returns "" when the ecosystem is not known, or the name or the version is
+// empty.
 func Purl(ecosystem, name, version string) string {
 	typ := PurlType(ecosystem)
 	if typ == "" || name == "" || version == "" {
 		return ""
 	}
-	if typ == "maven" {
-		name = strings.Replace(name, ":", "/", 1)
-	}
-	if typ == "pypi" {
+	var namespace string
+	switch typ {
+	case packageurl.TypeGolang:
+		name = strings.ToLower(name)
+	case packageurl.TypePyPi:
 		name = strings.ToLower(strings.ReplaceAll(name, "_", "-"))
+	case packageurl.TypeMaven:
+		if g, a, ok := strings.Cut(name, ":"); ok {
+			namespace, name = g, a
+		}
 	}
-	segs := strings.Split(name, "/")
-	for i, s := range segs {
-		segs[i] = strings.ReplaceAll(url.PathEscape(s), "@", "%40")
+	if namespace == "" && typ != packageurl.TypeMaven {
+		if i := strings.LastIndex(name, "/"); i > 0 {
+			namespace, name = name[:i], name[i+1:]
+		}
 	}
-	return "pkg:" + typ + "/" + strings.Join(segs, "/") + "@" + url.PathEscape(version)
+	return packageurl.NewPackageURL(typ, namespace, name, version, nil, "").ToString()
+}
+
+// ecosystemsByFile maps the name of a manifest or a lock file to an ecosystem.
+// The GitLab tool uses it when the dependency list has no entry for a
+// vulnerability.
+var ecosystemsByFile = map[string]string{
+	"go.mod": "go", "go.sum": "go", "package-lock.json": "npm", "yarn.lock": "yarn", "pnpm-lock.yaml": "pnpm",
+	"npm-shrinkwrap.json": "npm", "requirements.txt": "pip", "Pipfile.lock": "pipenv", "poetry.lock": "poetry",
+	"uv.lock": "uv", "Gemfile.lock": "bundler", "pom.xml": "maven", "composer.lock": "composer", "Cargo.lock": "cargo",
+	"packages.lock.json": "nuget", "conan.lock": "conan", "build.gradle": "gradle", "build.sbt": "sbt",
+}
+
+// EcosystemOfFile returns the ecosystem of a manifest path, or "".
+func EcosystemOfFile(p string) string {
+	if i := strings.LastIndex(p, "/"); i >= 0 {
+		p = p[i+1:]
+	}
+	return ecosystemsByFile[p]
 }

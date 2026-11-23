@@ -142,18 +142,23 @@ No call to a live GitLab. The tests run against an `httptest` mock that follows 
 
 ## list_dependency_alerts
 
-The tool lists the vulnerable dependencies of a project. The result has the same shape as the result of `github-fixloop`. The types are in `internal/fixloop`.
+The tool lists the dependency scanning vulnerabilities of a project. The result has the same shape as the result of `github-fixloop`. The types are in `internal/fixloop`.
 
-Endpoint: `GET /projects/:id/dependencies`. Reference: https://docs.gitlab.com/api/dependencies/ . The older `GET /projects/:id/vulnerability_findings` (https://docs.gitlab.com/api/vulnerability_findings/) is deprecated, so the tool does not use it.
+The vulnerabilities come from the GraphQL field `Project.vulnerabilities` (`POST /api/graphql`) with `reportType: [DEPENDENCY_SCANNING]`. Reference: https://docs.gitlab.com/api/graphql/reference/ (the field `Project.vulnerabilities`, the objects `Vulnerability`, `VulnerabilityIdentifier`, `VulnerabilityLocationDependencyScanning` and `VulnerableDependency`, and the enum `VulnerabilityState`). The state `DETECTED` and `CONFIRMED` map to `open`, `RESOLVED` to `fixed` and `DISMISSED` to `dismissed`. The advisory ids (GHSA and CVE) come from the identifiers of the vulnerability. The vulnerability has no package manager, so the tool also reads the dependency list, `GET /projects/:id/dependencies` (https://docs.gitlab.com/api/dependencies/), and takes the package manager from it. A resolved vulnerability is no longer in the dependency list, so the tool takes its ecosystem from the name of its file. The deprecated `GET /projects/:id/vulnerability_findings` (https://docs.gitlab.com/api/vulnerability_findings/) is not used.
 
 Token permission: the `read_api` scope. The user of the token needs the permission to read the repository and the Project Security Dashboard. The API needs GitLab Ultimate.
 
-Input: `project` (the path of the project), `state` and `ref`. The list is the dependency list of the default branch. The tool refuses a `ref` that is not the default branch.
+Input: `project` (the path of the project), `state` (`open` by default, `fixed`, `dismissed` or `all`) and `ref`. GitLab reports the default branch. The tool refuses a `ref` that is not the default branch.
 
-Limits of GitLab. The dependency list holds the vulnerabilities that exist now. So each alert has the state `open`, and a fixed vulnerability is no longer in the list. The tool accepts the state `open` and `all`, and it refuses `fixed` and `dismissed`. A caller reads a fix as an alert that is gone. GitLab gives no vulnerable range and no patched version, so `vulnerable_version_range` and `first_patched_version` are empty. The tool takes `advisory_ids` (GHSA and CVE) from the name and the URL of the vulnerability. They are empty when the vulnerability names none.
+Errors, never a clean list:
+- A token that cannot read the Security Dashboard gets dependencies with no `vulnerabilities` key. The tool then returns an error.
+- An empty dependency list means that no dependency scan ran. The tool returns an error, because it cannot tell it from a clean project.
+- A GraphQL error, a null project and a null `vulnerabilities` field are errors.
 
-`id` is `gitlab:<id of the vulnerability>`. `version` is the version of the dependency list, and `version_source` is `host`. `ecosystem` is the package manager of GitLab. `purl` is built as in `github-fixloop`.
+Limits of GitLab. GitLab gives no vulnerable range and no patched version, so `vulnerable_version_range` and `first_patched_version` are empty. An alert with no advisory id has `verifiable` false. A caller cannot match it to a finding by advisory. `id` is `gitlab:<number of the vulnerability>`. `version` is the version of the vulnerability location, and `version_source` is `host`. `ecosystem` is the package manager of GitLab. `purl` is built as in `github-fixloop`.
 
-Pages: the tool reads 100 dependencies a page, at most 10 pages. When GitLab has more, `truncated` is true.
+Pages: the tool reads 100 vulnerabilities a page by cursor, at most 10 pages. When GitLab has more, `truncated` is true.
+
+How to verify a fix: call the tool with `state` `all`. Treat an alert as fixed only when its `state` is `fixed`. A missing alert and a truncated list prove nothing.
 
 Test: the tests use the table mock of this package. `mock-forge` has no GitLab side.

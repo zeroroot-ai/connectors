@@ -58,6 +58,9 @@ type Settings struct {
 	RequiredChecks *[]string   `json:"required_checks"`
 	Checks         *[]Check    `json:"checks"`
 	AutoDeploy     *AutoDeploy `json:"auto_deploy"`
+	// AlertsOff makes the Dependabot alerts endpoint answer 403, as GitHub does
+	// when the alerts are disabled or the token cannot read them.
+	AlertsOff *bool `json:"dependabot_alerts_disabled"`
 }
 
 func (r *repo) apply(s Settings) {
@@ -75,6 +78,9 @@ func (r *repo) apply(s Settings) {
 	}
 	if s.Checks != nil {
 		r.defaultChecks = *s.Checks
+	}
+	if s.AlertsOff != nil {
+		r.alertsOff = *s.AlertsOff
 	}
 	if s.AutoDeploy != nil {
 		r.autoDeploy = s.AutoDeploy
@@ -180,7 +186,7 @@ func (m *Mock) controlRepo(w http.ResponseWriter, req *http.Request, r *repo, re
 	case len(rest) == 1 && rest[0] == "checks" && req.Method == http.MethodPost:
 		m.setChecks(w, req, r)
 	case len(rest) == 3 && rest[0] == "alerts" && rest[2] == "dismiss" && req.Method == http.MethodPost:
-		m.dismissAlert(w, r, rest[1])
+		m.dismissAlert(w, req, r, rest[1])
 	case len(rest) == 1 && rest[0] == "merge-failure":
 		setMergeFailure(w, req, r)
 	case len(rest) == 1 && rest[0] == "deployments" && req.Method == http.MethodPost:

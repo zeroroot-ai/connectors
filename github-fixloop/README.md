@@ -176,14 +176,17 @@ Result: `project`, `ref`, `state`, `alerts` and `truncated`. Each alert has thes
 | `package`, `ecosystem` | `dependency.package.name` and `.ecosystem` (`go`, `npm`, `pip`, `maven`, `rubygems` and so on). |
 | `purl_type` | The ecosystem as the type of a package URL: `golang`, `npm`, `pypi`, `maven`, `gem`, `cargo`, `composer`, `nuget`, `pub`, `swift`, `hex`, `githubactions`. |
 | `version`, `version_source` | The installed version at the default branch. GitHub gives none, so the tool reads it from the manifest of the alert. `version_source` is `manifest`. See the next section. |
+| `versions`, `version_ambiguous` | Set when the manifest installs the package at more than one version. `versions` lists them. `version`, `version_source` and `purl` are then empty, so a caller does not match the alert to the wrong package. |
 | `purl` | The package URL with the version, for example `pkg:npm/lodash@4.17.20` or `pkg:golang/github.com/acme/lib@v1.2.0`. The trivy parser of the executor uses the package URL as the identity of a package, so the same package has the same `purl`. Empty when the version is not known. |
 | `vulnerable_version_range`, `first_patched_version` | `security_vulnerability.vulnerable_version_range` and `.first_patched_version.identifier`. |
-| `advisory_ids` | The GHSA id and then the CVE id, from `security_advisory`. |
+| `advisory_ids`, `verifiable` | The GHSA id and then the CVE id, from `security_advisory`. `verifiable` is false when the list is empty. |
 | `severity` | `low`, `medium`, `high` or `critical`. |
 | `manifest_path`, `url` | `dependency.manifest_path` and `html_url`. |
 
-The installed version comes from the manifest at the default branch (`GET /repos/{o}/{r}/contents/{manifest_path}?ref=<default branch>`). The tool knows `go.mod` (the `require` line), `package-lock.json` (`node_modules/<name>` or `dependencies`) and `requirements.txt` (`name==version`). For another manifest, `version`, `version_source` and `purl` are empty. The tool reads at most 20 manifests in one call.
+The installed version comes from the manifest at the default branch (`GET /repos/{o}/{r}/contents/{manifest_path}?ref=<default branch>`). The tool knows `go.mod`, `package-lock.json` and `requirements.txt`. For `go.mod` it reads the `require` lines and applies the `replace` directives as trivy does: a replace to a module gives the name and the version of the new module, and a replace to a local path gives no version. For `package-lock.json` it reads each `node_modules/<name>` entry, nested copies too (lockfile 2 and 3), and each `dependencies` entry, nested ones too (lockfile 1). For `requirements.txt` it reads `name==version` and `name===version`. A range or a wildcard such as `1.2.*` is not a version. For another manifest, `version`, `version_source` and `purl` are empty. The tool reads at most 20 manifests in one call.
 
-Pages: the tool reads 100 alerts a page by cursor (the `after` value of the `Link` header), at most 10 pages. When GitHub has more alerts, `truncated` is true. A missing alert is then not a fixed alert.
+Pages: the tool reads 100 alerts a page by cursor (the `after` value of the `Link` header), at most 10 pages. When GitHub has more alerts, `truncated` is true. A next page link without an `after` cursor is an error, not the end of the list. A GitHub error such as 403 (alerts disabled, or a token without the permission) is an error, never an empty list.
+
+How to verify a fix: call the tool with `state` `all`. Treat an alert as fixed only when its `state` is `fixed`. An alert that is missing, a `dismissed` alert (this includes `auto_dismissed`) and a `truncated` list prove nothing. The package URL is built with `github.com/package-url/packageurl-go`. The tool folds the name as trivy does: a Go module path and a Python name are lower case.
 
 Test mock: `mock-forge` serves the endpoint from the content of the repository. See the README of `mock-forge`.
