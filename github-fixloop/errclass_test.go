@@ -128,9 +128,7 @@ func TestErrorClassBranchStays(t *testing.T) {
 			if cl.Class != c.want {
 				t.Errorf("%s (resume %v): class = %+v, want %s, text %s", name, resume, cl, c.want, text)
 			}
-			if !strings.Contains(text, "the branch "+srcBranch+" stays, call the tool again") {
-				t.Errorf("%s (resume %v): the text changed: %s", name, resume, text)
-			}
+			checkStaysText(t, name, text, c.want == kit.ClassRefused)
 		}
 	}
 }
@@ -286,9 +284,10 @@ func TestOpenConflictWithNoPullRequestToFindIsRefused(t *testing.T) {
 		routes["GET "+repo+"/pulls"] = reply(200, list)
 		routes["POST "+repo+"/pulls"] = reply(422, `{"message":"Validation Failed"}`)
 		cl, text := classCall(t, routes, "open_merge_request", openArgs())
-		if cl.Class != kit.ClassRefused || !strings.Contains(text, "stays, call the tool again") {
+		if cl.Class != kit.ClassRefused {
 			t.Errorf("%s: %+v %s", name, cl, text)
 		}
+		checkStaysText(t, name, text, true)
 	}
 }
 
@@ -361,4 +360,48 @@ func TestFindPRErrorText(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
+}
+
+// checkStaysText checks the text of a failure to open the request after the branch
+// was made. The branch stays in each case. A refusal (HTTP 4xx other than 429) does
+// not tell the caller to call the tool again, because it fails the same way.
+func checkStaysText(t *testing.T, name, text string, refusal bool) {
+	t.Helper()
+	if !strings.Contains(text, "the branch "+srcBranch+" stays") {
+		t.Errorf("%s: the text does not say that the branch stays: %s", name, text)
+	}
+	if again := strings.Contains(text, "call the tool again"); again == refusal {
+		t.Errorf("%s: call the tool again = %v for a refusal = %v: %s", name, again, refusal, text)
+	}
+}
+
+// The head of the request that the tool opened is not the commit that it made. The
+// text names the open request and says that the branch stays. It does not say that
+// nothing was merged, because a request is open now.
+func TestOpenHeadMismatchNamesTheOpenRequest(t *testing.T) {
+	moved := "9999999999999999999999999999999999999999"
+	// The create answers a request with another head.
+	routes := openRoutes()
+	routes["POST "+repo+"/pulls"] = reply(201, ownPR(moved))
+	cl, text := classCall(t, routes, "open_merge_request", openArgs())
+	checkHeadText(t, "create", cl, text)
+	// The request exists already, on the resume path.
+	routes = branchExists(openRoutes())
+	routes[compareKey] = reply(200, ownCompare())
+	routes["GET "+repo+"/pulls"] = reply(200, `[`+ownPR(moved)+`]`)
+	cl, text = classCall(t, routes, "open_merge_request", openArgs())
+	checkHeadText(t, "resume", cl, text)
+}
+
+func checkHeadText(t *testing.T, name string, cl kit.ErrorClass, text string) {
+	t.Helper()
+	for _, want := range []string{"#7", "https://github.com/acme/shop/pull/7", "is open", "the branch " + srcBranch + " stays"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("%s: the text has no %q: %s", name, want, text)
+		}
+	}
+	if strings.Contains(text, "Nothing was merged") {
+		t.Errorf("%s: the text says that nothing was merged, but a request is open: %s", name, text)
+	}
+	_ = cl
 }

@@ -2,6 +2,7 @@ package fixloop
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -66,6 +67,25 @@ func TestBlobSHA(t *testing.T) {
 	} {
 		if got := BlobSHA(content); got != want {
 			t.Errorf("BlobSHA(%q) = %s, want %s", content, got, want)
+		}
+	}
+}
+
+func TestBranchStays(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{&kit.APIError{Status: 502}, "the branch b stays, call the tool again"},
+		{&kit.APIError{Status: 429}, "the branch b stays, call the tool again"},
+		{errors.New("plain"), "the branch b stays, call the tool again"},
+		{&kit.APIError{Status: 403, RateLimited: true}, "the branch b stays, call the tool again"},
+		{&kit.APIError{Status: 403}, "the branch b stays"},
+		{&kit.APIError{Status: 401}, "the branch b stays"},
+		{fmt.Errorf("wrapped: %w", &kit.APIError{Status: 422}), "the branch b stays"},
+	} {
+		if got := BranchStays("b", c.err); got != c.want {
+			t.Errorf("BranchStays(%v) = %q, want %q", c.err, got, c.want)
 		}
 	}
 }

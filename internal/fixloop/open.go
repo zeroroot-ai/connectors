@@ -3,7 +3,9 @@ package fixloop
 import (
 	"crypto/sha1" //nolint:gosec // git names a blob with SHA-1, this is no security use
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 
@@ -198,4 +200,18 @@ func BlobSHA(content string) string {
 	_, _ = fmt.Fprintf(h, "blob %d\x00", len(content))
 	_, _ = h.Write([]byte(content))
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// BranchStays returns the text of a failure to open a request after the branch
+// was made: "the branch X stays", and ", call the tool again" when a call again
+// can finish the work. An HTTP 4xx answer other than 429 is a refusal, unless the
+// vendor sent a rate limit as that answer (GitHub sends it as a 403, and the client
+// sets RateLimited from the headers). A call
+// again fails the same way, so the text does not tell the caller to repeat.
+func BranchStays(branch string, err error) string {
+	var ae *kit.APIError
+	if errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 && ae.Status != http.StatusTooManyRequests && !ae.RateLimited {
+		return "the branch " + branch + " stays"
+	}
+	return "the branch " + branch + " stays, call the tool again"
 }
