@@ -77,6 +77,14 @@ The servers have no second authentication scheme, by design. The README of each 
 | `puppet` | patch | `start_patch_job`, `start_rollback_job`, `get_job` | gibson#1544 |
 | `microsoft-intune` | patch | `list_catalog_entries`, `start_patch_deployment`, `get_patch_deployment`, `rollback_patch_deployment`, `resume_patch_deployment`, `remove_patch_deployment` | gibson#1543, gibson#1510 |
 
+## Test images
+
+A test image is no connector. Gibson never pins it in a catalog manifest. The image has the label `ai.zeroroot.image-class=test`, and the release notes list it apart from the servers.
+
+| Directory | What it is | Issue |
+|---|---|---|
+| `mock-forge` | A stateful mock of the GitHub and Prometheus APIs for the exit test of the fix loop. | gibson#1469 |
+
 ## Git host contract
 
 The two servers of class `git-host` (`github-fixloop` and `gitlab-fixloop`) have the same tools, the same arguments and the same result fields. The types are in `internal/fixloop`. `merge_request` is a URL of the host, or `owner/repo#12` on GitHub and `group/project!12` on GitLab.

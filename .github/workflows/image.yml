@@ -70,6 +70,9 @@ jobs:
       contents: write
       packages: read
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Log in to the registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -77,6 +80,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Print the digest of each image
+        shell: bash
         env:
           SERVERS: ${{ needs.plan.outputs.servers }}
           REF_NAME: ${{ github.ref_name }}
@@ -84,16 +88,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # The reusable build always pushes the tag sha-<7 characters of the commit>.
-          tag="sha-${GITHUB_SHA::7}"
-          {
-            echo "| image | digest |"
-            echo "|---|---|"
-            for s in $(echo "$SERVERS" | jq -r '.[]'); do
-              ref="ghcr.io/zeroroot-ai/connectors-$s:$tag"
-              digest="$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest.Digest}}' | tr -d '"')"
-              echo "| ghcr.io/zeroroot-ai/connectors-$s | $digest |"
-            done
-          } | tee table.md >> "$GITHUB_STEP_SUMMARY"
+          # scripts/digest-table.sh puts an image with the label
+          # ai.zeroroot.image-class=test in its own table. A failed inspect fails
+          # the step, because the shell runs with pipefail.
+          scripts/digest-table.sh "$SERVERS" "sha-${GITHUB_SHA::7}" | tee table.md >> "$GITHUB_STEP_SUMMARY"
           if [ "$REF_TYPE" = tag ]; then
             gh release view "$REF_NAME" --repo "$GITHUB_REPOSITORY" --json body -q .body > notes.md
             { cat notes.md; echo; echo "## Image digests"; echo; cat table.md; } > notes-new.md
