@@ -77,7 +77,7 @@ func TestLostAnswerClass(t *testing.T) {
 }
 
 func TestLostAnswerByTimeoutOfTheClient(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
 	t.Cleanup(ts.Close)
 	u, _ := url.Parse(ts.URL)
 	c := NewClient(u, ClientOptions{Timeout: 50 * time.Millisecond, MaxRetries: -1})
@@ -134,7 +134,7 @@ func TestGitHubRateLimitIs403WithHeaders(t *testing.T) {
 	}
 	// The text of the answer says nothing.
 	h := func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(403)
+		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
 	}
 	if got := classOf(t, client(t, h), http.MethodGet, false); got.Class != ClassRefused {
@@ -171,8 +171,7 @@ func TestPanicIsRefused(t *testing.T) {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	ClassifyErrors(srv, log)
 	AddTool(srv, log, &mcp.Tool{Name: "boom"}, func(context.Context, *mcp.CallToolRequest, in) (*mcp.CallToolResult, out, error) {
-		var m map[string]int
-		m["x"] = 1 // panics
+		boom() // the value of the panic must not reach the text of the result
 		return nil, out{}, nil
 	})
 	ct, st := mcp.NewInMemoryTransports()
@@ -194,7 +193,7 @@ func TestPanicIsRefused(t *testing.T) {
 	if ec, _ := sc["error"].(map[string]any); ec["class"] != ClassRefused {
 		t.Errorf("structured content = %v", res.StructuredContent)
 	}
-	if text := res.Content[0].(*mcp.TextContent).Text; strings.Contains(text, "hunter2") || strings.Contains(text, "nil map") {
+	if text := res.Content[0].(*mcp.TextContent).Text; strings.Contains(text, "hunter2") || strings.Contains(text, "boom") {
 		t.Errorf("the text shows the panic: %s", text)
 	}
 	if l := logged.String(); !strings.Contains(l, "tool panic") || !strings.Contains(l, "tool=boom") || strings.Contains(l, "hunter2") {
@@ -237,3 +236,5 @@ func TestTokenFailureIsNotAnUnknownOutcome(t *testing.T) {
 		}
 	}
 }
+
+func boom() { panic("boom with hunter2-token") }
