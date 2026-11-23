@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.0](https://github.com/zeroroot-ai/connectors/compare/v0.6.0...v0.7.0) (2026-11-23)
+
+
+### Features
+
+* **fixloop:** add list_tree to github-fixloop and gitlab-fixloop ([#31](https://github.com/zeroroot-ai/connectors/issues/31)) ([0fbdf11](https://github.com/zeroroot-ai/connectors/commit/0fbdf11b082f8b12519c370ba30b9d21abd59655))
+
+
+### Bug Fixes
+
+* **github-fixloop:** keep the executable bit when open_merge_request edits a file ([#32](https://github.com/zeroroot-ai/connectors/issues/32)) ([76863d6](https://github.com/zeroroot-ai/connectors/commit/76863d6bb9b94307a5c3d8c996fa012074fec8cb))
+* **gitlab-fixloop:** bind the list_tree cursor to the project, the ref and the path ([#34](https://github.com/zeroroot-ai/connectors/issues/34)) ([7853faa](https://github.com/zeroroot-ai/connectors/commit/7853faa5b975a7ed02ec59f8c18020c6e1d3994d))
+
 ## [0.6.0](https://github.com/zeroroot-ai/connectors/compare/v0.5.0...v0.6.0) (2026-11-23)
 
 
