@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/zeroroot-ai/connectors/compare/v0.5.0...v0.6.0) (2026-11-23)
+
+
+### Features
+
+* **fixloop:** add list_dependency_alerts to github-fixloop and gitlab-fixloop ([#29](https://github.com/zeroroot-ai/connectors/issues/29)) ([0a169fe](https://github.com/zeroroot-ai/connectors/commit/0a169fe119fd0c7ea37f2e13bd1501dd973fc8a2))
+
 ## [0.5.0](https://github.com/zeroroot-ai/connectors/compare/v0.4.0...v0.5.0) (2026-11-23)
 
 
