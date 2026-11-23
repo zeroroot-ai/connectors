@@ -44,6 +44,23 @@ The servers have no second authentication scheme, by design. The README of each 
 - The vendor client sends a request to the fixed base URL only. It builds each path from escaped segments, never follows a redirect, limits the time and the size of a call, and retries only a request that is safe to repeat.
 - A log line holds the name of a tool, its outcome and its duration. It never holds an input, an output or a credential.
 
+## Error class
+
+Each tool error reaches the caller as an MCP result with `isError: true` and the text of the error. The kit also puts the class of the error in `structuredContent`, so a caller never reads the text to tell a refusal from a failure that a later call can pass:
+
+```json
+{"error": {"class": "unavailable", "retry_after_seconds": 0}}
+```
+
+| Class | Meaning | Source |
+|---|---|---|
+| `unavailable` | A later call can pass. | A transport failure, HTTP 502 or 503, and an error that a tool marks with `kit.Retryable`, for example the `open_merge_request` failure after which the branch stays. |
+| `timeout` | A bound ended. | A deadline, a client timeout, HTTP 504. |
+| `rate_limited` | The vendor refused for its rate limit. | HTTP 429. `retry_after_seconds` is the time that the vendor asked for, or 0 when it named none. |
+| `refused` | The same call fails again. | Every other error, an invalid input included. |
+
+`kit.ClassifyErrors` installs this on each server (`kit.NewHandler` and `kittest.Connect` do it). A tool that wants its own error to be retryable wraps it with `kit.Retryable`. The text of the error stays as the tool wrote it.
+
 ## Rules
 
 - A server holds no credential in its image. It reads each credential from its environment.

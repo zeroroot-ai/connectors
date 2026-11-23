@@ -149,7 +149,7 @@ func (v *service) createMR(ctx context.Context, project string, in fixloop.OpenI
 		},
 	}, &created)
 	if err != nil {
-		return nil, fmt.Errorf("open the merge request (the branch %s stays, call the tool again): %w", in.SourceBranch, err)
+		return nil, kit.Retryable(fmt.Errorf("open the merge request (the branch %s stays, call the tool again): %w", in.SourceBranch, err))
 	}
 	return &created, nil
 }

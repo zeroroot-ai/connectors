@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/zeroroot-ai/connectors/internal/kit"
 )
 
 // Connect registers the tools on a new server, connects an in-memory MCP
@@ -16,6 +18,7 @@ func Connect(t *testing.T, register func(*mcp.Server)) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	srv := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
+	kit.ClassifyErrors(srv)
 	register(srv)
 	ct, st := mcp.NewInMemoryTransports()
 	ss, err := srv.Connect(ctx, st, nil)
@@ -124,4 +127,22 @@ func AssertIdempotent(t *testing.T, tools map[string]*mcp.Tool, name string, wan
 	if tl := tools[name]; tl == nil || tl.Annotations == nil || tl.Annotations.IdempotentHint != want {
 		t.Errorf("%s: idempotentHint is not %v", name, want)
 	}
+}
+
+// ErrorClass decodes the structured content of an error result:
+// {"error":{"class":...,"retry_after_seconds":N}}. It fails the test when the
+// result is not an error or has no class.
+func ErrorClass(t *testing.T, res *mcp.CallToolResult) kit.ErrorClass {
+	t.Helper()
+	if !res.IsError {
+		t.Fatal("the result is not an error")
+	}
+	var out struct {
+		Error *kit.ErrorClass `json:"error"`
+	}
+	Structured(t, res, &out)
+	if out.Error == nil || out.Error.Class == "" {
+		t.Fatalf("the error result has no class: %v", res.StructuredContent)
+	}
+	return *out.Error
 }

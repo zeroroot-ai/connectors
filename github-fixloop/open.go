@@ -159,7 +159,7 @@ func (v *service) openMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 		JSON: map[string]any{"title": in.Title, "head": in.SourceBranch, "base": in.TargetBranch, "body": in.Body},
 	}, &created)
 	if err != nil {
-		return nil, out, fmt.Errorf("open the pull request (the branch %s stays, call the tool again): %w", in.SourceBranch, err)
+		return nil, out, kit.Retryable(fmt.Errorf("open the pull request (the branch %s stays, call the tool again): %w", in.SourceBranch, err))
 	}
 	if err := sameHead(&created, commit.SHA); err != nil {
 		return nil, out, err
@@ -317,6 +317,10 @@ func kindOf(it *ghTreeItem) string {
 // needs a blob (100644, 100755 or 120000), never a folder or a submodule.
 func checkChange(c fixloop.FileChange, it *ghTreeItem) error {
 	if it == nil {
+		if c.Delete {
+			return fmt.Errorf("%w: %s does not exist in the base branch, so there is nothing to delete. Remove it from the files, or check the path",
+				kit.ErrInvalidInput, c.Path)
+		}
 		return nil
 	}
 	plain := it.Type == "blob" && (it.Mode == fileMode || it.Mode == execMode)
@@ -394,7 +398,7 @@ func (v *service) resume(ctx context.Context, r prRef, in fixloop.OpenInput, out
 		JSON: map[string]any{"title": in.Title, "head": in.SourceBranch, "base": in.TargetBranch, "body": in.Body},
 	}, &created)
 	if err != nil {
-		return nil, out, fmt.Errorf("open the pull request (the branch %s stays, call the tool again): %w", in.SourceBranch, err)
+		return nil, out, kit.Retryable(fmt.Errorf("open the pull request (the branch %s stays, call the tool again): %w", in.SourceBranch, err))
 	}
 	if err := sameHead(&created, commit); err != nil {
 		return nil, out, err

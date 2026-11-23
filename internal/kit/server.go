@@ -34,6 +34,7 @@ type Build func(env *Env, log *slog.Logger) (register func(*mcp.Server), err err
 // loses no session.
 func NewHandler(name, version string, register func(*mcp.Server), log *slog.Logger) http.Handler {
 	srv := mcp.NewServer(&mcp.Implementation{Name: name, Version: version}, nil)
+	ClassifyErrors(srv)
 	register(srv)
 	mux := http.NewServeMux()
 	mux.Handle(MCPPath, mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
