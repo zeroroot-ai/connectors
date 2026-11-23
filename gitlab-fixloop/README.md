@@ -25,6 +25,7 @@ The argument `merge_request` is the URL of the merge request on the server of `G
 | `revert_merge_request` | list and create merge requests, create a branch, `POST /repository/commits/:sha/revert`, then the merge call above | `revert_merge_request` on the revert merge request | `destructiveHint: false`, `idempotentHint: true` |
 | `open_merge_request` | `GET /projects/:id/merge_requests`, `HEAD /projects/:id/repository/files/:path` for each file, `POST /projects/:id/repository/commits` with `start_branch`, then `POST /projects/:id/merge_requests` | `close_merge_request` | `destructiveHint: false`, `idempotentHint: true` |
 | `close_merge_request` | `GET /projects/:id/merge_requests/:iid`, then `PUT` it with `state_event: close` | A person reopens it. No tool reopens it. | `destructiveHint: false`, `idempotentHint: true` |
+| `list_dependency_alerts` | `GET /projects/:id`, `GET /projects/:id/dependencies` | Not a change. | `readOnlyHint: true` |
 | `read_file` | `GET /projects/:id/repository/files/:path?ref=` | Not a change. | `readOnlyHint: true` |
 | `deployment_state` | `GET` the merge request, `GET /projects/:id/deployments`, `GET /repository/merge_base` | Not needed. It reads. | `readOnlyHint: true` |
 
@@ -138,3 +139,21 @@ No call to a live GitLab. The tests run against an `httptest` mock that follows 
 - That the deployments API of a given GitLab version has `finished_at`. The tool uses `updated_at` when it is missing.
 - That the compare API marks a cut diff with `too_large` or `collapsed` on every version. A cut diff that GitLab does not mark can make the check of an existing revert branch give a wrong answer.
 - The name `external_status_checks`. The API reference names only `status_checks_must_pass`.
+
+## list_dependency_alerts
+
+The tool lists the vulnerable dependencies of a project. The result has the same shape as the result of `github-fixloop`. The types are in `internal/fixloop`.
+
+Endpoint: `GET /projects/:id/dependencies`. Reference: https://docs.gitlab.com/api/dependencies/ . The older `GET /projects/:id/vulnerability_findings` (https://docs.gitlab.com/api/vulnerability_findings/) is deprecated, so the tool does not use it.
+
+Token permission: the `read_api` scope. The user of the token needs the permission to read the repository and the Project Security Dashboard. The API needs GitLab Ultimate.
+
+Input: `project` (the path of the project), `state` and `ref`. The list is the dependency list of the default branch. The tool refuses a `ref` that is not the default branch.
+
+Limits of GitLab. The dependency list holds the vulnerabilities that exist now. So each alert has the state `open`, and a fixed vulnerability is no longer in the list. The tool accepts the state `open` and `all`, and it refuses `fixed` and `dismissed`. A caller reads a fix as an alert that is gone. GitLab gives no vulnerable range and no patched version, so `vulnerable_version_range` and `first_patched_version` are empty. The tool takes `advisory_ids` (GHSA and CVE) from the name and the URL of the vulnerability. They are empty when the vulnerability names none.
+
+`id` is `gitlab:<id of the vulnerability>`. `version` is the version of the dependency list, and `version_source` is `host`. `ecosystem` is the package manager of GitLab. `purl` is built as in `github-fixloop`.
+
+Pages: the tool reads 100 dependencies a page, at most 10 pages. When GitLab has more, `truncated` is true.
+
+Test: the tests use the table mock of this package. `mock-forge` has no GitLab side.

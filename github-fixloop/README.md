@@ -27,6 +27,7 @@ The argument `merge_request` is the URL of the pull request on the host of the s
 | `revert_merge_request` | git data API and pull request calls, then the merge call above | `revert_merge_request` on the revert pull request | `destructiveHint: false`, `idempotentHint: true` |
 | `open_merge_request` | `GET` the source and target references and the target commit, `POST /repos/{o}/{r}/git/blobs`, `/git/trees`, `/git/commits`, `/git/refs`, then `POST /repos/{o}/{r}/pulls` | `close_merge_request` | `destructiveHint: false`, `idempotentHint: true` |
 | `close_merge_request` | `GET /repos/{o}/{r}/pulls/{n}`, then `PATCH /repos/{o}/{r}/pulls/{n}` with `state: closed` | A person reopens it. No tool reopens it. | `destructiveHint: false`, `idempotentHint: true` |
+| `list_dependency_alerts` | `GET /repos/{o}/{r}`, `GET /repos/{o}/{r}/dependabot/alerts`, and `GET /repos/{o}/{r}/contents/{manifest}?ref=` | Not a change. | `readOnlyHint: true` |
 | `read_file` | `GET /repos/{o}/{r}/contents/{path}?ref=` and, on a 404, `GET /repos/{o}/{r}` | Not a change. | `readOnlyHint: true` |
 | `deployment_state` | `GET` the pull request, `GET /deployments`, `GET /deployments/{id}/statuses`, `GET /compare/{base}...{head}` | Not needed. It reads. | `readOnlyHint: true` |
 
@@ -155,3 +156,34 @@ No call to a live GitHub. The tests run against an `httptest` mock that follows 
 - That a rebase merge on a real GitHub keeps the author date of each commit. Git keeps it on a rebase. If GitHub changed it, the second check still sees the rebase merge.
 - That `GET /commits/{parent}/pulls` lists the pull request of a rebase merge for its rebased commits. The API reference says so. No live call has confirmed it.
 - That `GET /branches/{base}` shows `protection.required_status_checks` to a token without admin access. When it shows no required check, the tool falls back to `mergeable_state`.
+
+## list_dependency_alerts
+
+The tool lists the Dependabot alerts of a repository. The gibson scan mission reads the alerts of the buyer with it. A rescan after a fix reads them again. A merged fix makes the alert `fixed`.
+
+Endpoint: `GET /repos/{owner}/{repo}/dependabot/alerts`. Reference: https://docs.github.com/en/rest/dependabot/alerts#list-dependabot-alerts-for-a-repository
+
+Token permission: the fine-grained permission "Dependabot alerts" with read access on the repository. A classic token needs the `security_events` scope (or `repo`). The tool also reads the repository and its manifest files, so the token needs the "Contents" read permission.
+
+Input: `project` (`owner/repo`), `state` (`open` by default, `fixed`, `dismissed` or `all`) and `ref` (optional). GitHub reports the alerts of the default branch only. The tool refuses a `ref` that is not the default branch.
+
+Result: `project`, `ref`, `state`, `alerts` and `truncated`. Each alert has these fields.
+
+| Field | Source |
+|---|---|
+| `id` | `dependabot:<number>`. The number is stable. |
+| `state` | `open`, `fixed` or `dismissed`. `auto_dismissed` maps to `dismissed`. |
+| `package`, `ecosystem` | `dependency.package.name` and `.ecosystem` (`go`, `npm`, `pip`, `maven`, `rubygems` and so on). |
+| `purl_type` | The ecosystem as the type of a package URL: `golang`, `npm`, `pypi`, `maven`, `gem`, `cargo`, `composer`, `nuget`, `pub`, `swift`, `hex`, `githubactions`. |
+| `version`, `version_source` | The installed version at the default branch. GitHub gives none, so the tool reads it from the manifest of the alert. `version_source` is `manifest`. See the next section. |
+| `purl` | The package URL with the version, for example `pkg:npm/lodash@4.17.20` or `pkg:golang/github.com/acme/lib@v1.2.0`. The trivy parser of the executor uses the package URL as the identity of a package, so the same package has the same `purl`. Empty when the version is not known. |
+| `vulnerable_version_range`, `first_patched_version` | `security_vulnerability.vulnerable_version_range` and `.first_patched_version.identifier`. |
+| `advisory_ids` | The GHSA id and then the CVE id, from `security_advisory`. |
+| `severity` | `low`, `medium`, `high` or `critical`. |
+| `manifest_path`, `url` | `dependency.manifest_path` and `html_url`. |
+
+The installed version comes from the manifest at the default branch (`GET /repos/{o}/{r}/contents/{manifest_path}?ref=<default branch>`). The tool knows `go.mod` (the `require` line), `package-lock.json` (`node_modules/<name>` or `dependencies`) and `requirements.txt` (`name==version`). For another manifest, `version`, `version_source` and `purl` are empty. The tool reads at most 20 manifests in one call.
+
+Pages: the tool reads 100 alerts a page by cursor (the `after` value of the `Link` header), at most 10 pages. When GitHub has more alerts, `truncated` is true. A missing alert is then not a fixed alert.
+
+Test mock: `mock-forge` serves the endpoint from the content of the repository. See the README of `mock-forge`.

@@ -281,6 +281,7 @@ func (c *call) mergePull(p *pull) {
 	p.State, p.Merged, p.MergeSHA = "closed", true, cm.SHA
 	p.MergedAt, p.ClosedAt, p.UpdatedAt = stamp(now), stamp(now), stamp(now)
 	r.afterLand(p.BaseRef, cm.SHA, stamp(now))
+	c.m.evalAlerts(r)
 	writeJSON(c.w, http.StatusOK, map[string]any{"sha": cm.SHA, "merged": true, "message": "Pull Request successfully merged"})
 }
 

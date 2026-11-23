@@ -37,6 +37,7 @@ The endpoints are exactly the calls of `github-fixloop`. The API version is 2022
 | `GET`, `POST /git/commits` | https://docs.github.com/en/rest/git/commits |
 | `POST /git/blobs`, `POST /git/trees`, `GET /git/trees/{sha}` | https://docs.github.com/en/rest/git/blobs and https://docs.github.com/en/rest/git/trees |
 | `GET /repos/{o}/{r}/deployments`, `GET /deployments/{id}/statuses` | https://docs.github.com/en/rest/deployments/deployments |
+| `GET /repos/{o}/{r}/dependabot/alerts` | https://docs.github.com/en/rest/dependabot/alerts#list-dependabot-alerts-for-a-repository |
 | `GET /repos/{o}/{r}/contents/{path}` | https://docs.github.com/en/rest/repos/contents#get-repository-content |
 
 Rules of the mock:
@@ -47,6 +48,17 @@ Rules of the mock:
 - A new commit gets the default check runs. The default is one check `ci` that passed. A test can change the default or the checks of one commit.
 - The compare answer lists `added`, `modified`, `removed` and `changed` (a mode change). It does not detect a rename. As GitHub does, it gives no file mode.
 - A tree has only blob entries. A path with a slash is one entry.
+
+## Dependabot alerts
+
+The mock derives the alerts from the content of the repository, so no test action closes an alert. A test seeds an advisory with `POST /_mock/advisories`:
+
+```json
+{"ghsa_id": "GHSA-c2f3-g4h5-j6m7", "cve_id": "CVE-2026-1111", "package": "github.com/acme/lib", "ecosystem": "go",
+ "vulnerable_version_range": ">= 1.0.0, < 1.2.4", "first_patched_version": "1.2.4", "severity": "high"}
+```
+
+The fixture ecosystem is `go`. The mock reads `go.mod` on the default branch. The alert is `open` while `go.mod` requires a version that the range holds. The alert is `fixed` after a commit to the default branch (a push, or a merged pull request) moves the requirement to a version outside the range, or removes it. If a later commit makes the version vulnerable again, the alert opens again. `POST /_mock/repos/{o}/{r}/alerts/{n}/dismiss` dismisses an open alert. The range is comparisons that a comma joins: `>=`, `<=`, `<`, `>` and `=`. As GitHub does, the alert gives no installed version. The advisory applies to each repository, and the alert appears when the repository requires the package at a vulnerable version. The endpoint supports `state` (a comma list), `per_page` (at most 100) and the cursor `after` of the `Link` header.
 
 ## Prometheus endpoints
 
