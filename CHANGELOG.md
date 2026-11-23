@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/zeroroot-ai/connectors/compare/v0.8.0...v0.8.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* **fixloop:** find the open pull request beside a closed one, and keep a write visible ([#37](https://github.com/zeroroot-ai/connectors/issues/37)) ([48286ce](https://github.com/zeroroot-ai/connectors/commit/48286ced0f40660ecd2e9577ebbf9034cc306b55))
+
 ## [0.8.0](https://github.com/zeroroot-ai/connectors/compare/v0.7.0...v0.8.0) (2026-11-23)
 
 
