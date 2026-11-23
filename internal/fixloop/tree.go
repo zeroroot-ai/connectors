@@ -1,6 +1,8 @@
 package fixloop
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
@@ -111,4 +113,18 @@ func TreeType(mode, objectType string) string {
 		return TreeFile
 	}
 	return ""
+}
+
+// CursorBinding is a short hash of the project and the other values that name a
+// listing (the path, the ref). A page cursor holds it, so a cursor of one listing
+// does not work for another project or another path. The project is compared
+// without regard to case.
+func CursorBinding(project string, rest ...string) string {
+	h := sha256.New()
+	h.Write([]byte(strings.ToLower(project)))
+	for _, r := range rest {
+		h.Write([]byte{0})
+		h.Write([]byte(r))
+	}
+	return hex.EncodeToString(h.Sum(nil)[:8])
 }

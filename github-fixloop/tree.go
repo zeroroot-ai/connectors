@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -95,7 +93,7 @@ func (v *service) listTree(ctx context.Context, _ *mcp.CallToolRequest, in fixlo
 	}
 	r := prRef{owner: owner, repo: repo}
 
-	bind := cursorBinding(in.Repo, path)
+	bind := fixloop.CursorBinding(in.Repo, path)
 	treeSHA, offset, err := parseTreeCursor(in.Cursor, bind)
 	if err != nil {
 		return nil, out, err
@@ -136,13 +134,6 @@ func (v *service) listTree(ctx context.Context, _ *mcp.CallToolRequest, in fixlo
 		out.NextCursor = treeSHA + ":" + strconv.Itoa(end) + ":" + bind
 	}
 	return nil, out, nil
-}
-
-// cursorBinding is a short hash of the project and the path. A cursor holds it,
-// so a cursor of one listing does not work for another project or another path.
-func cursorBinding(project, path string) string {
-	sum := sha256.Sum256([]byte(strings.ToLower(project) + "\x00" + path))
-	return hex.EncodeToString(sum[:8])
 }
 
 // parseTreeCursor reads "<tree sha>:<offset>:<hash>". It refuses a cursor whose
