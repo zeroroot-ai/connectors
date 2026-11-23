@@ -25,6 +25,10 @@ const (
 	errorSnippet      = 512              // bytes of a vendor error body in an APIError
 )
 
+// ErrAnswerTooLarge is the error of an answer that is longer than the limit of
+// the Client. A caller can ask for less and call again.
+var ErrAnswerTooLarge = errors.New("vendor answer is too large")
+
 // Authenticator adds the credential to a request. It runs once for each
 // attempt, so a token that expires between two attempts is renewed.
 type Authenticator func(ctx context.Context, req *http.Request) error
@@ -237,7 +241,7 @@ func (c *Client) once(ctx context.Context, r Request, body []byte, contentType s
 	}
 	failed := resp.StatusCode < 200 || resp.StatusCode > 299
 	if !failed && int64(len(data)) > c.maxBody {
-		return nil, 0, fmt.Errorf("vendor answer is longer than %d bytes", c.maxBody)
+		return nil, 0, fmt.Errorf("%w: it is longer than %d bytes", ErrAnswerTooLarge, c.maxBody)
 	}
 	if failed {
 		snippet := string(data)

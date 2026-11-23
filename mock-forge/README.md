@@ -37,6 +37,7 @@ The endpoints are exactly the calls of `github-fixloop`. The API version is 2022
 | `GET`, `POST /git/commits` | https://docs.github.com/en/rest/git/commits |
 | `POST /git/blobs`, `POST /git/trees`, `GET /git/trees/{sha}` | https://docs.github.com/en/rest/git/blobs and https://docs.github.com/en/rest/git/trees |
 | `GET /repos/{o}/{r}/deployments`, `GET /deployments/{id}/statuses` | https://docs.github.com/en/rest/deployments/deployments |
+| `GET /repos/{o}/{r}/git/trees/{tree_sha}?recursive=1` | https://docs.github.com/en/rest/git/trees#get-a-tree |
 | `GET /repos/{o}/{r}/dependabot/alerts` | https://docs.github.com/en/rest/dependabot/alerts#list-dependabot-alerts-for-a-repository |
 | `GET /repos/{o}/{r}/contents/{path}` | https://docs.github.com/en/rest/repos/contents#get-repository-content |
 
@@ -59,6 +60,10 @@ The mock derives the alerts from the content of the repository, so no test actio
 ```
 
 The fixture ecosystem is `go`. The mock reads `go.mod` on the default branch and applies its `replace` directives as `github-fixloop` does (a replace to a module gives that module and version, a replace to a local path gives no version). The alert is `open` while `go.mod` installs a version that the range holds. The alert is `fixed` after a commit to the default branch (a push, or a merged pull request) moves the requirement to a version outside the range, or removes it. If a later commit makes the version vulnerable again, the alert opens again. `POST /_mock/repos/{o}/{r}/alerts/{n}/dismiss` dismisses an open alert. The body `{"auto": true}` makes the state `auto_dismissed`. `PATCH /_mock/repos/{o}/{r}` with `{"dependabot_alerts_disabled": true}` makes the endpoint answer 403. A missing repository answers 404. A `state` value that is not `auto_dismissed`, `dismissed`, `fixed` or `open` answers 422. The range is comparisons that a comma joins: `>=`, `<=`, `<`, `>` and `=`. As GitHub does, the alert gives no installed version. The advisory applies to each repository, and the alert appears when the repository requires the package at a vulnerable version. The endpoint supports `state` (a comma list), `per_page` (at most 100) and the cursor `after` of the `Link` header.
+
+## Git trees
+
+`GET /repos/{o}/{r}/git/trees/{tree_sha}` takes a tree sha, a commit sha or a branch name. The mock keeps a tree as a flat map of paths, so it makes the entries of the folders and their tree shas when it lists. A recursive answer has the folders and the files. A blob entry has a size. A file with the mode `120000` is a symlink and a file with the mode `160000` is a submodule (type `commit`). `PATCH /_mock/repos/{o}/{r}` with `{"tree_limit": 5}` cuts a recursive answer after 5 entries and sets `truncated` to true, as GitHub does at 100,000 entries.
 
 ## Prometheus endpoints
 

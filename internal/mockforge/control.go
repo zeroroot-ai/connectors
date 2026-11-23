@@ -61,6 +61,8 @@ type Settings struct {
 	// AlertsOff makes the Dependabot alerts endpoint answer 403, as GitHub does
 	// when the alerts are disabled or the token cannot read them.
 	AlertsOff *bool `json:"dependabot_alerts_disabled"`
+	// TreeCap makes a recursive tree answer truncated after this many entries.
+	TreeCap *int `json:"tree_limit"`
 }
 
 func (r *repo) apply(s Settings) {
@@ -78,6 +80,9 @@ func (r *repo) apply(s Settings) {
 	}
 	if s.Checks != nil {
 		r.defaultChecks = *s.Checks
+	}
+	if s.TreeCap != nil {
+		r.treeCap = *s.TreeCap
 	}
 	if s.AlertsOff != nil {
 		r.alertsOff = *s.AlertsOff
