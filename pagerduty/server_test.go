@@ -74,7 +74,7 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func setup(t *testing.T) (srv *mock, call func(string, map[string]any) (isErr bool, text string, res *mcp.CallToolResult), tools map[string]*mcp.Tool) {
 	t.Helper()
 	m := &mock{}
-	ts := httptest.NewTLSServer(m)
+	ts := httptest.NewTLSServer(wrap(m))
 	t.Cleanup(ts.Close)
 	register, err := buildWith(kit.NewEnvFrom(map[string]string{
 		"PAGERDUTY_ROUTING_KEY": routing, "PAGERDUTY_API_TOKEN": "rest-token",

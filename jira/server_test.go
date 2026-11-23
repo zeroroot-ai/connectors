@@ -91,7 +91,7 @@ func setupWith(t *testing.T, extra map[string]string) (srv *mock, call func(stri
 	oldClock := clock
 	clock = func() time.Time { return time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC) }
 	t.Cleanup(func() { clock = oldClock })
-	ts := httptest.NewTLSServer(m)
+	ts := httptest.NewTLSServer(wrap(m))
 	t.Cleanup(ts.Close)
 	env := map[string]string{"JIRA_SITE_URL": ts.URL, "JIRA_EMAIL": "bot@example.com", "JIRA_API_TOKEN": "tok"}
 	for k, v := range extra {

@@ -67,7 +67,7 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func setup(t *testing.T) (srv *mock, call func(string, map[string]any) (bool, string), tools map[string]*mcp.Tool) {
 	t.Helper()
 	m := &mock{enabled: true}
-	ts := httptest.NewServer(m)
+	ts := httptest.NewServer(wrap(m))
 	t.Cleanup(ts.Close)
 	register, err := buildWith(kit.NewEnvFrom(map[string]string{
 		"ENTRA_TENANT_ID": "contoso.onmicrosoft.com", "ENTRA_CLIENT_ID": "app-id", "ENTRA_CLIENT_SECRET": "s3cret",

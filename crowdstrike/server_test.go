@@ -72,7 +72,7 @@ func (m *mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func setup(t *testing.T) (srv *mock, call func(string, map[string]any) (bool, string), tools map[string]*mcp.Tool) {
 	t.Helper()
 	m := &mock{}
-	ts := httptest.NewServer(m)
+	ts := httptest.NewServer(wrap(m))
 	t.Cleanup(ts.Close)
 	register, err := build(kit.NewEnvFrom(map[string]string{
 		"FALCON_BASE_URL": ts.URL, "FALCON_CLIENT_ID": "cid", "FALCON_CLIENT_SECRET": "csecret",

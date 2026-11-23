@@ -129,19 +129,23 @@ func (v *service) openMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 	if !kit.Hex40.MatchString(commit.ID) {
 		return nil, out, errors.New("create the commit: GitLab gave no commit id")
 	}
-	created, err := v.createMR(ctx, project, in)
+	created, existing, err := v.createMR(ctx, project, in)
 	if err != nil {
 		return nil, out, err
 	}
 	if err := sameHead(created, commit.ID); err != nil {
 		return nil, out, err
 	}
-	return nil, v.openResult(project, created, in, commit.ID, false), nil
+	return nil, v.openResult(project, created, in, commit.ID, existing), nil
 }
 
-func (v *service) createMR(ctx context.Context, project string, in fixloop.OpenInput) (*glMR, error) {
+// createMR opens the merge request. When GitLab answers 409 or 422, a merge request
+// of the branch can exist already, for example from a create whose answer was lost.
+// The tool then lists the merge requests of the branch again and returns the open
+// one, with existing true.
+func (v *service) createMR(ctx context.Context, project string, in fixloop.OpenInput) (mr *glMR, existing bool, err error) {
 	var created glMR
-	err := v.client.Do(ctx, kit.Request{
+	err = v.client.Do(ctx, kit.Request{
 		Method: http.MethodPost, Path: kit.Path("projects", project, "merge_requests"),
 		JSON: map[string]any{
 			"source_branch": in.SourceBranch, "target_branch": in.TargetBranch,
@@ -149,9 +153,15 @@ func (v *service) createMR(ctx context.Context, project string, in fixloop.OpenI
 		},
 	}, &created)
 	if err != nil {
-		return nil, fmt.Errorf("open the merge request (the branch %s stays, call the tool again): %w", in.SourceBranch, err)
+		var ae *kit.APIError
+		if errors.As(err, &ae) && (ae.Status == http.StatusConflict || ae.Status == http.StatusUnprocessableEntity) {
+			if found, ferr := v.openMROf(ctx, project, in); ferr == nil && found != nil {
+				return found, true, nil
+			}
+		}
+		return nil, false, kit.Retryable(fmt.Errorf("open the merge request (the branch %s stays, call the tool again): %w", in.SourceBranch, err))
 	}
-	return &created, nil
+	return &created, false, nil
 }
 
 // sameHead refuses a merge request whose head is not the commit that the tool
@@ -261,14 +271,14 @@ func (v *service) resume(ctx context.Context, project string, in fixloop.OpenInp
 		}
 		return nil, v.openResult(project, mr, in, commit, true), nil
 	}
-	created, err := v.createMR(ctx, project, in)
+	created, existing, err := v.createMR(ctx, project, in)
 	if err != nil {
 		return nil, out, err
 	}
 	if err := sameHead(created, commit); err != nil {
 		return nil, out, err
 	}
-	return nil, v.openResult(project, created, in, commit, false), nil
+	return nil, v.openResult(project, created, in, commit, existing), nil
 }
 
 // foreign compares the branch with the base branch. It returns an empty reason

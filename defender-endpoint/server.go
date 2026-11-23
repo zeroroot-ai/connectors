@@ -165,7 +165,7 @@ func defenderError(op string, err error) error {
 			} `json:"error"`
 		}
 		if kit.DecodeErrorBody(ae, &body) == nil && body.Error.Message != "" {
-			return fmt.Errorf("%s: Defender answered HTTP %d, %s: %s", op, ae.Status, body.Error.Code, body.Error.Message)
+			return kit.Described(err, "%s: Defender answered HTTP %d, %s: %s", op, ae.Status, body.Error.Code, body.Error.Message)
 		}
 	}
 	return fmt.Errorf("%s: %w", op, err)

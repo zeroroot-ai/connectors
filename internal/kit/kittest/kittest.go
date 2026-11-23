@@ -4,10 +4,15 @@ package kittest
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/zeroroot-ai/connectors/internal/kit"
 )
 
 // Connect registers the tools on a new server, connects an in-memory MCP
@@ -16,6 +21,7 @@ func Connect(t *testing.T, register func(*mcp.Server)) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	srv := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
+	kit.ClassifyErrors(srv, slog.New(slog.DiscardHandler))
 	register(srv)
 	ct, st := mcp.NewInMemoryTransports()
 	ss, err := srv.Connect(ctx, st, nil)
@@ -38,7 +44,23 @@ func Call(t *testing.T, cs *mcp.ClientSession, tool string, args map[string]any)
 	if err != nil {
 		t.Fatalf("call %s: %v", tool, err)
 	}
+	lastMu.Lock()
+	last = res
+	lastMu.Unlock()
 	return res
+}
+
+var (
+	lastMu sync.Mutex
+	last   *mcp.CallToolResult
+)
+
+// LastResult returns the result of the last call of Call. A test that uses a
+// setup function that gives only the text of a result reads the rest from it.
+func LastResult() *mcp.CallToolResult {
+	lastMu.Lock()
+	defer lastMu.Unlock()
+	return last
 }
 
 // Text returns the text of the first content item of a result.
@@ -124,4 +146,51 @@ func AssertIdempotent(t *testing.T, tools map[string]*mcp.Tool, name string, wan
 	if tl := tools[name]; tl == nil || tl.Annotations == nil || tl.Annotations.IdempotentHint != want {
 		t.Errorf("%s: idempotentHint is not %v", name, want)
 	}
+}
+
+// ErrorClass decodes the structured content of an error result:
+// {"error":{"class":...,"retry_after_seconds":N}}. It fails the test when the
+// result is not an error or has no class.
+func ErrorClass(t *testing.T, res *mcp.CallToolResult) kit.ErrorClass {
+	t.Helper()
+	if !res.IsError {
+		t.Fatal("the result is not an error")
+	}
+	var out struct {
+		Error *kit.ErrorClass `json:"error"`
+	}
+	Structured(t, res, &out)
+	if out.Error == nil || out.Error.Class == "" {
+		t.Fatalf("the error result has no class: %v", res.StructuredContent)
+	}
+	return *out.Error
+}
+
+// LostAnswer returns a wrapper for the handler of a vendor mock. The wrapper
+// drops the connection of each request that changes the vendor (POST, PATCH,
+// PUT and DELETE) after it read the request, so the caller gets no answer, as in
+// a lost answer. It lets a token request through, and it serves each read with
+// the mock. A test sets it before it starts the mock.
+func LostAnswer(h http.Handler) http.Handler { return LostAnswerExcept(h) }
+
+// LostAnswerExcept is LostAnswer, and it lets through a request whose path has
+// one of the texts in pass. A test uses it for a read that the vendor serves with
+// a POST, for example a search.
+func LostAnswerExcept(h http.Handler, pass ...string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		write := r.Method != http.MethodGet && r.Method != http.MethodHead
+		for _, p := range pass {
+			if strings.Contains(r.URL.Path, p) {
+				write = false
+			}
+		}
+		if write && !strings.Contains(r.URL.Path, "token") && !strings.Contains(r.URL.Path, "/oauth") {
+			c, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = c.Close()
+			}
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }

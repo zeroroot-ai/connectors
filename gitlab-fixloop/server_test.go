@@ -108,7 +108,7 @@ func setup(t *testing.T, routes map[string]func(http.ResponseWriter, *http.Reque
 		routes["GET "+api] = reply(200, projectMerge)
 	}
 	m := &mock{routes: routes}
-	ts := httptest.NewServer(m)
+	ts := httptest.NewServer(wrap(m))
 	t.Cleanup(ts.Close)
 	register, err := build(kit.NewEnvFrom(map[string]string{
 		"GITLAB_BASE_URL": ts.URL, "GITLAB_TOKEN": "glpat-secret", "GITLAB_ENVIRONMENT": "production",

@@ -257,7 +257,7 @@ func qualysError(err error) error {
 	if errors.As(err, &ae) {
 		var sr xmlSimpleReturn
 		if xml.Unmarshal([]byte(ae.Body), &sr) == nil && sr.Text != "" {
-			return fmt.Errorf("get host detections: Qualys answered HTTP %d, code %s: %s", ae.Status, strings.TrimSpace(sr.Code), strings.TrimSpace(sr.Text))
+			return kit.Described(err, "get host detections: Qualys answered HTTP %d, code %s: %s", ae.Status, strings.TrimSpace(sr.Code), strings.TrimSpace(sr.Text))
 		}
 	}
 	return fmt.Errorf("get host detections: %w", err)
