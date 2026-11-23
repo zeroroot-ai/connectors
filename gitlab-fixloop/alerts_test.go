@@ -44,7 +44,7 @@ const (
 		`{"externalType":"ghsa","externalId":"GHSA-c2f3-g4h5-j6m7","name":"GHSA-c2f3-g4h5-j6m7","url":""}`
 )
 
-func graph(nodes string, next string) string {
+func graph(nodes, next string) string {
 	pi := `{"hasNextPage":false,"endCursor":null}`
 	if next != "" {
 		pi = `{"hasNextPage":true,"endCursor":"` + next + `"}`
@@ -112,7 +112,12 @@ func TestAlertsStatesAndFields(t *testing.T) {
 		t.Errorf("token %q", m.token)
 	}
 
-	_, _, out = call("list_dependency_alerts", map[string]any{"project": "acme/shop", "state": "all"})
+	checkAllStates(t, call)
+}
+
+func checkAllStates(t *testing.T, call func(string, map[string]any) (bool, string, map[string]any)) {
+	t.Helper()
+	_, _, out := call("list_dependency_alerts", map[string]any{"project": "acme/shop", "state": "all"})
 	byID := map[string]map[string]any{}
 	for _, x := range alertList(t, out) {
 		byID[x["id"].(string)] = x

@@ -330,7 +330,7 @@ func TestAlertsGoModReplace(t *testing.T) {
 // openAlerts reports whether the mock lists an open alert for acme/shop.
 func openAlerts(t *testing.T, srv *mocktest.Server) bool {
 	t.Helper()
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/repos/acme/shop/dependabot/alerts?state=open", nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/repos/acme/shop/dependabot/alerts?state=open", http.NoBody)
 	if err != nil {
 		t.Fatal(err)
 	}

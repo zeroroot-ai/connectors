@@ -126,7 +126,7 @@ func (v *service) packageManagers(ctx context.Context, project string) (map[stri
 	managers := map[string]string{}
 	seen := 0
 	page := "1"
-	for n := 0; n < fixloop.MaxAlertPages; n++ {
+	for range fixloop.MaxAlertPages {
 		var list []glDependency
 		var hdr http.Header
 		err := v.client.Do(ctx, kit.Request{
@@ -275,7 +275,8 @@ func toAlert(n glVuln, managers map[string]string) fixloop.Alert {
 		ID: "gitlab:" + n.ID[strings.LastIndex(n.ID, "/")+1:], State: alertState(n.State), Severity: strings.ToLower(n.Severity),
 		ManifestPath: n.Location.File, URL: n.WebURL,
 	}
-	texts := []string{n.Title}
+	texts := make([]string, 0, 1+3*len(n.Identifiers))
+	texts = append(texts, n.Title)
 	for _, i := range n.Identifiers {
 		texts = append(texts, i.Name, i.ExternalID, i.URL)
 	}
