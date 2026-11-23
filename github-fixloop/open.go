@@ -182,8 +182,8 @@ func (v *service) pullAfterConflict(ctx context.Context, r prRef, in fixloop.Ope
 	if !errors.As(err, &ae) || (ae.Status != http.StatusConflict && ae.Status != http.StatusUnprocessableEntity) {
 		return nil
 	}
-	pr, ferr := v.findPR(ctx, r, in.SourceBranch)
-	if ferr != nil || pr == nil || pr.State != "open" || pr.Base.Ref != in.TargetBranch || pr.fromFork() {
+	pr, ferr := v.findOpenPR(ctx, r, in.SourceBranch, in.TargetBranch)
+	if ferr != nil {
 		return nil
 	}
 	return pr
@@ -404,11 +404,11 @@ func (v *service) resume(ctx context.Context, r prRef, in fixloop.OpenInput, out
 		return nil, out, fmt.Errorf("%w: the branch %s exists and %s. The tool does not build on it. Use another branch name",
 			kit.ErrInvalidInput, in.SourceBranch, reason)
 	}
-	pr, err := v.findPR(ctx, r, in.SourceBranch)
+	pr, err := v.findOpenPR(ctx, r, in.SourceBranch, in.TargetBranch)
 	if err != nil {
 		return nil, out, err
 	}
-	if pr != nil && pr.State == "open" && pr.Base.Ref == in.TargetBranch && !pr.fromFork() {
+	if pr != nil {
 		if err := sameHead(pr, commit); err != nil {
 			return nil, out, err
 		}

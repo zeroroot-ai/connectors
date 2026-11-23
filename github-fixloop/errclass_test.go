@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -287,6 +288,77 @@ func TestOpenConflictWithNoPullRequestToFindIsRefused(t *testing.T) {
 		cl, text := classCall(t, routes, "open_merge_request", openArgs())
 		if cl.Class != kit.ClassRefused || !strings.Contains(text, "stays, call the tool again") {
 			t.Errorf("%s: %+v %s", name, cl, text)
+		}
+	}
+}
+
+// A newer closed pull request of the branch must not hide the open one. The tool
+// asks for the open pull requests of the branch into the base branch.
+func TestOpenFindsTheOpenPullRequestBesideAClosedOne(t *testing.T) {
+	closed := strings.Replace(ownPR(newComSHA), `"state":"open"`, `"state":"closed"`, 1)
+	var query url.Values
+	listPulls := func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+		query = r.URL.Query()
+		if r.URL.Query().Get("state") == "open" {
+			_, _ = w.Write([]byte(`[` + ownPR(newComSHA) + `]`))
+			return
+		}
+		_, _ = w.Write([]byte(`[` + closed + `]`)) // the newest of all states
+	}
+	// The resume of an own branch.
+	routes := branchExists(openRoutes())
+	routes[compareKey] = reply(200, ownCompare())
+	routes["GET "+repo+"/pulls"] = listPulls
+	m, call := setup(t, routes)
+	isErr, text, out := call("open_merge_request", openArgs())
+	if isErr || out["existing"] != true || out["merge_request"] != ref {
+		t.Fatalf("resume: isErr=%v %s %v", isErr, text, out)
+	}
+	if query.Get("state") != "open" || query.Get("base") != "main" || query.Get("head") != "acme:"+srcBranch {
+		t.Errorf("query = %v", query)
+	}
+	if m.called("POST "+repo+"/pulls") != 0 {
+		t.Error("the tool opened a second pull request")
+	}
+	// The conflict of the create.
+	routes = openRoutes()
+	routes["GET "+repo+"/pulls"] = listPulls
+	routes["POST "+repo+"/pulls"] = reply(422, `{"message":"A pull request already exists"}`)
+	_, call = setup(t, routes)
+	if isErr, text, out := call("open_merge_request", openArgs()); isErr || out["existing"] != true {
+		t.Errorf("conflict: isErr=%v %s %v", isErr, text, out)
+	}
+	// A pull request of the branch into another base branch is not ours.
+	other := strings.Replace(ownPR(newComSHA), `"base":{"ref":"main"`, `"base":{"ref":"release"`, 1)
+	routes = branchExists(openRoutes())
+	routes[compareKey] = reply(200, ownCompare())
+	routes["GET "+repo+"/pulls"] = reply(200, `[`+other+`]`)
+	routes["POST "+repo+"/pulls"] = reply(201, ownPR(newComSHA))
+	m, call = setup(t, routes)
+	if isErr, text, out := call("open_merge_request", openArgs()); isErr || out["existing"] == true || m.called("POST "+repo+"/pulls") != 1 {
+		t.Errorf("another base: isErr=%v %s %v", isErr, text, out)
+	}
+}
+
+// The error text of the search for a pull request names the branch, not a revert.
+func TestFindPRErrorText(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusBadRequest) }))
+	t.Cleanup(ts.Close)
+	base, err := kit.ParseBaseURL(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := &service{client: kit.NewClient(base, kit.ClientOptions{})}
+	for name, find := range map[string]func() error{
+		"findPR": func() error { _, err := v.findPR(t.Context(), prRef{owner: "acme", repo: "shop"}, "b"); return err },
+		"findOpenPR": func() error {
+			_, err := v.findOpenPR(t.Context(), prRef{owner: "acme", repo: "shop"}, "b", "main")
+			return err
+		},
+	} {
+		err := find()
+		if err == nil || strings.Contains(err.Error(), "revert") && name == "findPR" || !strings.Contains(err.Error(), "pull request of the branch") {
+			t.Errorf("%s: %v", name, err)
 		}
 	}
 }
