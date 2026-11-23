@@ -70,15 +70,13 @@ func run() int {
 	return 0
 }
 
-// isLoopback is true when the listen address names a loopback host. An empty
-// host listens on every interface, so it is not loopback.
+// isLoopback is true when the listen address has a literal loopback IP. A name
+// such as localhost is not accepted, because the code does not resolve it. An
+// empty host listens on every interface, so it is not loopback.
 func isLoopback(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil || host == "" {
 		return false
-	}
-	if host == "localhost" {
-		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()

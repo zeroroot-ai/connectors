@@ -6,7 +6,7 @@ import (
 )
 
 func TestPlainHTTPIsRefusedOffLoopback(t *testing.T) {
-	for _, addr := range []string{":8080", "0.0.0.0:8080", "10.0.0.5:8080", "[::]:8080"} {
+	for _, addr := range []string{"localhost:8080", ":8080", "0.0.0.0:8080", "10.0.0.5:8080", "[::]:8080"} {
 		_, err := newServer(addr, "", "", "", "", false)
 		if err == nil || !strings.Contains(err.Error(), "refuse plain HTTP") {
 			t.Errorf("%s: want a refusal, got %v", addr, err)
@@ -21,7 +21,6 @@ func TestPlainHTTPIsAllowedOnLoopbackOrWithTheSwitchOrWithTLS(t *testing.T) {
 	}{
 		"loopback v4": {addr: "127.0.0.1:8080"},
 		"loopback v6": {addr: "[::1]:8080"},
-		"localhost":   {addr: "localhost:8080"},
 		"switch":      {addr: ":8080", allow: true},
 		"self signed": {addr: ":8443", hosts: "forge.mock.example.com"},
 	}

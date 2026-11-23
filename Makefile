@@ -39,6 +39,7 @@ new-server:
 ## check-images: fail when a server directory has no Dockerfile or no README.
 check-images:
 	scripts/check-servers_test.sh
+	scripts/digest-table_test.sh
 	scripts/check-servers.sh .
 
 ## image: build the image of one server. Usage: make image NAME=<tool>
