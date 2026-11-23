@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.2](https://github.com/zeroroot-ai/connectors/compare/v0.8.1...v0.8.2) (2026-11-23)
+
+
+### Bug Fixes
+
+* **fixloop:** name the open request and drop a false retry hint in open errors ([#39](https://github.com/zeroroot-ai/connectors/issues/39)) ([2453925](https://github.com/zeroroot-ai/connectors/commit/245392563fd595624242c4b5eeb06a648619b5fd))
+
 ## [0.8.1](https://github.com/zeroroot-ai/connectors/compare/v0.8.0...v0.8.1) (2026-11-23)
 
 
