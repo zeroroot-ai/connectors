@@ -96,17 +96,21 @@ func TestAlertsStatesAndFields(t *testing.T) {
 	if len(byID) != 3 || byID["gitlab:77"] == nil || byID["gitlab:80"] == nil || byID["gitlab:82"] == nil || out["truncated"] != false || out["ref"] != "main" {
 		t.Fatalf("open = %v", out)
 	}
-	a := byID["gitlab:77"]
+	checkOpenAlert(t, byID["gitlab:77"])
+	if byID["gitlab:80"]["state"] != "open" || m.token != "glpat-secret" {
+		t.Errorf("RESOLVED with no fix on the default branch must be open: %v, token %q", byID["gitlab:80"], m.token)
+	}
+	checkOtherStates(t, call)
+}
+
+func checkOpenAlert(t *testing.T, a map[string]any) {
+	t.Helper()
 	ids := fmt.Sprint(a["advisory_ids"])
 	if a["state"] != "open" || a["package"] != "lodash" || a["ecosystem"] != "npm" || a["version"] != "4.17.20" ||
 		a["version_source"] != "host" || a["purl"] != "pkg:npm/lodash@4.17.20" || a["severity"] != "high" || a["manifest_path"] != "package-lock.json" ||
 		ids != "[GHSA-c2f3-g4h5-j6m7 CVE-2026-1111]" || a["verifiable"] != true {
 		t.Errorf("alert = %v", a)
 	}
-	if byID["gitlab:80"]["state"] != "open" || m.token != "glpat-secret" {
-		t.Errorf("RESOLVED with no fix on the default branch must be open: %v, token %q", byID["gitlab:80"], m.token)
-	}
-	checkOtherStates(t, call)
 }
 
 func checkOtherStates(t *testing.T, call func(string, map[string]any) (bool, string, map[string]any)) {
