@@ -79,6 +79,8 @@ func TestBranchStays(t *testing.T) {
 		{&kit.APIError{Status: 502}, "the branch b stays, call the tool again"},
 		{&kit.APIError{Status: 429}, "the branch b stays, call the tool again"},
 		{errors.New("plain"), "the branch b stays, call the tool again"},
+		{&kit.APIError{Status: 403, RateLimited: true}, "the branch b stays, call the tool again"},
+		{&kit.APIError{Status: 403}, "the branch b stays"},
 		{&kit.APIError{Status: 401}, "the branch b stays"},
 		{fmt.Errorf("wrapped: %w", &kit.APIError{Status: 422}), "the branch b stays"},
 	} {
