@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -33,11 +34,12 @@ func run() int {
 	certFile, keyFile := env.Optional("MOCK_TLS_CERT_FILE", ""), env.Optional("MOCK_TLS_KEY_FILE", "")
 	hosts := env.Optional("MOCK_TLS_SELF_SIGNED_HOSTS", "")
 	caOut := env.Optional("MOCK_TLS_CA_FILE", "")
+	allowPlain := env.Optional("MOCK_ALLOW_PLAINTEXT", "") == "1"
 	if err := env.Err(); err != nil {
 		log.Error("configuration is wrong", "error", err.Error())
 		return 2
 	}
-	srv, err := newServer(addr, certFile, keyFile, hosts, caOut)
+	srv, err := newServer(addr, certFile, keyFile, hosts, caOut, allowPlain)
 	if err != nil {
 		log.Error("configuration is wrong", "error", err.Error())
 		return 2
@@ -68,14 +70,35 @@ func run() int {
 	return 0
 }
 
+// isLoopback is true when the listen address names a loopback host. An empty
+// host listens on every interface, so it is not loopback.
+func isLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // newServer makes the HTTP server. TLS is on when the environment names a
 // certificate, or hosts for a certificate that the mock makes. In the second
 // case the PEM of the authority goes to caOut, and GET /_mock/ca.pem serves it.
-func newServer(addr, certFile, keyFile, hosts, caOut string) (*http.Server, error) {
+func newServer(addr, certFile, keyFile, hosts, caOut string, allowPlain bool) (*http.Server, error) {
+	if certFile == "" && keyFile == "" && hosts == "" && !allowPlain && !isLoopback(addr) {
+		return nil, fmt.Errorf("refuse plain HTTP on %q: it has no credential, so anyone who reaches the port can reset it. "+
+			"Set MOCK_TLS_CERT_FILE and MOCK_TLS_KEY_FILE, or MOCK_TLS_SELF_SIGNED_HOSTS, or MOCK_ALLOW_PLAINTEXT=1, or listen on a loopback address", addr)
+	}
 	mock := mockforge.New(nil)
 	mux := http.NewServeMux()
 	mux.Handle("/", mock)
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second}
+	srv := &http.Server{
+		Addr: addr, Handler: mux,
+		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second,
+	}
 	switch {
 	case certFile != "" || keyFile != "":
 		cert, err := tls.LoadX509KeyPair(certFile, keyFile)

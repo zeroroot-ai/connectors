@@ -3,6 +3,7 @@ package mockforge_test
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -91,5 +92,60 @@ func TestSelfSignedCertificateIsTrustedWithItsAuthority(t *testing.T) {
 	if res, err = plain.Do(req); err == nil {
 		_ = res.Body.Close()
 		t.Error("a client with no authority must refuse the certificate")
+	}
+}
+
+func TestPullListIsShort(t *testing.T) {
+	srv := mocktest.Start(t)
+	srv.Seed("acme", "shop", map[string]any{"a.txt": "one\n"}, nil)
+	srv.Post("/_mock/repos/acme/shop/commits", map[string]any{"branch": "fix", "files": map[string]string{"a.txt": "two\n"}})
+	srv.Post("/repos/acme/shop/pulls", map[string]any{"title": "t", "head": "fix", "base": "main"})
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/repos/acme/shop/pulls?state=all&head=acme:fix", http.NoBody)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	var list []map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&list); err != nil || len(list) != 1 {
+		t.Fatalf("list: %v %v", list, err)
+	}
+	for _, k := range []string{"merged", "mergeable", "mergeable_state", "commits"} {
+		if _, ok := list[0][k]; ok {
+			t.Errorf("a list item has %s", k)
+		}
+	}
+	for _, k := range []string{"number", "state", "merged_at", "head", "base"} {
+		if _, ok := list[0][k]; !ok {
+			t.Errorf("a list item has no %s", k)
+		}
+	}
+	_, one := srv.Do(http.MethodGet, "/repos/acme/shop/pulls/1", nil)
+	if _, ok := one["mergeable_state"]; !ok {
+		t.Error("a single pull request has no mergeable_state")
+	}
+}
+
+func TestDeploymentListHonorsPerPage(t *testing.T) {
+	srv := mocktest.Start(t)
+	srv.Seed("acme", "shop", map[string]any{"a.txt": "one\n"}, nil)
+	for range 60 {
+		srv.Post("/_mock/repos/acme/shop/deployments", map[string]any{"branch": "main", "environment": "production"})
+	}
+	for _, c := range []struct {
+		query string
+		want  int
+	}{{"per_page=50", 50}, {"", 30}, {"per_page=100", 60}} {
+		req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/repos/acme/shop/deployments?"+c.query, http.NoBody)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var list []any
+		err = json.NewDecoder(res.Body).Decode(&list)
+		_ = res.Body.Close()
+		if err != nil || len(list) != c.want {
+			t.Errorf("%q: %d deployments, want %d (%v)", c.query, len(list), c.want, err)
+		}
 	}
 }

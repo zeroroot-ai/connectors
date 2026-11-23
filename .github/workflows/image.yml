@@ -84,15 +84,32 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # The reusable build always pushes the tag sha-<7 characters of the commit>.
+          # An image with the label ai.zeroroot.image-class=test is a test image.
+          # It goes in its own table, so a release never lists it as a connector.
           tag="sha-${GITHUB_SHA::7}"
+          servers_rows="" ; test_rows=""
+          for s in $(echo "$SERVERS" | jq -r '.[]'); do
+            ref="ghcr.io/zeroroot-ai/connectors-$s:$tag"
+            digest="$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+            class="$(docker buildx imagetools inspect "$ref" --format '{{json .Image}}' \
+              | jq -r '[.. | objects | .["ai.zeroroot.image-class"]? | strings] | first // ""')"
+            row="| ghcr.io/zeroroot-ai/connectors-$s | $digest |"
+            if [ "$class" = test ]; then test_rows="$test_rows$row"$'\n'; else servers_rows="$servers_rows$row"$'\n'; fi
+          done
           {
             echo "| image | digest |"
             echo "|---|---|"
-            for s in $(echo "$SERVERS" | jq -r '.[]'); do
-              ref="ghcr.io/zeroroot-ai/connectors-$s:$tag"
-              digest="$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest.Digest}}' | tr -d '"')"
-              echo "| ghcr.io/zeroroot-ai/connectors-$s | $digest |"
-            done
+            printf '%s' "$servers_rows"
+            if [ -n "$test_rows" ]; then
+              echo
+              echo "### Test images"
+              echo
+              echo "These images are for tests. They are no connectors. Do not pin them in a catalog manifest."
+              echo
+              echo "| image | digest |"
+              echo "|---|---|"
+              printf '%s' "$test_rows"
+            fi
           } | tee table.md >> "$GITHUB_STEP_SUMMARY"
           if [ "$REF_TYPE" = tag ]; then
             gh release view "$REF_NAME" --repo "$GITHUB_REPOSITORY" --json body -q .body > notes.md

@@ -96,6 +96,16 @@ func (c *call) pullJSON(p *pull) map[string]any {
 	}
 }
 
+// pullListJSON is a pull request in a list. A list item is short: it has no
+// merged, mergeable, mergeable_state and commits. It has merged_at.
+func (c *call) pullListJSON(p *pull) map[string]any {
+	j := c.pullJSON(p)
+	for _, k := range []string{"merged", "mergeable", "mergeable_state", "commits"} {
+		delete(j, k)
+	}
+	return j
+}
+
 func (c *call) pulls(rest []string) {
 	switch {
 	case len(rest) == 0 && c.req.Method == http.MethodGet:
@@ -145,7 +155,7 @@ func (c *call) listPulls() {
 		case q.Get("head") != "" && p.HeadRef != headBranch:
 		case q.Get("base") != "" && p.BaseRef != q.Get("base"):
 		default:
-			out = append(out, c.pullJSON(p))
+			out = append(out, c.pullListJSON(p))
 		}
 	}
 	from, to := page(c.req, len(out))

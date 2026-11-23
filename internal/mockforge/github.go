@@ -400,7 +400,8 @@ func (c *call) deployments(rest []string) {
 			}
 			list = append(list, map[string]any{"id": d.ID, "sha": d.SHA, "environment": d.Environment, "created_at": d.CreatedAt})
 		}
-		writeJSON(c.w, http.StatusOK, list)
+		from, to := page(c.req, len(list))
+		writeJSON(c.w, http.StatusOK, list[from:to])
 		return
 	}
 	id, err := strconv.Atoi(rest[0])

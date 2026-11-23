@@ -11,9 +11,12 @@ The mock holds all state in memory. It checks no credential and it sends no data
 | Variable | Meaning |
 |---|---|
 | `LISTEN_ADDR` | Optional. The default is `:8080`. |
+| `MOCK_ALLOW_PLAINTEXT` | Optional. Set it to `1` to serve plain HTTP on an address that is not loopback. |
 | `MOCK_TLS_CERT_FILE`, `MOCK_TLS_KEY_FILE` | Optional. Serve https with this certificate. |
 | `MOCK_TLS_SELF_SIGNED_HOSTS` | Optional. A comma list of host names or IP addresses. The mock makes an authority and a certificate for them, and serves https. |
 | `MOCK_TLS_CA_FILE` | Optional. With `MOCK_TLS_SELF_SIGNED_HOSTS`, the mock writes the PEM of its authority to this path. `GET /_mock/ca.pem` also serves it. |
+
+The mock has no credential, so anyone who reaches the port can reset or seed it. It refuses to start with plain HTTP on an address that is not loopback. Use TLS, or set `MOCK_ALLOW_PLAINTEXT=1`, or listen on `127.0.0.1`. The default `:8080` is not loopback.
 
 A client that must trust the self-signed certificate loads the PEM of the authority, for example with `SSL_CERT_FILE`.
 
