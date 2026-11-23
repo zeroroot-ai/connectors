@@ -68,6 +68,7 @@ The servers have no second authentication scheme, by design. The README of each 
 | `prometheus` | observability | `query_instant`, `query_range`, `list_alerts`, `health_signal` | gibson#1540 |
 | `gitlab-fixloop` | git-host | `open_merge_request`, `close_merge_request`, `read_file`, `merge_request_state`, `merge_merge_request`, `revert_merge_request`, `deployment_state` | gibson#1539 |
 | `github-fixloop` | git-host | `open_merge_request`, `close_merge_request`, `read_file`, `merge_request_state`, `merge_merge_request`, `revert_merge_request`, `deployment_state` | gibson#1539 |
+| `mock-forge` | test image | None. It is no MCP server. It mocks the GitHub and Prometheus APIs. | gibson#1469 |
 | `okta` | identity, response | `list_log_events`, `list_users`, `get_user`, `revoke_user_sessions`, `suspend_user`, `unsuspend_user` | gibson#1548, gibson#1436 |
 | `entra-id` | identity, response | `revoke_sign_in_sessions`, `disable_account`, `enable_account` | gibson#1549 |
 | `crowdstrike` | edr, response | `contain_host`, `lift_containment` | gibson#1545 |
