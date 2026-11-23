@@ -50,4 +50,11 @@ fi
 [ -z "$out" ] || fail "the script printed a table after a failed inspect"
 rm "$dir/plain.digest"
 "$here/digest-table.sh" '["plain"]' sha-1234567 >/dev/null 2>&1 && fail "a failed digest read did not fail the script"
+# Bad JSON and an empty list must fail, not print an empty table.
+for bad in 'not json' '[]' '{"a":1}'; do
+  if out="$("$here/digest-table.sh" "$bad" sha-1234567 2>/dev/null)"; then
+    fail "the script accepted the server list: $bad"
+  fi
+  [ -z "$out" ] || fail "the script printed a table for the server list: $bad"
+done
 echo "ok"

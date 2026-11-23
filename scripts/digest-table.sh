@@ -10,9 +10,16 @@ servers="${1:?usage: digest-table.sh <servers JSON array> <tag>}"
 tag="${2:?usage: digest-table.sh <servers JSON array> <tag>}"
 inspect="${INSPECT:-docker buildx imagetools inspect}"
 
+# Read the names first. A failed jq in a for list does not stop the script.
+names="$(jq -er '.[]' <<<"$servers")"
+if [ -z "$names" ]; then
+  echo "digest-table: the list of servers is empty" >&2
+  exit 1
+fi
+
 connector_rows=""
 test_rows=""
-for s in $(jq -r '.[]' <<<"$servers"); do
+for s in $names; do
   ref="ghcr.io/zeroroot-ai/connectors-$s:$tag"
   # shellcheck disable=SC2086 # INSPECT holds a command and its words
   digest="$($inspect "$ref" --format '{{json .Manifest.Digest}}' | tr -d '"')"
