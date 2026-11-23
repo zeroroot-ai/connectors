@@ -65,6 +65,10 @@ type repo struct {
 	deployments []*deployment
 	nextDeploy  int
 	seq         int
+
+	alerts    map[string]*alert // by GHSA id
+	nextAlert int
+	alertsOff bool
 }
 
 func newRepo(owner, name, branch string) *repo {
@@ -73,6 +77,7 @@ func newRepo(owner, name, branch string) *repo {
 		allowMerge: true, allowSquash: true,
 		defaultChecks: []Check{{Name: "ci", Status: "completed", Conclusion: "success"}},
 		checks:        map[string][]Check{},
+		alerts:        map[string]*alert{},
 		blobs:         map[string]string{}, trees: map[string]map[string]entry{},
 		commits: map[string]*commit{}, refs: map[string]string{},
 		pulls: map[int]*pull{}, nextNumber: 1, nextDeploy: 1,

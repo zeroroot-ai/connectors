@@ -25,6 +25,7 @@ The argument `merge_request` is the URL of the merge request on the server of `G
 | `revert_merge_request` | list and create merge requests, create a branch, `POST /repository/commits/:sha/revert`, then the merge call above | `revert_merge_request` on the revert merge request | `destructiveHint: false`, `idempotentHint: true` |
 | `open_merge_request` | `GET /projects/:id/merge_requests`, `HEAD /projects/:id/repository/files/:path` for each file, `POST /projects/:id/repository/commits` with `start_branch`, then `POST /projects/:id/merge_requests` | `close_merge_request` | `destructiveHint: false`, `idempotentHint: true` |
 | `close_merge_request` | `GET /projects/:id/merge_requests/:iid`, then `PUT` it with `state_event: close` | A person reopens it. No tool reopens it. | `destructiveHint: false`, `idempotentHint: true` |
+| `list_dependency_alerts` | `GET /projects/:id`, `GET /projects/:id/dependencies` | Not a change. | `readOnlyHint: true` |
 | `read_file` | `GET /projects/:id/repository/files/:path?ref=` | Not a change. | `readOnlyHint: true` |
 | `deployment_state` | `GET` the merge request, `GET /projects/:id/deployments`, `GET /repository/merge_base` | Not needed. It reads. | `readOnlyHint: true` |
 
@@ -138,3 +139,26 @@ No call to a live GitLab. The tests run against an `httptest` mock that follows 
 - That the deployments API of a given GitLab version has `finished_at`. The tool uses `updated_at` when it is missing.
 - That the compare API marks a cut diff with `too_large` or `collapsed` on every version. A cut diff that GitLab does not mark can make the check of an existing revert branch give a wrong answer.
 - The name `external_status_checks`. The API reference names only `status_checks_must_pass`.
+
+## list_dependency_alerts
+
+The tool lists the dependency scanning vulnerabilities of a project. The result has the same shape as the result of `github-fixloop`. The types are in `internal/fixloop`.
+
+The vulnerabilities come from the GraphQL field `Project.vulnerabilities` (`POST /api/graphql`) with `reportType: [DEPENDENCY_SCANNING]`. Reference: https://docs.gitlab.com/api/graphql/reference/ (the field `Project.vulnerabilities`, the objects `Vulnerability`, `VulnerabilityIdentifier`, `VulnerabilityLocationDependencyScanning` and `VulnerableDependency`, and the enum `VulnerabilityState`). GitLab sets the state `RESOLVED` when a person or a policy resolves a vulnerability, not when a scan sees a fix. A fix that a scan sees leaves the state `DETECTED` and sets `resolvedOnDefaultBranch` ("Indicates whether the vulnerability is fixed on the default branch or not"). So the tool reads each state and the field `resolvedOnDefaultBranch`, and it gives the state `dismissed` for `DISMISSED`, `fixed` when `resolvedOnDefaultBranch` is true, and `open` otherwise. `RESOLVED` with `resolvedOnDefaultBranch` false is `open`. The tool filters by `state` itself. The advisory ids (GHSA and CVE) come from the identifiers of the vulnerability. The vulnerability has no package manager, so the tool also reads the dependency list, `GET /projects/:id/dependencies` (https://docs.gitlab.com/api/dependencies/), and takes the package manager from it. A fixed vulnerability is no longer in the dependency list, so the tool takes its ecosystem from the name of its file. A file that can belong to several ecosystems (a CycloneDX SBOM, `pyproject.toml`) gives an empty ecosystem and no `purl`, and a caller does not verify a fix on it. The deprecated `GET /projects/:id/vulnerability_findings` (https://docs.gitlab.com/api/vulnerability_findings/) is not used.
+
+Token permission: the `read_api` scope. The user of the token needs the permission to read the repository and the Project Security Dashboard. The API needs GitLab Ultimate.
+
+Input: `project` (the path of the project), `state` (`open` by default, `fixed`, `dismissed` or `all`) and `ref`. GitLab reports the default branch. The tool refuses a `ref` that is not the default branch.
+
+Errors, never a clean list:
+- A token that cannot read the Security Dashboard gets dependencies with no `vulnerabilities` key. The tool then returns an error.
+- An empty dependency list means that no dependency scan ran. The tool returns an error, because it cannot tell it from a clean project.
+- A GraphQL error, a null project and a null `vulnerabilities` field are errors.
+
+Limits of GitLab. GitLab gives no vulnerable range and no patched version, so `vulnerable_version_range` and `first_patched_version` are empty. An alert with no advisory id has `verifiable` false. A caller cannot match it to a finding by advisory. `id` is `gitlab:<number of the vulnerability>`. `version` is the version of the vulnerability location, and `version_source` is `host`. `ecosystem` is the package manager of GitLab. `purl` is built as in `github-fixloop`.
+
+Pages: the tool reads 100 vulnerabilities a page by cursor, at most 10 pages. When GitLab has more, `truncated` is true.
+
+How to verify a fix: call the tool with `state` `all`. Treat an alert as fixed only when its `state` is `fixed`. A missing alert and a truncated list prove nothing.
+
+Test: the tests use the table mock of this package. `mock-forge` has no GitLab side.

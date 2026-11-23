@@ -1133,10 +1133,10 @@ func TestAnnotations(t *testing.T) {
 		t.Fatal(err)
 	}
 	tools := kittest.Tools(t, kittest.Connect(t, register))
-	if len(tools) != 7 {
-		t.Fatalf("tools = %d, want 7", len(tools))
+	if len(tools) != 8 {
+		t.Fatalf("tools = %d, want 8", len(tools))
 	}
-	for _, name := range []string{"merge_request_state", "deployment_state", "read_file"} {
+	for _, name := range []string{"merge_request_state", "deployment_state", "read_file", "list_dependency_alerts"} {
 		if a := tools[name].Annotations; a == nil || !a.ReadOnlyHint {
 			t.Errorf("%s must be read only", name)
 		}

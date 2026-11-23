@@ -19,6 +19,7 @@ import (
 //   - repository, branch and branch rules: https://docs.github.com/en/rest/repos/repos#get-a-repository,
 //     https://docs.github.com/en/rest/branches/branches#get-a-branch and
 //     https://docs.github.com/en/rest/repos/rules#get-rules-for-a-branch
+//   - Dependabot alerts: https://docs.github.com/en/rest/dependabot/alerts (see alerts.go)
 //   - contents: https://docs.github.com/en/rest/repos/contents#get-repository-content
 
 // call is one request to a repository.
@@ -61,6 +62,8 @@ func (m *Mock) github(w http.ResponseWriter, req *http.Request, segs []string) {
 		c.compare(strings.Join(rest[1:], "/"))
 	case "deployments":
 		c.deployments(rest[1:])
+	case "dependabot":
+		c.alerts(rest[1:])
 	case "contents":
 		c.contents(strings.Join(rest[1:], "/"))
 	default:

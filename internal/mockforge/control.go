@@ -20,6 +20,8 @@ import (
 //	PUT    /_mock/repos/{owner}/{repo}/merge-failure  make each merge call fail
 //	DELETE /_mock/repos/{owner}/{repo}/merge-failure  clear it
 //	POST   /_mock/repos/{owner}/{repo}/deployments    record a deployment
+//	POST   /_mock/advisories                          seed a security advisory (Dependabot alerts)
+//	POST   /_mock/repos/{owner}/{repo}/alerts/{n}/dismiss  dismiss an open alert
 //	POST   /_mock/prometheus/health                   set a health value
 //	POST   /_mock/prometheus/alerts                   set the alerts
 
@@ -56,6 +58,9 @@ type Settings struct {
 	RequiredChecks *[]string   `json:"required_checks"`
 	Checks         *[]Check    `json:"checks"`
 	AutoDeploy     *AutoDeploy `json:"auto_deploy"`
+	// AlertsOff makes the Dependabot alerts endpoint answer 403, as GitHub does
+	// when the alerts are disabled or the token cannot read them.
+	AlertsOff *bool `json:"dependabot_alerts_disabled"`
 }
 
 func (r *repo) apply(s Settings) {
@@ -73,6 +78,9 @@ func (r *repo) apply(s Settings) {
 	}
 	if s.Checks != nil {
 		r.defaultChecks = *s.Checks
+	}
+	if s.AlertsOff != nil {
+		r.alertsOff = *s.AlertsOff
 	}
 	if s.AutoDeploy != nil {
 		r.autoDeploy = s.AutoDeploy
@@ -112,6 +120,8 @@ func (m *Mock) control(w http.ResponseWriter, req *http.Request, segs []string) 
 			return
 		}
 		m.controlRepo(w, req, r, segs[3:])
+	case len(segs) == 1 && segs[0] == "advisories" && req.Method == http.MethodPost:
+		m.addAdvisory(w, req)
 	case len(segs) == 2 && segs[0] == "prometheus":
 		m.controlProm(w, req, segs[1])
 	default:
@@ -149,6 +159,7 @@ func (m *Mock) seed(w http.ResponseWriter, req *http.Request) {
 	c := r.putCommit("Initial commit", r.putTree(tree), nil, author)
 	r.refs[in.DefaultBranch] = c.SHA
 	m.repos[strings.ToLower(r.fullName())] = r
+	m.evalAlerts(r)
 	writeJSON(w, http.StatusCreated, map[string]any{"full_name": r.fullName(), "branch": in.DefaultBranch, "head_sha": c.SHA, "files": blobShas(tree)})
 }
 
@@ -174,6 +185,8 @@ func (m *Mock) controlRepo(w http.ResponseWriter, req *http.Request, r *repo, re
 		m.push(w, req, r)
 	case len(rest) == 1 && rest[0] == "checks" && req.Method == http.MethodPost:
 		m.setChecks(w, req, r)
+	case len(rest) == 3 && rest[0] == "alerts" && rest[2] == "dismiss" && req.Method == http.MethodPost:
+		m.dismissAlert(w, req, r, rest[1])
 	case len(rest) == 1 && rest[0] == "merge-failure":
 		setMergeFailure(w, req, r)
 	case len(rest) == 1 && rest[0] == "deployments" && req.Method == http.MethodPost:
@@ -234,6 +247,7 @@ func (m *Mock) push(w http.ResponseWriter, req *http.Request, r *repo) {
 	c := r.putCommit(in.Message, r.putTree(tree), []string{parent}, author)
 	r.refs[in.Branch] = c.SHA
 	r.afterLand(in.Branch, c.SHA, stamp(m.now()))
+	m.evalAlerts(r)
 	writeJSON(w, http.StatusCreated, map[string]string{"branch": in.Branch, "sha": c.SHA})
 }
 

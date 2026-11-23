@@ -92,19 +92,29 @@ func buildWith(env *kit.Env, log *slog.Logger, hc *http.Client) (func(*mcp.Serve
 		Timeout:    timeout,
 		HTTPClient: hc,
 	})
-	svc := &service{client: client, host: base.Host, environment: environment}
+	gqlBase := *base
+	gqlBase.Path += "/api"
+	gql := kit.NewClient(&gqlBase, kit.ClientOptions{
+		Auth:       kit.HeaderAuth("PRIVATE-TOKEN", "", token),
+		Logger:     log,
+		Timeout:    timeout,
+		HTTPClient: hc,
+	})
+	svc := &service{client: client, gql: gql, host: base.Host, environment: environment}
 	return func(s *mcp.Server) { svc.register(s, log) }, nil
 }
 
 type service struct {
 	client      *kit.Client
-	host        string // host and port of the GitLab web address
+	gql         *kit.Client // the base URL of the GraphQL API: <host>/api
+	host        string      // host and port of the GitLab web address
 	environment string
 }
 
 func (v *service) register(s *mcp.Server, log *slog.Logger) {
 	v.registerOpen(s, log)
 	v.registerReadFile(s, log)
+	v.registerAlerts(s, log)
 	kit.AddTool(s, log, &mcp.Tool{
 		Name: "merge_request_state",
 		Description: "Read the state of one GitLab merge request: open, merged, closed or refused, the status of its head " +

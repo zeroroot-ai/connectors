@@ -78,6 +78,9 @@ type Mock struct {
 	now   func() time.Time
 	repos map[string]*repo
 	prom  promState
+	// advisories are the security advisories that a test seeded. They apply to
+	// each repository.
+	advisories []Advisory
 }
 
 // New returns an empty mock. A nil now means time.Now.
@@ -92,6 +95,7 @@ func New(now func() time.Time) *Mock {
 
 func (m *Mock) reset() {
 	m.repos = map[string]*repo{}
+	m.advisories = nil
 	m.prom = promState{health: map[string][]promPoint{}}
 }
 
