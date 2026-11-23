@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/zeroroot-ai/connectors/compare/v0.7.0...v0.8.0) (2026-11-23)
+
+
+### Features
+
+* **kit:** put the class of a tool error in structuredContent ([#35](https://github.com/zeroroot-ai/connectors/issues/35)) ([cf0df5b](https://github.com/zeroroot-ai/connectors/commit/cf0df5b36e3d71ab367ebdbd7dca8be57165e7de))
+
 ## [0.7.0](https://github.com/zeroroot-ai/connectors/compare/v0.6.0...v0.7.0) (2026-11-23)
 
 
