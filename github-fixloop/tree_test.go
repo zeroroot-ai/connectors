@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/zeroroot-ai/connectors/internal/fixloop"
@@ -94,7 +95,7 @@ func TestListTreeCursorPages(t *testing.T) {
 	t.Cleanup(func() { treePage = old })
 	_, call := treeForge(t)
 	seen := map[string]bool{}
-	cursor := ""
+	cursor, first := "", ""
 	pages := 0
 	for {
 		args := map[string]any{"project": "acme/shop"}
@@ -113,6 +114,9 @@ func TestListTreeCursorPages(t *testing.T) {
 			seen[p] = true
 		}
 		next, _ := out["next_cursor"].(string)
+		if first == "" {
+			first = next
+		}
 		if next == "" {
 			break
 		}
@@ -121,11 +125,39 @@ func TestListTreeCursorPages(t *testing.T) {
 	if pages != 4 || len(seen) != 16 {
 		t.Errorf("pages=%d entries=%d", pages, len(seen))
 	}
-	if isErr, _, _ := call("list_tree", map[string]any{"project": "acme/shop", "cursor": "bogus"}); !isErr {
-		t.Error("a bad cursor was accepted")
+	checkBadCursors(t, call, first)
+}
+
+func checkBadCursors(t *testing.T, call forgeCall, cursor string) {
+	t.Helper()
+	parts := strings.Split(cursor, ":")
+	for name, args := range map[string]map[string]any{
+		"garbage":          {"project": "acme/shop", "cursor": "bogus"},
+		"past the end":     {"project": "acme/shop", "cursor": parts[0] + ":99999:" + parts[2]},
+		"another path":     {"project": "acme/shop", "path": "docs", "cursor": cursor},
+		"another project":  {"project": "acme/other", "cursor": cursor},
+		"another tree sha": {"project": "acme/shop", "cursor": fmt.Sprintf("%040d:1:%s", 1, parts[2])},
+	} {
+		if isErr, _, _ := call("list_tree", args); !isErr {
+			t.Errorf("%s: a bad cursor was accepted", name)
+		}
 	}
-	if isErr, _, _ := call("list_tree", map[string]any{"project": "acme/shop", "cursor": fmt.Sprintf("%040d:99999", 1)}); !isErr {
-		t.Error("a cursor of another tree was accepted")
+	if isErr, _, _ := call("list_tree", map[string]any{"project": "acme/shop", "cursor": cursor}); isErr {
+		t.Error("the cursor of this listing was refused")
+	}
+}
+
+func TestListTreeTooLargeAnswerIsAnError(t *testing.T) {
+	_, call := setup(t, map[string]handler{
+		"GET " + repo:                     reply(200, allMethods[:len(allMethods)-1]+`,"default_branch":"main"}`),
+		"GET " + repo + "/git/trees/main": reply(200, `{"sha":"`+strings.Repeat("a", 40)+`","truncated":false,"tree":[]}`),
+		"GET " + repo + "/git/trees/" + strings.Repeat("a", 40): func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+			_, _ = w.Write([]byte(`{"sha":"` + strings.Repeat("a", 40) + `","tree":[{"path":"` + strings.Repeat("x", 9<<20) + `"}]}`))
+		},
+	})
+	isErr, msg, _ := call("list_tree", map[string]any{"project": "acme/shop"})
+	if !isErr || !strings.Contains(msg, "smaller folder with path") {
+		t.Errorf("isErr=%v %.200s", isErr, msg)
 	}
 }
 

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,7 +27,7 @@ import (
 // path, mode (100644, 100755, 040000, 160000, 120000), type (blob, tree,
 // commit), sha and size (blobs only). Without recursive the answer has the top
 // level only. The tool walks the folders of path without recursive, then reads
-// the subtree with recursive. A page cursor is "<tree sha>:<offset>". It names
+// the subtree with recursive. A page cursor is "<tree sha>:<offset>:<hash>", where hash binds the cursor to the project and the path. It names
 // the tree by its sha, so the pages of one listing come from one tree even when
 // the branch moves.
 
@@ -66,6 +68,9 @@ func (v *service) getTree(ctx context.Context, r prRef, ref string, recursive bo
 	}
 	var t ghTree
 	if err := v.client.Do(ctx, kit.Request{Method: http.MethodGet, Path: repoPath(r, "git", "trees", ref), Query: q}, &t); err != nil {
+		if errors.Is(err, kit.ErrAnswerTooLarge) {
+			return nil, fmt.Errorf("%w: the tree is too large for one answer. List a smaller folder with path", kit.ErrInvalidInput)
+		}
 		return nil, fmt.Errorf("read the tree %s: %w", ref, err)
 	}
 	if t.SHA == "" {
@@ -90,7 +95,8 @@ func (v *service) listTree(ctx context.Context, _ *mcp.CallToolRequest, in fixlo
 	}
 	r := prRef{owner: owner, repo: repo}
 
-	treeSHA, offset, err := parseTreeCursor(in.Cursor)
+	bind := cursorBinding(in.Repo, path)
+	treeSHA, offset, err := parseTreeCursor(in.Cursor, bind)
 	if err != nil {
 		return nil, out, err
 	}
@@ -127,22 +133,36 @@ func (v *service) listTree(ctx context.Context, _ *mcp.CallToolRequest, in fixlo
 		return nil, out, err
 	}
 	if end < len(list) {
-		out.NextCursor = treeSHA + ":" + strconv.Itoa(end)
+		out.NextCursor = treeSHA + ":" + strconv.Itoa(end) + ":" + bind
 	}
 	return nil, out, nil
 }
 
-// parseTreeCursor reads "<tree sha>:<offset>".
-func parseTreeCursor(c string) (sha string, offset int, err error) {
+// cursorBinding is a short hash of the project and the path. A cursor holds it,
+// so a cursor of one listing does not work for another project or another path.
+func cursorBinding(project, path string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(project) + "\x00" + path))
+	return hex.EncodeToString(sum[:8])
+}
+
+// parseTreeCursor reads "<tree sha>:<offset>:<hash>". It refuses a cursor whose
+// hash is not bind.
+func parseTreeCursor(c, bind string) (sha string, offset int, err error) {
 	if c == "" {
 		return "", 0, nil
 	}
-	sha, n, ok := strings.Cut(c, ":")
-	offset, perr := strconv.Atoi(n)
-	if !ok || perr != nil || offset < 0 || len(sha) < 40 {
+	parts := strings.Split(c, ":")
+	if len(parts) != 3 || len(parts[0]) < 40 {
 		return "", 0, fmt.Errorf("%w: the cursor is not a cursor of list_tree", kit.ErrInvalidInput)
 	}
-	return sha, offset, nil
+	offset, perr := strconv.Atoi(parts[1])
+	if perr != nil || offset < 0 {
+		return "", 0, fmt.Errorf("%w: the cursor is not a cursor of list_tree", kit.ErrInvalidInput)
+	}
+	if parts[2] != bind {
+		return "", 0, fmt.Errorf("%w: the cursor is of another project or another path. Start again without a cursor", kit.ErrInvalidInput)
+	}
+	return parts[0], offset, nil
 }
 
 // subtreeSHA returns the sha of the tree at a path of a ref. For an empty path

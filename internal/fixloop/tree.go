@@ -27,8 +27,9 @@ const (
 	// the limit of the recursive tree of GitHub (100,000 entries). A tree with
 	// more entries is cut, and the result has truncated true.
 	MaxTreeEntries = 100000
-	// MaxCursorLen bounds a page cursor.
-	MaxCursorLen = 200
+	// MaxCursorLen bounds a page cursor. A page token of GitLab is the base64 of
+	// a file name and an object id, so it grows with the path.
+	MaxCursorLen = 2000
 )
 
 // TreeInput is the argument of list_tree.
@@ -67,7 +68,10 @@ type TreeResult struct {
 	Reason     string      `json:"reason,omitempty"`
 }
 
-var cursorFormat = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
+// cursorFormat allows the characters of standard base64 (A-Za-z0-9+/=) and the
+// characters of the cursor of the GitHub tool. The cursor is opaque. The server
+// checks its meaning.
+var cursorFormat = regexp.MustCompile(`^[A-Za-z0-9._:+/=-]+$`)
 
 // CheckTree checks the part of TreeInput that does not depend on the Git host
 // and returns the path without a trailing slash.

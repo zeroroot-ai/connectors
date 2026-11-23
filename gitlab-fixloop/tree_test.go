@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"net/http"
 	"net/url"
 	"strings"
@@ -65,10 +66,23 @@ func TestListTreeTypesAndQuery(t *testing.T) {
 	}
 }
 
+// realToken has the shape that Gitaly gives: the standard base64 of
+// {"file_name":...,"tree_oid":...}. It has padding, it has + or /, and a long
+// path makes it longer than 200 characters.
+func realToken() string {
+	long := strings.Repeat("deeply/nested/folder-with-a-long-name/", 8) + "file?>>.go"
+	raw := `{"file_name":"` + long + `","tree_oid":"` + strings.Repeat("ab", 20) + `"}`
+	return base64.StdEncoding.EncodeToString([]byte(raw))
+}
+
 func TestListTreeKeysetPages(t *testing.T) {
 	old := treePage
 	treePage = 2
 	t.Cleanup(func() { treePage = old })
+	tok := realToken()
+	if len(tok) < 300 || !strings.HasSuffix(tok, "=") && !strings.ContainsAny(tok, "+/") {
+		t.Fatalf("the token has no real shape: %s", tok)
+	}
 	_, call := setup(t, routeMap{
 		"GET " + projectPath: reply(200, projectInfo),
 		"GET " + treePath: func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
@@ -78,9 +92,9 @@ func TestListTreeKeysetPages(t *testing.T) {
 			}
 			switch r.URL.Query().Get("page_token") {
 			case "":
-				w.Header().Set("Link", `<https://gitlab.example.com/api/v4/projects/5/repository/tree?page_token=TOK2&pagination=keyset>; rel="next"`)
+				w.Header().Set("Link", `<https://gitlab.example.com/api/v4/projects/5/repository/tree?page_token=`+url.QueryEscape(tok)+`&pagination=keyset>; rel="next"`)
 				_, _ = w.Write([]byte("[" + treeNode("a1", "a", "blob", "100644") + "," + treeNode("a2", "b", "blob", "100644") + "]"))
-			case "TOK2":
+			case tok:
 				_, _ = w.Write([]byte("[" + treeNode("a3", "c", "blob", "100644") + "]"))
 			default:
 				http.Error(w, `{"message":"bad token"}`, http.StatusBadRequest)
@@ -88,12 +102,47 @@ func TestListTreeKeysetPages(t *testing.T) {
 		},
 	})
 	_, _, p1 := call("list_tree", map[string]any{"project": "acme/shop"})
-	if p1["next_cursor"] != "TOK2" || len(p1["entries"].([]any)) != 2 || p1["truncated"] != false {
+	if p1["next_cursor"] != tok || len(p1["entries"].([]any)) != 2 || p1["truncated"] != false {
 		t.Fatalf("page 1 = %v", p1)
 	}
-	_, _, p2 := call("list_tree", map[string]any{"project": "acme/shop", "cursor": "TOK2"})
-	if p2["next_cursor"] != nil || len(p2["entries"].([]any)) != 1 || p2["truncated"] != false {
-		t.Errorf("page 2 = %v", p2)
+	isErr, msg, p2 := call("list_tree", map[string]any{"project": "acme/shop", "cursor": tok})
+	if isErr || p2["next_cursor"] != nil || len(p2["entries"].([]any)) != 1 || p2["truncated"] != false {
+		t.Errorf("page 2 = %v %s", p2, msg)
+	}
+}
+
+// An empty list for a path is no proof of an empty folder. A folder of git is never empty.
+func TestListTreeEmptyListForAPath(t *testing.T) {
+	parent := func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+		switch {
+		case r.URL.Query().Get("recursive") == "true":
+			_, _ = w.Write([]byte("[]")) // GitLab before 17.7: a missing folder or a file gives []
+		case r.URL.Query().Get("path") == "src":
+			_, _ = w.Write([]byte("[" + treeNode("f1", "src/main.go", "blob", "100644") + "," + treeNode("d1", "src/db", "tree", "040000") + "]"))
+		case r.URL.Query().Get("path") == "":
+			_, _ = w.Write([]byte("[" + treeNode("f2", "top.txt", "blob", "100644") + "," + treeNode("d2", "src", "tree", "040000") + "]"))
+		default:
+			http.Error(w, `{"message":"404 Tree Not Found"}`, http.StatusNotFound)
+		}
+	}
+	for name, c := range map[string]struct{ path, want string }{
+		"a file":                      {"src/main.go", "is a file"},
+		"a file at the root":          {"top.txt", "is a file"},
+		"a missing folder":            {"src/nope", "is not a folder"},
+		"a missing root folder":       {"nope", "is not a folder"},
+		"a folder with an empty list": {"src/db", "cannot tell"},
+		"a missing parent":            {"x/y/z", "404"},
+	} {
+		_, call := setup(t, routeMap{"GET " + projectPath: reply(200, projectInfo), "GET " + treePath: parent})
+		isErr, msg, out := call("list_tree", map[string]any{"project": "acme/shop", "path": c.path})
+		if !isErr || !strings.Contains(msg, c.want) {
+			t.Errorf("%s: isErr=%v %s %v", name, isErr, msg, out)
+		}
+	}
+	// With no path, an empty list is an empty repository.
+	_, call := setup(t, routeMap{"GET " + projectPath: reply(200, projectInfo), "GET " + treePath: reply(200, "[]")})
+	if isErr, _, out := call("list_tree", map[string]any{"project": "acme/shop"}); isErr || out["truncated"] != false {
+		t.Errorf("empty repository: %v", out)
 	}
 }
 

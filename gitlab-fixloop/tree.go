@@ -25,7 +25,8 @@ import (
 // the next page in the Link header (rel="next") with a page_token. The page
 // does not describe the header, so a full page with no next link is not taken
 // for the last page: the tool reports truncated, because it cannot tell. The
-// cursor of the tool is the page_token.
+// cursor of the tool is the page_token. It is the base64 of a file name and an
+// object id (Gitaly), so it has the characters + / and =, and it grows with the path.
 
 // treePage is the number of entries of one page. A test sets it.
 var treePage = fixloop.GitLabTreePage
@@ -93,11 +94,18 @@ func (v *service) listTree(ctx context.Context, _ *mcp.CallToolRequest, in fixlo
 		return nil, out, fmt.Errorf("read the tree (the path or the ref may not exist): %w", err)
 	}
 	for _, e := range list {
-		typ := fixloop.TreeType(e.Mode, map[string]string{"tree": "tree", "blob": "blob", "commit": "commit"}[e.Type])
+		typ := fixloop.TreeType(e.Mode, e.Type)
 		if typ == "" {
 			return nil, out, fmt.Errorf("read the tree: GitLab gave the entry type %q for %s", e.Type, e.Path)
 		}
 		out.Entries = append(out.Entries, fixloop.TreeEntry{Path: e.Path, Type: typ, SHA: e.ID, Mode: e.Mode})
+	}
+	if len(list) == 0 && path != "" && in.Cursor == "" {
+		// A missing folder (GitLab before 17.7) and a file both give an empty list. A
+		// folder of git is never empty, so check that the path is a folder.
+		if err := v.checkFolder(ctx, in.Repo, out.Ref, path); err != nil {
+			return nil, out, err
+		}
 	}
 	next, more, err := nextPageToken(hdr.Get("Link"))
 	switch {
@@ -130,4 +138,54 @@ func nextPageToken(link string) (token string, more bool, err error) {
 		return u.Query().Get("page_token"), true, nil
 	}
 	return "", false, nil
+}
+
+// maxParentPages bounds the pages of the parent folder that checkFolder reads.
+const maxParentPages = 10
+
+// checkFolder makes sure that path is a folder at the ref. It lists the parent
+// folder without recursion and looks for an entry of type tree. It returns an
+// error when the path is a file, is missing, or is not found in the pages that
+// the tool reads.
+func (v *service) checkFolder(ctx context.Context, project, ref, path string) error {
+	parent := ""
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		parent = path[:i]
+	}
+	token := ""
+	for range maxParentPages {
+		q := url.Values{"ref": {ref}, "pagination": {"keyset"}, "per_page": {strconv.Itoa(fixloop.GitLabTreePage)}}
+		if parent != "" {
+			q.Set("path", parent)
+		}
+		if token != "" {
+			q.Set("page_token", token)
+		}
+		var list []glTreeEntry
+		var hdr http.Header
+		err := v.client.Do(ctx, kit.Request{
+			Method: http.MethodGet, Path: kit.Path("projects", project, "repository", "tree"), Query: q, ResponseHeader: &hdr,
+		}, &list)
+		if err != nil {
+			return fmt.Errorf("check that %s is a folder (the path or the ref may not exist): %w", path, err)
+		}
+		for _, e := range list {
+			if e.Path != path {
+				continue
+			}
+			if e.Type == "tree" {
+				return fmt.Errorf("read the tree: GitLab gave an empty list for the folder %s, so the tool cannot tell that the list is complete", path)
+			}
+			return fmt.Errorf("%w: %s is a file, not a folder", kit.ErrInvalidInput, path)
+		}
+		next, more, err := nextPageToken(hdr.Get("Link"))
+		if err != nil {
+			return err
+		}
+		if !more {
+			return fmt.Errorf("%w: %s is not a folder at the ref %s", kit.ErrInvalidInput, path, ref)
+		}
+		token = next
+	}
+	return fmt.Errorf("%w: the tool could not find %s in the parent folder, so it cannot tell that it is a folder", kit.ErrInvalidInput, path)
 }
