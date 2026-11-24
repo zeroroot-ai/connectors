@@ -41,6 +41,7 @@ check-images:
 	scripts/check-servers_test.sh
 	scripts/digest-table_test.sh
 	scripts/verify-notes_test.sh
+	scripts/notes-with-digests_test.sh
 	scripts/check-servers.sh .
 
 ## image: build the image of one server. Usage: make image NAME=<tool>

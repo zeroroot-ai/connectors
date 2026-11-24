@@ -11,6 +11,8 @@ name: image
 # pushes main and then the tag, both at the same commit. The main run skips
 # that commit, so the tag run is the only build. The tag run lists the digest
 # that the version tag resolves to, and checks the notes after it writes them.
+# The tag `latest` does not move to a release commit. It moves with a main
+# build, and the main run skips a release commit.
 #
 # Trigger discipline: push:main (sha-tagged), the release tag that
 # release-please cuts (`v*`), and workflow_dispatch. Never on a pull request,
@@ -112,9 +114,10 @@ jobs:
           scripts/digest-table.sh "$SERVERS" "$IMAGE_TAG" | tee table.md >> "$GITHUB_STEP_SUMMARY"
           if [ "$REF_TYPE" = tag ]; then
             gh release view "$REF_NAME" --repo "$GITHUB_REPOSITORY" --json body -q .body > notes.md
-            { cat notes.md; echo; echo "## Image digests"; echo; cat table.md; } > notes-new.md
+            # A rerun replaces the old digest section, so the notes keep one.
+            scripts/notes-with-digests.sh notes.md table.md > notes-new.md
             gh release edit "$REF_NAME" --repo "$GITHUB_REPOSITORY" --notes-file notes-new.md
             # Read the notes again. Each digest must equal the digest of the version tag.
             gh release view "$REF_NAME" --repo "$GITHUB_REPOSITORY" --json body -q .body > notes-final.md
-            scripts/verify-notes.sh notes-final.md "$IMAGE_TAG"
+            scripts/verify-notes.sh notes-final.md "$IMAGE_TAG" "$SERVERS"
           fi
