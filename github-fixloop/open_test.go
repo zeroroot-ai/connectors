@@ -304,6 +304,43 @@ func TestCloseMergeRequest(t *testing.T) {
 	}
 }
 
+func TestCloseMergeRequestPostsTheCommentFirst(t *testing.T) {
+	m, call := setup(t, map[string]handler{
+		"GET " + pr7:                          reply(200, openPR("clean")),
+		"POST " + repo + "/issues/7/comments": reply(201, `{"id":1}`),
+		"PATCH " + pr7:                        reply(200, openPR("clean")),
+	})
+	isErr, text, out := call("close_merge_request", map[string]any{"merge_request": ref, "comment": "job j1 failed"})
+	if isErr || out["closed"] != true {
+		t.Fatalf("isErr=%v %s %v", isErr, text, out)
+	}
+	if body := m.bodies["POST "+repo+"/issues/7/comments"]; body["body"] != "job j1 failed" || len(body) != 1 {
+		t.Errorf("comment body = %v", body)
+	}
+	if got := m.calls; len(got) != 3 || !strings.HasPrefix(got[1], "POST") || !strings.HasPrefix(got[2], "PATCH") {
+		t.Errorf("calls = %v, want the comment before the close", got)
+	}
+}
+
+func TestCloseMergeRequestPostsNoCommentOnAClosedOne(t *testing.T) {
+	m, call := setup(t, map[string]handler{"GET " + pr7: reply(200, pullJSON("closed", false, "null", "unknown", headSHA))})
+	isErr, _, out := call("close_merge_request", map[string]any{"merge_request": ref, "comment": "job j1 failed"})
+	if isErr || out["closed"] != false || out["state"] != "closed" {
+		t.Errorf("closed already: isErr=%v %v", isErr, out)
+	}
+	if len(m.calls) != 1 {
+		t.Errorf("calls = %v, want one read", m.calls)
+	}
+}
+
+func TestCloseMergeRequestRefusesALongComment(t *testing.T) {
+	m, call := setup(t, nil)
+	isErr, _, _ := call("close_merge_request", map[string]any{"merge_request": ref, "comment": strings.Repeat("x", fixloop.MaxCommentLen+1)})
+	if !isErr || len(m.calls) != 0 {
+		t.Errorf("isErr=%v calls=%v", isErr, m.calls)
+	}
+}
+
 func TestCloseIsNotAnErrorWhenClosedAndRefusesMerged(t *testing.T) {
 	m, call := setup(t, map[string]handler{"GET " + pr7: reply(200, pullJSON("closed", false, "null", "unknown", headSHA))})
 	isErr, _, out := call("close_merge_request", map[string]any{"merge_request": ref})

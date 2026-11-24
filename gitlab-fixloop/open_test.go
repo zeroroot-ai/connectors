@@ -293,6 +293,44 @@ func TestCloseMergeRequest(t *testing.T) {
 	}
 }
 
+func TestCloseMergeRequestPostsTheCommentFirst(t *testing.T) {
+	m, call := setup(t, routeMap{
+		"GET " + api + mr7:             reply(200, openMR("success", "mergeable")),
+		"POST " + api + mr7 + "/notes": reply(201, `{"id":1}`),
+		"PUT " + api + mr7:             reply(200, openMR("success", "mergeable")),
+	})
+	isErr, text, out := call("close_merge_request", map[string]any{"merge_request": ref, "comment": "job j1 failed"})
+	if isErr || out["closed"] != true {
+		t.Fatalf("isErr=%v %s %v", isErr, text, out)
+	}
+	if body := m.bodies["POST "+api+mr7+"/notes"]; body["body"] != "job j1 failed" || len(body) != 1 {
+		t.Errorf("note body = %v", body)
+	}
+	if got := m.calls; len(got) != 3 || !strings.HasPrefix(got[1], "POST") || !strings.HasPrefix(got[2], "PUT") {
+		t.Errorf("calls = %v, want the comment before the close", got)
+	}
+}
+
+func TestCloseMergeRequestPostsNoCommentOnAClosedOne(t *testing.T) {
+	closedMR := strings.Replace(openMR("success", "mergeable"), `"state":"opened"`, `"state":"closed"`, 1)
+	m, call := setup(t, routeMap{"GET " + api + mr7: reply(200, closedMR)})
+	isErr, _, out := call("close_merge_request", map[string]any{"merge_request": ref, "comment": "job j1 failed"})
+	if isErr || out["closed"] != false || out["state"] != "closed" {
+		t.Errorf("closed already: isErr=%v %v", isErr, out)
+	}
+	if len(m.calls) != 1 {
+		t.Errorf("calls = %v, want one read", m.calls)
+	}
+}
+
+func TestCloseMergeRequestRefusesALongComment(t *testing.T) {
+	m, call := setup(t, nil)
+	isErr, _, _ := call("close_merge_request", map[string]any{"merge_request": ref, "comment": strings.Repeat("x", fixloop.MaxCommentLen+1)})
+	if !isErr || len(m.calls) != 0 {
+		t.Errorf("isErr=%v calls=%v", isErr, m.calls)
+	}
+}
+
 func TestCloseIsNotAnErrorWhenClosedAndRefusesMerged(t *testing.T) {
 	closedMR := strings.Replace(openMR("success", "mergeable"), `"state":"opened"`, `"state":"closed"`, 1)
 	m, call := setup(t, routeMap{"GET " + api + mr7: reply(200, closedMR)})

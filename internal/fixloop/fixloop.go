@@ -35,6 +35,17 @@ type MergeRequestInput struct {
 	MergeRequest string `json:"merge_request" jsonschema:"URL of the merge request, or its reference: group/project!12 on GitLab, owner/repo#12 on GitHub"`
 }
 
+// MaxCommentLen is the longest comment that close_merge_request accepts.
+const MaxCommentLen = 4000
+
+// CloseInput is the argument of close_merge_request. Comment is optional. When
+// it is set, the tool posts it on the merge request before it closes the merge
+// request. The tool posts nothing on a merge request that is closed already.
+type CloseInput struct {
+	MergeRequest string `json:"merge_request" jsonschema:"URL of the merge request, or its reference: group/project!12 on GitLab, owner/repo#12 on GitHub"`
+	Comment      string `json:"comment,omitempty" jsonschema:"optional text that the tool posts on the merge request before it closes it"`
+}
+
 // State is the result of merge_request_state. The daemon reads state,
 // pipeline_green, reason, at, source_branch and created_at. The other fields
 // are for the agent. The daemon links the merge request of a fix job to a

@@ -49,17 +49,21 @@ func (v *service) registerOpen(s *mcp.Server, log *slog.Logger) {
 	kit.AddTool(s, log, &mcp.Tool{
 		Name: "close_merge_request",
 		Description: "Close one open GitHub pull request with no merge. It does not delete the branch. " +
+			"With a comment, it posts the comment on the pull request first, and posts nothing on a closed one. " +
 			"It refuses a pull request that is merged. A pull request that is closed already is not an error. " +
 			"This is the undo of open_merge_request. A person can reopen the pull request. No tool of this server reopens it.",
 		Annotations: kit.Reversible("Close GitHub pull request", true),
 	}, v.closeMergeRequest)
 }
 
-func (v *service) closeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in fixloop.MergeRequestInput) (*mcp.CallToolResult, fixloop.CloseResult, error) {
+func (v *service) closeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in fixloop.CloseInput) (*mcp.CallToolResult, fixloop.CloseResult, error) {
 	out := fixloop.CloseResult{}
 	r, err := v.parseRef(in.MergeRequest)
 	if err != nil {
 		return nil, out, err
+	}
+	if err := fixloop.CheckComment(in.Comment); err != nil {
+		return nil, out, fmt.Errorf("check comment: %w", err)
 	}
 	out.MergeRequest = r.key()
 	pr, err := v.getPR(ctx, r)
@@ -72,6 +76,17 @@ func (v *service) closeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest,
 	case pr.State == "closed":
 		out.State = fixloop.Closed
 		return nil, out, nil
+	}
+	if in.Comment != "" {
+		// A comment is not idempotent, so the client never repeats it. The
+		// answer of a lost write is outcome_unknown.
+		err = v.client.Do(ctx, kit.Request{
+			Method: http.MethodPost, Path: repoPath(r, "issues", strconv.Itoa(r.number), "comments"),
+			JSON: map[string]any{"body": in.Comment},
+		}, nil)
+		if err != nil {
+			return nil, out, fmt.Errorf("post the comment: %w", err)
+		}
 	}
 	err = v.client.Do(ctx, kit.Request{
 		Method: http.MethodPatch, Path: repoPath(r, "pulls", strconv.Itoa(r.number)),
