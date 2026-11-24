@@ -336,7 +336,7 @@ func TestCloseMergeRequestPostsTheCommentOnceAfterALostAnswer(t *testing.T) {
 			for _, b := range stored {
 				items = append(items, `{"body":`+strconv.Quote(b)+`}`)
 			}
-			w.WriteHeader(200)
+			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("[" + strings.Join(items, ",") + "]"))
 		},
 		"POST " + repo + "/issues/7/comments": func(w http.ResponseWriter, r *http.Request, body map[string]any) {
