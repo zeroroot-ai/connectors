@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -290,6 +291,136 @@ func TestCloseMergeRequest(t *testing.T) {
 	}
 	if body := m.bodies["PUT "+api+mr7]; body["state_event"] != "close" || len(body) != 1 {
 		t.Errorf("body = %v", body)
+	}
+}
+
+func TestCloseMergeRequestPostsTheCommentFirst(t *testing.T) {
+	m, call := setup(t, routeMap{
+		"GET " + api + mr7:             reply(200, openMR("success", "mergeable")),
+		"GET " + api + mr7 + "/notes":  reply(200, `[{"body":"another note"}]`),
+		"POST " + api + mr7 + "/notes": reply(201, `{"id":1}`),
+		"PUT " + api + mr7:             reply(200, openMR("success", "mergeable")),
+	})
+	isErr, text, out := call("close_merge_request", map[string]any{"merge_request": ref, "comment": "job j1 failed"})
+	if isErr || out["closed"] != true {
+		t.Fatalf("isErr=%v %s %v", isErr, text, out)
+	}
+	if body := m.bodies["POST "+api+mr7+"/notes"]; body["body"] != "job j1 failed" || len(body) != 1 {
+		t.Errorf("note body = %v", body)
+	}
+	if got := m.calls; len(got) != 4 || !strings.HasPrefix(got[1], "GET") || !strings.HasPrefix(got[2], "POST") ||
+		!strings.HasPrefix(got[3], "PUT") {
+		t.Errorf("calls = %v, want the comment before the close", got)
+	}
+}
+
+// A comment with the same body is posted once. A repeat of the call, such as
+// the retry after a lost answer, finds the note and posts nothing.
+func TestCloseMergeRequestPostsTheCommentOnceAfterALostAnswer(t *testing.T) {
+	var stored []string
+	m, call := setup(t, routeMap{
+		"GET " + api + mr7: reply(200, openMR("success", "mergeable")),
+		"GET " + api + mr7 + "/notes": func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+			items := make([]string, 0, len(stored))
+			for _, b := range stored {
+				items = append(items, `{"body":`+strconv.Quote(b)+`}`)
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("[" + strings.Join(items, ",") + "]"))
+		},
+		"POST " + api + mr7 + "/notes": func(w http.ResponseWriter, r *http.Request, body map[string]any) {
+			stored = append(stored, body["body"].(string)) // the write ran, and the answer is lost
+			dropped(w, r, body)
+		},
+		"PUT " + api + mr7: reply(200, openMR("success", "mergeable")),
+	})
+	args := map[string]any{"merge_request": ref, "comment": "Fix job job-1 failed."}
+	if isErr, _, _ := call("close_merge_request", args); !isErr {
+		t.Fatal("the lost answer was not an error")
+	}
+	isErr, text, out := call("close_merge_request", args)
+	if isErr || out["closed"] != true {
+		t.Fatalf("retry: isErr=%v %s %v", isErr, text, out)
+	}
+	if n := m.called("POST " + api + mr7 + "/notes"); n != 1 {
+		t.Errorf("the comment was posted %d times, want once", n)
+	}
+}
+
+// GitLab gets the notes newest first, and the tool reads at most MaxCommentPages
+// pages. A match on page 2 is found, and a page of exactly 100 notes ends the read.
+func TestCloseMergeRequestFindsTheNoteOnTheNewestPages(t *testing.T) {
+	cases := []struct {
+		name      string
+		n         int
+		body      string
+		wantPosts int
+		wantReads int
+	}{
+		{"match on page 1, the newest", 150, "n-120", 0, 1},
+		{"match on page 2", 150, "n-1", 0, 2},
+		{"exactly 100 notes, no match posts", 100, "other", 1, 1},
+		{"101 notes, no match posts", 101, "other", 1, 2},
+		{"more pages than the bound, no match posts", 2500, "other", 1, fixloop.MaxCommentPages},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var reads int
+			var query url.Values
+			m, call := setup(t, routeMap{
+				"GET " + api + mr7: reply(200, openMR("success", "mergeable")),
+				"GET " + api + mr7 + "/notes": func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+					reads++
+					query = r.URL.Query()
+					page, _ := strconv.Atoi(query.Get("page"))
+					var items []string
+					for k := (page-1)*100 + 1; k <= min(page*100, c.n); k++ {
+						// Newest first: the note n-N is the newest on page 1.
+						items = append(items, `{"body":"n-`+strconv.Itoa(c.n-k+1)+`"}`)
+					}
+					if page*100 < c.n {
+						w.Header().Set("X-Next-Page", strconv.Itoa(page+1))
+					}
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte("[" + strings.Join(items, ",") + "]"))
+				},
+				"POST " + api + mr7 + "/notes": reply(201, `{"id":1}`),
+				"PUT " + api + mr7:             reply(200, openMR("success", "mergeable")),
+			})
+			isErr, text, out := call("close_merge_request", map[string]any{"merge_request": ref, "comment": c.body})
+			if isErr || out["closed"] != true {
+				t.Fatalf("isErr=%v %s %v", isErr, text, out)
+			}
+			if n := m.called("POST " + api + mr7 + "/notes"); n != c.wantPosts {
+				t.Errorf("posts = %d, want %d", n, c.wantPosts)
+			}
+			if reads != c.wantReads {
+				t.Errorf("reads = %d, want %d", reads, c.wantReads)
+			}
+			if query.Get("order_by") != "created_at" || query.Get("sort") != "desc" {
+				t.Errorf("query = %v, want the newest first", query)
+			}
+		})
+	}
+}
+
+func TestCloseMergeRequestPostsNoCommentOnAClosedOne(t *testing.T) {
+	closedMR := strings.Replace(openMR("success", "mergeable"), `"state":"opened"`, `"state":"closed"`, 1)
+	m, call := setup(t, routeMap{"GET " + api + mr7: reply(200, closedMR)})
+	isErr, _, out := call("close_merge_request", map[string]any{"merge_request": ref, "comment": "job j1 failed"})
+	if isErr || out["closed"] != false || out["state"] != "closed" {
+		t.Errorf("closed already: isErr=%v %v", isErr, out)
+	}
+	if len(m.calls) != 1 {
+		t.Errorf("calls = %v, want one read", m.calls)
+	}
+}
+
+func TestCloseMergeRequestRefusesALongComment(t *testing.T) {
+	m, call := setup(t, nil)
+	isErr, _, _ := call("close_merge_request", map[string]any{"merge_request": ref, "comment": strings.Repeat("x", fixloop.MaxCommentLen+1)})
+	if !isErr || len(m.calls) != 0 {
+		t.Errorf("isErr=%v calls=%v", isErr, m.calls)
 	}
 }
 

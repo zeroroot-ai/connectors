@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -40,17 +41,21 @@ func (v *service) registerOpen(s *mcp.Server, log *slog.Logger) {
 	kit.AddTool(s, log, &mcp.Tool{
 		Name: "close_merge_request",
 		Description: "Close one open GitLab merge request with no merge. It does not delete the branch. " +
+			"With a comment, it posts the comment on the merge request first, unless a note with the same text is there, and posts nothing on a closed one. " +
 			"It refuses a merge request that is merged. A merge request that is closed already is not an error. " +
 			"This is the undo of open_merge_request. A person can reopen the merge request. No tool of this server reopens it.",
 		Annotations: kit.Reversible("Close GitLab merge request", true),
 	}, v.closeMergeRequest)
 }
 
-func (v *service) closeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in fixloop.MergeRequestInput) (*mcp.CallToolResult, fixloop.CloseResult, error) {
+func (v *service) closeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in fixloop.CloseInput) (*mcp.CallToolResult, fixloop.CloseResult, error) {
 	out := fixloop.CloseResult{}
 	project, iid, err := v.parseRef(in.MergeRequest)
 	if err != nil {
 		return nil, out, err
+	}
+	if err := fixloop.CheckComment(in.Comment); err != nil {
+		return nil, out, fmt.Errorf("check comment: %w", err)
 	}
 	out.MergeRequest = refKey(project, iid)
 	mr, err := v.getMR(ctx, project, iid)
@@ -63,6 +68,25 @@ func (v *service) closeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest,
 	case "closed":
 		out.State = fixloop.Closed
 		return nil, out, nil
+	}
+	posted := false
+	if in.Comment != "" {
+		posted, err = v.hasComment(ctx, project, iid, in.Comment)
+		if err != nil {
+			return nil, out, err
+		}
+	}
+	if in.Comment != "" && !posted {
+		// A note is not idempotent, so the client never repeats it. The tool
+		// reads the notes first, so a repeat of the whole call after a lost
+		// answer posts the comment once.
+		err = v.client.Do(ctx, kit.Request{
+			Method: http.MethodPost, Path: mrPath(project, iid, "notes"),
+			JSON: map[string]any{"body": in.Comment},
+		}, nil)
+		if err != nil {
+			return nil, out, fmt.Errorf("post the comment: %w", err)
+		}
 	}
 	err = v.client.Do(ctx, kit.Request{
 		Method: http.MethodPut, Path: mrPath(project, iid),
@@ -362,4 +386,39 @@ func (v *service) blobAt(ctx context.Context, project, path, ref string) (string
 		return "", fmt.Errorf("read the blob of %s: %w", path, err)
 	}
 	return f.BlobID, nil
+}
+
+// hasComment reports whether the merge request holds a note with exactly this
+// body. The caller makes the body unique, so a match is the comment of an
+// earlier call.
+func (v *service) hasComment(ctx context.Context, project string, iid int, body string) (bool, error) {
+	for page := 1; page <= fixloop.MaxCommentPages; page++ {
+		var list []struct {
+			Body string `json:"body"`
+		}
+		var hdr http.Header
+		err := v.client.Do(ctx, kit.Request{
+			Method: http.MethodGet, Path: mrPath(project, iid, "notes"), ResponseHeader: &hdr,
+			// GitLab lists the notes newest first when the order is explicit, so the
+			// notes of an earlier call are on the first pages.
+			Query: url.Values{
+				"per_page": {strconv.Itoa(fixloop.CommentPageSize)}, "page": {strconv.Itoa(page)},
+				"order_by": {"created_at"}, "sort": {"desc"},
+			},
+		}, &list)
+		if err != nil {
+			return false, fmt.Errorf("read the notes: %w", err)
+		}
+		for _, c := range list {
+			if c.Body == body {
+				return true, nil
+			}
+		}
+		// GitLab names the next page in X-Next-Page. A page of exactly 100 notes
+		// with no next page is the whole list.
+		if hdr.Get("X-Next-Page") == "" {
+			return false, nil
+		}
+	}
+	return false, nil
 }

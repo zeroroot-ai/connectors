@@ -49,17 +49,21 @@ func (v *service) registerOpen(s *mcp.Server, log *slog.Logger) {
 	kit.AddTool(s, log, &mcp.Tool{
 		Name: "close_merge_request",
 		Description: "Close one open GitHub pull request with no merge. It does not delete the branch. " +
+			"With a comment, it posts the comment on the pull request first, unless a comment with the same text is there, and posts nothing on a closed one. " +
 			"It refuses a pull request that is merged. A pull request that is closed already is not an error. " +
 			"This is the undo of open_merge_request. A person can reopen the pull request. No tool of this server reopens it.",
 		Annotations: kit.Reversible("Close GitHub pull request", true),
 	}, v.closeMergeRequest)
 }
 
-func (v *service) closeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in fixloop.MergeRequestInput) (*mcp.CallToolResult, fixloop.CloseResult, error) {
+func (v *service) closeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in fixloop.CloseInput) (*mcp.CallToolResult, fixloop.CloseResult, error) {
 	out := fixloop.CloseResult{}
 	r, err := v.parseRef(in.MergeRequest)
 	if err != nil {
 		return nil, out, err
+	}
+	if err := fixloop.CheckComment(in.Comment); err != nil {
+		return nil, out, fmt.Errorf("check comment: %w", err)
 	}
 	out.MergeRequest = r.key()
 	pr, err := v.getPR(ctx, r)
@@ -72,6 +76,25 @@ func (v *service) closeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest,
 	case pr.State == "closed":
 		out.State = fixloop.Closed
 		return nil, out, nil
+	}
+	posted := false
+	if in.Comment != "" {
+		posted, err = v.hasComment(ctx, r, in.Comment)
+		if err != nil {
+			return nil, out, err
+		}
+	}
+	if in.Comment != "" && !posted {
+		// A comment is not idempotent, so the client never repeats it. The tool
+		// reads the comments first, so a repeat of the whole call after a lost
+		// answer posts the comment once.
+		err = v.client.Do(ctx, kit.Request{
+			Method: http.MethodPost, Path: repoPath(r, "issues", strconv.Itoa(r.number), "comments"),
+			JSON: map[string]any{"body": in.Comment},
+		}, nil)
+		if err != nil {
+			return nil, out, fmt.Errorf("post the comment: %w", err)
+		}
 	}
 	err = v.client.Do(ctx, kit.Request{
 		Method: http.MethodPatch, Path: repoPath(r, "pulls", strconv.Itoa(r.number)),
@@ -550,4 +573,80 @@ func (v *service) checkModes(ctx context.Context, r prRef, commit string, in fix
 		}
 	}
 	return "", nil
+}
+
+// hasComment reports whether the pull request holds a comment with exactly this
+// body. The caller makes the body unique, so a match is the comment of an
+// earlier call.
+//
+// GitHub lists the comments of a pull request oldest first. A comment of an
+// earlier call is among the newest, so the tool reads page 1, which also gives
+// the Link header, and then walks back from the last page. It makes at most
+// MaxCommentPages reads. A pull request with more comments than that is read
+// from its newest end, and the oldest comments after page 1 are not read.
+func (v *service) hasComment(ctx context.Context, r prRef, body string) (bool, error) {
+	var hdr http.Header
+	list, err := v.commentPage(ctx, r, 1, &hdr)
+	if err != nil {
+		return false, err
+	}
+	if containsBody(list, body) {
+		return true, nil
+	}
+	last := lastPageOf(hdr.Get("Link"))
+	for page := last; page >= 2 && last-page < fixloop.MaxCommentPages-1; page-- {
+		if list, err = v.commentPage(ctx, r, page, nil); err != nil {
+			return false, err
+		}
+		if containsBody(list, body) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+type commentItem struct {
+	Body string `json:"body"`
+}
+
+func containsBody(list []commentItem, body string) bool {
+	for _, c := range list {
+		if c.Body == body {
+			return true
+		}
+	}
+	return false
+}
+
+func (v *service) commentPage(ctx context.Context, r prRef, page int, hdr *http.Header) ([]commentItem, error) {
+	var list []commentItem
+	err := v.client.Do(ctx, kit.Request{
+		Method: http.MethodGet, Path: repoPath(r, "issues", strconv.Itoa(r.number), "comments"),
+		Query:          url.Values{"per_page": {strconv.Itoa(fixloop.CommentPageSize)}, "page": {strconv.Itoa(page)}},
+		ResponseHeader: hdr,
+	}, &list)
+	if err != nil {
+		return nil, fmt.Errorf("read the comments: %w", err)
+	}
+	return list, nil
+}
+
+// lastPageOf returns the page number of the rel="last" link of a Link header.
+// It returns 1 when the header has none, which means one page.
+func lastPageOf(link string) int {
+	for _, seg := range strings.Split(link, ",") {
+		parts := strings.Split(seg, ";")
+		if len(parts) < 2 || !strings.Contains(parts[1], `rel="last"`) {
+			continue
+		}
+		raw := strings.Trim(strings.TrimSpace(parts[0]), "<>")
+		u, err := url.Parse(raw)
+		if err != nil {
+			return 1
+		}
+		if n, err := strconv.Atoi(u.Query().Get("page")); err == nil && n >= 1 {
+			return n
+		}
+	}
+	return 1
 }
