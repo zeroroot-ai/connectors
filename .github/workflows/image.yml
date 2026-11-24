@@ -7,6 +7,13 @@ name: image
 # needs no edit here. The digests job prints the digest of each image to the
 # run summary. On a release tag it also adds the digests to the release notes.
 #
+# One build for each release commit (connectors#41). The merge of a release PR
+# pushes main and then the tag, both at the same commit. The main run skips
+# that commit, so the tag run is the only build. The tag run lists the digest
+# that the version tag resolves to, and checks the notes after it writes them.
+# The tag `latest` does not move to a release commit. It moves with a main
+# build, and the main run skips a release commit.
+#
 # Trigger discipline: push:main (sha-tagged), the release tag that
 # release-please cuts (`v*`), and workflow_dispatch. Never on a pull request,
 # and never on a schedule.
@@ -36,6 +43,9 @@ jobs:
 
   image:
     needs: plan
+    if: >-
+      github.event_name != 'push' || github.ref_type == 'tag' ||
+      !startsWith(github.event.head_commit.message, 'chore(main): release ')
     strategy:
       fail-fast: false
       matrix:
@@ -65,6 +75,9 @@ jobs:
   digests:
     name: digests
     needs: [plan, image]
+    if: >-
+      github.event_name != 'push' || github.ref_type == 'tag' ||
+      !startsWith(github.event.head_commit.message, 'chore(main): release ')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -87,13 +100,24 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          # The reusable build always pushes the tag sha-<7 characters of the commit>.
+          # A release tag run reads the version tag, for example 0.8.2. A main run
+          # reads the tag sha-<7 characters of the commit>, which the reusable build
+          # always pushes.
+          if [ "$REF_TYPE" = tag ]; then
+            IMAGE_TAG="${REF_NAME#v}"
+          else
+            IMAGE_TAG="sha-${GITHUB_SHA::7}"
+          fi
           # scripts/digest-table.sh puts an image with the label
           # ai.zeroroot.image-class=test in its own table. A failed inspect fails
           # the step, because the shell runs with pipefail.
-          scripts/digest-table.sh "$SERVERS" "sha-${GITHUB_SHA::7}" | tee table.md >> "$GITHUB_STEP_SUMMARY"
+          scripts/digest-table.sh "$SERVERS" "$IMAGE_TAG" | tee table.md >> "$GITHUB_STEP_SUMMARY"
           if [ "$REF_TYPE" = tag ]; then
             gh release view "$REF_NAME" --repo "$GITHUB_REPOSITORY" --json body -q .body > notes.md
-            { cat notes.md; echo; echo "## Image digests"; echo; cat table.md; } > notes-new.md
+            # A rerun replaces the old digest section, so the notes keep one.
+            scripts/notes-with-digests.sh notes.md table.md > notes-new.md
             gh release edit "$REF_NAME" --repo "$GITHUB_REPOSITORY" --notes-file notes-new.md
+            # Read the notes again. Each digest must equal the digest of the version tag.
+            gh release view "$REF_NAME" --repo "$GITHUB_REPOSITORY" --json body -q .body > notes-final.md
+            scripts/verify-notes.sh notes-final.md "$IMAGE_TAG" "$SERVERS"
           fi
