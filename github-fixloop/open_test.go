@@ -358,6 +358,87 @@ func TestCloseMergeRequestPostsTheCommentOnceAfterALostAnswer(t *testing.T) {
 	}
 }
 
+// pagedComments serves n comments, oldest first like GitHub, in pages of 100.
+// The comment i has the body "c-i". A list of more than one page has the Link
+// header with the last page. reads keeps the number of each page that was read.
+func pagedComments(n int, reads *[]int) handler {
+	pages := (n + 99) / 100
+	return func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		*reads = append(*reads, page)
+		if pages > 1 {
+			w.Header().Set("Link", `<https://api.github.com/repositories/1/issues/7/comments?per_page=100&page=`+
+				strconv.Itoa(pages)+`>; rel="last"`)
+		}
+		var items []string
+		for i := (page-1)*100 + 1; i <= min(page*100, n); i++ {
+			items = append(items, `{"body":"c-`+strconv.Itoa(i)+`"}`)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[" + strings.Join(items, ",") + "]"))
+	}
+}
+
+// The duplicate check reads page 1, then walks back from the last page, and it reads
+// at most MaxCommentPages pages. A page of exactly 100 comments is the whole list.
+func TestCloseMergeRequestFindsTheCommentOnTheNewestPages(t *testing.T) {
+	cases := []struct {
+		name      string
+		n         int
+		body      string
+		wantPosts int
+		wantReads []int
+	}{
+		{"match on page 2 of 2", 150, "c-150", 0, []int{1, 2}},
+		{"match on page 1 of 2", 150, "c-5", 0, []int{1}},
+		{"no match on 2 pages posts", 150, "other", 1, []int{1, 2}},
+		{"exactly 100 comments, match", 100, "c-100", 0, []int{1}},
+		{"exactly 100 comments, no match posts", 100, "other", 1, []int{1}},
+		{"101 comments, match on page 2", 101, "c-101", 0, []int{1, 2}},
+		{"25 pages, match on the newest page", 2500, "c-2500", 0, []int{1, 25}},
+		{"25 pages, match on page 1", 2500, "c-50", 0, []int{1}},
+		{"25 pages, match older than the bound posts", 2500, "c-300", 1,
+			[]int{1, 25, 24, 23, 22, 21, 20, 19, 18, 17}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var reads []int
+			m, call := setup(t, map[string]handler{
+				"GET " + pr7:                          reply(200, openPR("clean")),
+				"GET " + repo + "/issues/7/comments":  pagedComments(c.n, &reads),
+				"POST " + repo + "/issues/7/comments": reply(201, `{"id":1}`),
+				"PATCH " + pr7:                        reply(200, openPR("clean")),
+			})
+			isErr, text, out := call("close_merge_request", map[string]any{"merge_request": ref, "comment": c.body})
+			if isErr || out["closed"] != true {
+				t.Fatalf("isErr=%v %s %v", isErr, text, out)
+			}
+			if n := m.called("POST " + repo + "/issues/7/comments"); n != c.wantPosts {
+				t.Errorf("posts = %d, want %d", n, c.wantPosts)
+			}
+			// A match ends the reads at once, so the reads are a prefix of the walk.
+			if len(reads) > fixloop.MaxCommentPages {
+				t.Errorf("%d reads, want at most %d", len(reads), fixloop.MaxCommentPages)
+			}
+			if len(c.wantReads) > 0 && !slicesEqual(reads, c.wantReads) {
+				t.Errorf("reads = %v, want %v", reads, c.wantReads)
+			}
+		})
+	}
+}
+
+func slicesEqual(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestCloseMergeRequestPostsNoCommentOnAClosedOne(t *testing.T) {
 	m, call := setup(t, map[string]handler{"GET " + pr7: reply(200, pullJSON("closed", false, "null", "unknown", headSHA))})
 	isErr, _, out := call("close_merge_request", map[string]any{"merge_request": ref, "comment": "job j1 failed"})

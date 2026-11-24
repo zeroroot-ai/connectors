@@ -578,26 +578,75 @@ func (v *service) checkModes(ctx context.Context, r prRef, commit string, in fix
 // hasComment reports whether the pull request holds a comment with exactly this
 // body. The caller makes the body unique, so a match is the comment of an
 // earlier call.
+//
+// GitHub lists the comments of a pull request oldest first. A comment of an
+// earlier call is among the newest, so the tool reads page 1, which also gives
+// the Link header, and then walks back from the last page. It makes at most
+// MaxCommentPages reads. A pull request with more comments than that is read
+// from its newest end, and the oldest comments after page 1 are not read.
 func (v *service) hasComment(ctx context.Context, r prRef, body string) (bool, error) {
-	for page := 1; page <= fixloop.MaxCommentPages; page++ {
-		var list []struct {
-			Body string `json:"body"`
+	var hdr http.Header
+	list, err := v.commentPage(ctx, r, 1, &hdr)
+	if err != nil {
+		return false, err
+	}
+	if containsBody(list, body) {
+		return true, nil
+	}
+	last := lastPageOf(hdr.Get("Link"))
+	for page := last; page >= 2 && last-page < fixloop.MaxCommentPages-1; page-- {
+		if list, err = v.commentPage(ctx, r, page, nil); err != nil {
+			return false, err
 		}
-		err := v.client.Do(ctx, kit.Request{
-			Method: http.MethodGet, Path: repoPath(r, "issues", strconv.Itoa(r.number), "comments"),
-			Query: url.Values{"per_page": {strconv.Itoa(fixloop.CommentPageSize)}, "page": {strconv.Itoa(page)}},
-		}, &list)
-		if err != nil {
-			return false, fmt.Errorf("read the comments: %w", err)
-		}
-		for _, c := range list {
-			if c.Body == body {
-				return true, nil
-			}
-		}
-		if len(list) < fixloop.CommentPageSize {
-			return false, nil
+		if containsBody(list, body) {
+			return true, nil
 		}
 	}
 	return false, nil
+}
+
+type commentItem struct {
+	Body string `json:"body"`
+}
+
+func containsBody(list []commentItem, body string) bool {
+	for _, c := range list {
+		if c.Body == body {
+			return true
+		}
+	}
+	return false
+}
+
+func (v *service) commentPage(ctx context.Context, r prRef, page int, hdr *http.Header) ([]commentItem, error) {
+	var list []commentItem
+	err := v.client.Do(ctx, kit.Request{
+		Method: http.MethodGet, Path: repoPath(r, "issues", strconv.Itoa(r.number), "comments"),
+		Query:          url.Values{"per_page": {strconv.Itoa(fixloop.CommentPageSize)}, "page": {strconv.Itoa(page)}},
+		ResponseHeader: hdr,
+	}, &list)
+	if err != nil {
+		return nil, fmt.Errorf("read the comments: %w", err)
+	}
+	return list, nil
+}
+
+// lastPageOf returns the page number of the rel="last" link of a Link header.
+// It returns 1 when the header has none, which means one page.
+func lastPageOf(link string) int {
+	for _, seg := range strings.Split(link, ",") {
+		parts := strings.Split(seg, ";")
+		if len(parts) < 2 || !strings.Contains(parts[1], `rel="last"`) {
+			continue
+		}
+		raw := strings.Trim(strings.TrimSpace(parts[0]), "<>")
+		u, err := url.Parse(raw)
+		if err != nil {
+			return 1
+		}
+		if n, err := strconv.Atoi(u.Query().Get("page")); err == nil && n >= 1 {
+			return n
+		}
+	}
+	return 1
 }

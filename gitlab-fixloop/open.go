@@ -396,9 +396,15 @@ func (v *service) hasComment(ctx context.Context, project string, iid int, body 
 		var list []struct {
 			Body string `json:"body"`
 		}
+		var hdr http.Header
 		err := v.client.Do(ctx, kit.Request{
-			Method: http.MethodGet, Path: mrPath(project, iid, "notes"),
-			Query: url.Values{"per_page": {strconv.Itoa(fixloop.CommentPageSize)}, "page": {strconv.Itoa(page)}},
+			Method: http.MethodGet, Path: mrPath(project, iid, "notes"), ResponseHeader: &hdr,
+			// GitLab lists the notes newest first when the order is explicit, so the
+			// notes of an earlier call are on the first pages.
+			Query: url.Values{
+				"per_page": {strconv.Itoa(fixloop.CommentPageSize)}, "page": {strconv.Itoa(page)},
+				"order_by": {"created_at"}, "sort": {"desc"},
+			},
 		}, &list)
 		if err != nil {
 			return false, fmt.Errorf("read the notes: %w", err)
@@ -408,7 +414,9 @@ func (v *service) hasComment(ctx context.Context, project string, iid int, body 
 				return true, nil
 			}
 		}
-		if len(list) < fixloop.CommentPageSize {
+		// GitLab names the next page in X-Next-Page. A page of exactly 100 notes
+		// with no next page is the whole list.
+		if hdr.Get("X-Next-Page") == "" {
 			return false, nil
 		}
 	}

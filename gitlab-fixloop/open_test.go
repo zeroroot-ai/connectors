@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -343,6 +344,63 @@ func TestCloseMergeRequestPostsTheCommentOnceAfterALostAnswer(t *testing.T) {
 	}
 	if n := m.called("POST " + api + mr7 + "/notes"); n != 1 {
 		t.Errorf("the comment was posted %d times, want once", n)
+	}
+}
+
+// GitLab gets the notes newest first, and the tool reads at most MaxCommentPages
+// pages. A match on page 2 is found, and a page of exactly 100 notes ends the read.
+func TestCloseMergeRequestFindsTheNoteOnTheNewestPages(t *testing.T) {
+	cases := []struct {
+		name      string
+		n         int
+		body      string
+		wantPosts int
+		wantReads int
+	}{
+		{"match on page 1, the newest", 150, "n-120", 0, 1},
+		{"match on page 2", 150, "n-1", 0, 2},
+		{"exactly 100 notes, no match posts", 100, "other", 1, 1},
+		{"101 notes, no match posts", 101, "other", 1, 2},
+		{"more pages than the bound, no match posts", 2500, "other", 1, fixloop.MaxCommentPages},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var reads int
+			var query url.Values
+			m, call := setup(t, routeMap{
+				"GET " + api + mr7: reply(200, openMR("success", "mergeable")),
+				"GET " + api + mr7 + "/notes": func(w http.ResponseWriter, r *http.Request, _ map[string]any) {
+					reads++
+					query = r.URL.Query()
+					page, _ := strconv.Atoi(query.Get("page"))
+					var items []string
+					for k := (page-1)*100 + 1; k <= min(page*100, c.n); k++ {
+						// Newest first: the note n-N is the newest on page 1.
+						items = append(items, `{"body":"n-`+strconv.Itoa(c.n-k+1)+`"}`)
+					}
+					if page*100 < c.n {
+						w.Header().Set("X-Next-Page", strconv.Itoa(page+1))
+					}
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte("[" + strings.Join(items, ",") + "]"))
+				},
+				"POST " + api + mr7 + "/notes": reply(201, `{"id":1}`),
+				"PUT " + api + mr7:             reply(200, openMR("success", "mergeable")),
+			})
+			isErr, text, out := call("close_merge_request", map[string]any{"merge_request": ref, "comment": c.body})
+			if isErr || out["closed"] != true {
+				t.Fatalf("isErr=%v %s %v", isErr, text, out)
+			}
+			if n := m.called("POST " + api + mr7 + "/notes"); n != c.wantPosts {
+				t.Errorf("posts = %d, want %d", n, c.wantPosts)
+			}
+			if reads != c.wantReads {
+				t.Errorf("reads = %d, want %d", reads, c.wantReads)
+			}
+			if query.Get("order_by") != "created_at" || query.Get("sort") != "desc" {
+				t.Errorf("query = %v, want the newest first", query)
+			}
+		})
 	}
 }
 
