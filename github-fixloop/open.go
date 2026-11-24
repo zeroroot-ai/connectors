@@ -49,7 +49,7 @@ func (v *service) registerOpen(s *mcp.Server, log *slog.Logger) {
 	kit.AddTool(s, log, &mcp.Tool{
 		Name: "close_merge_request",
 		Description: "Close one open GitHub pull request with no merge. It does not delete the branch. " +
-			"With a comment, it posts the comment on the pull request first, and posts nothing on a closed one. " +
+			"With a comment, it posts the comment on the pull request first, unless a comment with the same text is there, and posts nothing on a closed one. " +
 			"It refuses a pull request that is merged. A pull request that is closed already is not an error. " +
 			"This is the undo of open_merge_request. A person can reopen the pull request. No tool of this server reopens it.",
 		Annotations: kit.Reversible("Close GitHub pull request", true),
@@ -77,9 +77,17 @@ func (v *service) closeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest,
 		out.State = fixloop.Closed
 		return nil, out, nil
 	}
+	posted := false
 	if in.Comment != "" {
-		// A comment is not idempotent, so the client never repeats it. The
-		// answer of a lost write is outcome_unknown.
+		posted, err = v.hasComment(ctx, r, in.Comment)
+		if err != nil {
+			return nil, out, err
+		}
+	}
+	if in.Comment != "" && !posted {
+		// A comment is not idempotent, so the client never repeats it. The tool
+		// reads the comments first, so a repeat of the whole call after a lost
+		// answer posts the comment once.
 		err = v.client.Do(ctx, kit.Request{
 			Method: http.MethodPost, Path: repoPath(r, "issues", strconv.Itoa(r.number), "comments"),
 			JSON: map[string]any{"body": in.Comment},
@@ -565,4 +573,31 @@ func (v *service) checkModes(ctx context.Context, r prRef, commit string, in fix
 		}
 	}
 	return "", nil
+}
+
+// hasComment reports whether the pull request holds a comment with exactly this
+// body. The caller makes the body unique, so a match is the comment of an
+// earlier call.
+func (v *service) hasComment(ctx context.Context, r prRef, body string) (bool, error) {
+	for page := 1; page <= fixloop.MaxCommentPages; page++ {
+		var list []struct {
+			Body string `json:"body"`
+		}
+		err := v.client.Do(ctx, kit.Request{
+			Method: http.MethodGet, Path: repoPath(r, "issues", strconv.Itoa(r.number), "comments"),
+			Query: url.Values{"per_page": {strconv.Itoa(fixloop.CommentPageSize)}, "page": {strconv.Itoa(page)}},
+		}, &list)
+		if err != nil {
+			return false, fmt.Errorf("read the comments: %w", err)
+		}
+		for _, c := range list {
+			if c.Body == body {
+				return true, nil
+			}
+		}
+		if len(list) < fixloop.CommentPageSize {
+			return false, nil
+		}
+	}
+	return false, nil
 }

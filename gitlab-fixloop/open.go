@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -40,7 +41,7 @@ func (v *service) registerOpen(s *mcp.Server, log *slog.Logger) {
 	kit.AddTool(s, log, &mcp.Tool{
 		Name: "close_merge_request",
 		Description: "Close one open GitLab merge request with no merge. It does not delete the branch. " +
-			"With a comment, it posts the comment on the merge request first, and posts nothing on a closed one. " +
+			"With a comment, it posts the comment on the merge request first, unless a note with the same text is there, and posts nothing on a closed one. " +
 			"It refuses a merge request that is merged. A merge request that is closed already is not an error. " +
 			"This is the undo of open_merge_request. A person can reopen the merge request. No tool of this server reopens it.",
 		Annotations: kit.Reversible("Close GitLab merge request", true),
@@ -68,9 +69,17 @@ func (v *service) closeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest,
 		out.State = fixloop.Closed
 		return nil, out, nil
 	}
+	posted := false
 	if in.Comment != "" {
-		// A note is not idempotent, so the client never repeats it. The answer
-		// of a lost write is outcome_unknown.
+		posted, err = v.hasComment(ctx, project, iid, in.Comment)
+		if err != nil {
+			return nil, out, err
+		}
+	}
+	if in.Comment != "" && !posted {
+		// A note is not idempotent, so the client never repeats it. The tool
+		// reads the notes first, so a repeat of the whole call after a lost
+		// answer posts the comment once.
 		err = v.client.Do(ctx, kit.Request{
 			Method: http.MethodPost, Path: mrPath(project, iid, "notes"),
 			JSON: map[string]any{"body": in.Comment},
@@ -377,4 +386,31 @@ func (v *service) blobAt(ctx context.Context, project, path, ref string) (string
 		return "", fmt.Errorf("read the blob of %s: %w", path, err)
 	}
 	return f.BlobID, nil
+}
+
+// hasComment reports whether the merge request holds a note with exactly this
+// body. The caller makes the body unique, so a match is the comment of an
+// earlier call.
+func (v *service) hasComment(ctx context.Context, project string, iid int, body string) (bool, error) {
+	for page := 1; page <= fixloop.MaxCommentPages; page++ {
+		var list []struct {
+			Body string `json:"body"`
+		}
+		err := v.client.Do(ctx, kit.Request{
+			Method: http.MethodGet, Path: mrPath(project, iid, "notes"),
+			Query: url.Values{"per_page": {strconv.Itoa(fixloop.CommentPageSize)}, "page": {strconv.Itoa(page)}},
+		}, &list)
+		if err != nil {
+			return false, fmt.Errorf("read the notes: %w", err)
+		}
+		for _, c := range list {
+			if c.Body == body {
+				return true, nil
+			}
+		}
+		if len(list) < fixloop.CommentPageSize {
+			return false, nil
+		}
+	}
+	return false, nil
 }

@@ -129,7 +129,10 @@ func TestErrorClassLostAnswerOfEachWriteTool(t *testing.T) {
 		t.Errorf("close_merge_request: %+v %s", cl, text)
 	}
 	// close_merge_request with a comment: the note is a POST that the client does not repeat.
-	routes = routeMap{"GET " + api + mr7: reply(200, openMR("success", "mergeable")), "POST " + api + mr7 + "/notes": dropped}
+	routes = routeMap{
+		"GET " + api + mr7: reply(200, openMR("success", "mergeable")), "GET " + api + mr7 + "/notes": reply(200, `[]`),
+		"POST " + api + mr7 + "/notes": dropped,
+	}
 	if cl, text := classCall(t, routes, "close_merge_request", map[string]any{"merge_request": ref, "comment": "c"}); cl.Class != kit.ClassOutcomeUnknown {
 		t.Errorf("close_merge_request comment: %+v %s", cl, text)
 	}

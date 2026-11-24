@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -307,6 +308,7 @@ func TestCloseMergeRequest(t *testing.T) {
 func TestCloseMergeRequestPostsTheCommentFirst(t *testing.T) {
 	m, call := setup(t, map[string]handler{
 		"GET " + pr7:                          reply(200, openPR("clean")),
+		"GET " + repo + "/issues/7/comments":  reply(200, `[{"body":"another comment"}]`),
 		"POST " + repo + "/issues/7/comments": reply(201, `{"id":1}`),
 		"PATCH " + pr7:                        reply(200, openPR("clean")),
 	})
@@ -317,8 +319,42 @@ func TestCloseMergeRequestPostsTheCommentFirst(t *testing.T) {
 	if body := m.bodies["POST "+repo+"/issues/7/comments"]; body["body"] != "job j1 failed" || len(body) != 1 {
 		t.Errorf("comment body = %v", body)
 	}
-	if got := m.calls; len(got) != 3 || !strings.HasPrefix(got[1], "POST") || !strings.HasPrefix(got[2], "PATCH") {
+	if got := m.calls; len(got) != 4 || !strings.HasPrefix(got[1], "GET") || !strings.HasPrefix(got[2], "POST") ||
+		!strings.HasPrefix(got[3], "PATCH") {
 		t.Errorf("calls = %v, want the comment before the close", got)
+	}
+}
+
+// A comment with the same body is posted once. A repeat of the call, such as
+// the retry after a lost answer, finds the comment and posts nothing.
+func TestCloseMergeRequestPostsTheCommentOnceAfterALostAnswer(t *testing.T) {
+	var stored []string
+	m, call := setup(t, map[string]handler{
+		"GET " + pr7: reply(200, openPR("clean")),
+		"GET " + repo + "/issues/7/comments": func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+			items := make([]string, 0, len(stored))
+			for _, b := range stored {
+				items = append(items, `{"body":`+strconv.Quote(b)+`}`)
+			}
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte("[" + strings.Join(items, ",") + "]"))
+		},
+		"POST " + repo + "/issues/7/comments": func(w http.ResponseWriter, r *http.Request, body map[string]any) {
+			stored = append(stored, body["body"].(string)) // the write ran, and the answer is lost
+			dropped(w, r, body)
+		},
+		"PATCH " + pr7: reply(200, openPR("clean")),
+	})
+	args := map[string]any{"merge_request": ref, "comment": "Fix job job-1 failed."}
+	if isErr, _, _ := call("close_merge_request", args); !isErr {
+		t.Fatal("the lost answer was not an error")
+	}
+	isErr, text, out := call("close_merge_request", args)
+	if isErr || out["closed"] != true {
+		t.Fatalf("retry: isErr=%v %s %v", isErr, text, out)
+	}
+	if n := m.called("POST " + repo + "/issues/7/comments"); n != 1 {
+		t.Errorf("the comment was posted %d times, want once", n)
 	}
 }
 

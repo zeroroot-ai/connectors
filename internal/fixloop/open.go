@@ -132,6 +132,13 @@ func CheckOpen(in OpenInput) error {
 	return nil
 }
 
+// The list of comments of a merge request is read in pages of CommentPageSize,
+// for at most MaxCommentPages pages, to find a comment that is posted already.
+const (
+	CommentPageSize = 100
+	MaxCommentPages = 10
+)
+
 // CheckComment refuses a comment that is too long or is not valid UTF-8. An
 // empty comment is allowed.
 func CheckComment(c string) error {
