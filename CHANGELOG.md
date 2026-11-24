@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.0](https://github.com/zeroroot-ai/connectors/compare/v0.8.2...v0.9.0) (2026-11-24)
+
+
+### Features
+
+* **fixloop:** close_merge_request takes an optional comment ([#44](https://github.com/zeroroot-ai/connectors/issues/44)) ([a0317ff](https://github.com/zeroroot-ai/connectors/commit/a0317ff64c5fb0b22db55cbb3733f7ab257f088d))
+
+
+### Bug Fixes
+
+* **release:** build each release image once and list the version tag digest ([#42](https://github.com/zeroroot-ai/connectors/issues/42)) ([05adcf1](https://github.com/zeroroot-ai/connectors/commit/05adcf129e9febaf5afde9b11adb247b8c82e2ce))
+
 ## [0.8.2](https://github.com/zeroroot-ai/connectors/compare/v0.8.1...v0.8.2) (2026-11-23)
 
 
